@@ -90,4 +90,23 @@ struct ConfigurationInstance {
 
 }  // namespace strucpp
 
+// ---------------------------------------------------------------------------
+// Debug probe ABI 1 (mirror of debug_probe.hpp). The program owns each frame
+// (a stack object in its probed clone); the runtime's debug agent links it.
+// ---------------------------------------------------------------------------
+
+#define STRUCPP_DBG_ABI_VERSION_SUPPORTED 1u
+
+extern "C" {
+struct strucpp_dbg_frame {
+    struct strucpp_dbg_frame *prev;
+    const void *self;
+    void       *locals;
+    uint32_t    pou;
+    uint32_t    at;
+    uint32_t    gen;
+    uint8_t     linked;
+};
+}
+
 #endif  // OPENPLC_STRUCPP_ABI_HPP

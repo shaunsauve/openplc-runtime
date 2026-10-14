@@ -1,0 +1,796 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Autonomy®
+
+/**
+ * @file test_run_control.cpp
+ * @brief Host test: breakpoints, pause, resume and stop over the core link (ADR-001 D2, D4, D7,
+ *        D11; ADR-003 D1.3, D9). Criteria: A031 A032 A033 A034 A047 (the core's part).
+ *
+ * Runs the real state manager, dispatcher, image tables, debug agent and core link against a fake
+ * 20 ms program whose statements carry probes exactly as STruCpp emits them (a relaxed flag-byte
+ * load, strucpp_dbg_hit when non-zero, a frame linked while a session is attached). The test is a
+ * client of the core link's unix socket, speaking length-prefixed JSON, and reads the output image
+ * (what a plugin sees) as the plant.
+ *
+ * See also:
+ *   tests/host/test_breakpoint_table.cpp - the table alone, under ThreadSanitizer.
+ *   core/src/plc_app/debug_link.cpp - the core link this test drives.
+ *   tests/debug/plant/runctl_e2e.py - the same scenarios against a real plc_main and a probed corpus program.
+ */
+
+// NO-FOLD: runtime-core
+
+#include "../../core/src/lib/strucpp_abi.hpp"
+#include "../../core/src/plc_app/debug_agent.h"
+#include "../../core/src/plc_app/debug_link.h"
+#include "../../core/src/plc_app/plc_state_manager.h"
+
+extern "C" {
+#include "../../core/src/drivers/plugin_driver.h"
+#include "../../core/src/drivers/plugins/native/cjson/cJSON.h"
+#include "../../core/src/plc_app/unix_socket.h"
+void handle_unix_socket_commands(const char *command, char *response, size_t response_size);
+}
+#include "../../core/src/plc_app/image_tables.h"
+
+#include <algorithm>
+#include <atomic>
+#include <csignal>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <functional>
+#include <mutex>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+// ---------------------------------------------------------------------------
+// Stubs for what the core links against in plc_main
+// ---------------------------------------------------------------------------
+
+static bool            g_verbose = getenv("VERBOSE") != nullptr;
+static plugin_driver_t g_fake_driver;
+
+static void vlog(const char *lvl, const char *fmt, va_list ap)
+{
+    if (!g_verbose) return;
+    std::fprintf(stderr, "    [%s] ", lvl);
+    std::vfprintf(stderr, fmt, ap);
+    std::fprintf(stderr, "\n");
+}
+
+extern "C" {
+void log_info(const char *f, ...) { va_list a; va_start(a, f); vlog("info", f, a); va_end(a); }
+void log_warn(const char *f, ...) { va_list a; va_start(a, f); vlog("warn", f, a); va_end(a); }
+void log_error(const char *f, ...) { va_list a; va_start(a, f); vlog("error", f, a); va_end(a); }
+void log_debug(const char *, ...) {}
+
+volatile sig_atomic_t keep_running  = 1;
+plugin_driver_t      *plugin_driver = &g_fake_driver;
+
+int plugin_driver_update_config(plugin_driver_t *, const char *) { return 0; }
+int plugin_driver_append_config(plugin_driver_t *, const char *) { return 0; }
+int plugin_driver_init(plugin_driver_t *) { return 0; }
+int plugin_driver_cleanup_init(plugin_driver_t *) { return 0; }
+int plugin_driver_start(plugin_driver_t *) { return 0; }
+int plugin_driver_stop(plugin_driver_t *) { return 0; }
+void plugin_driver_cycle_start(plugin_driver_t *) {}
+void plugin_driver_cycle_end(plugin_driver_t *) {}
+size_t plugin_driver_append_stats_json(plugin_driver_t *, char *, size_t) { return 0; }
+size_t process_debug_data(uint8_t *, size_t) { return 0; }
+int plugin_driver_execute_command(plugin_driver_t *, const char *, const char *, char *, size_t)
+{
+    return -1;
+}
+
+void watchdog_feed(void) {}
+void watchdog_dispatcher_started(int64_t) {}
+void watchdog_dispatcher_stopped(void) {}
+void watchdog_set_fault_context(const char *) {}
+void watchdog_fatal_exit(const char *reason)
+{
+    std::printf("  FAIL  watchdog_fatal_exit: %s\n", reason);
+    std::fflush(stdout);
+    _exit(98);
+}
+
+void plc_retain_init(void) {}
+void plc_retain_read(void) {}
+void plc_retain_save(void) {}
+void plc_retain_flush(void) {}
+void debug_write_journal_drain(void) {}
+void debug_write_journal_reset(void) {}
+}
+
+// ---------------------------------------------------------------------------
+// Fake probed program: one 20 ms task
+// ---------------------------------------------------------------------------
+
+static const int64_t kMs       = 1000000;
+static const int64_t kTaskNs   = 20 * kMs;
+static const int64_t kDwellNs  = 100 * kMs;
+/* Probes the program reaches; the flag array is larger so the table can be filled (A032). */
+static const uint32_t kProbes  = 2048;
+enum : uint32_t { P_WITNESS = 0, P_K = 1, P_OUT = 2, P_DWELL = 3, P_L = 4 };
+
+static volatile uint8_t g_flags[kProbes];
+static uint8_t          g_active = 0;
+
+extern "C" {
+static uint8_t *fk_active_addr(void) { return &g_active; }
+static uint32_t fk_probe_count(void) { return kProbes; }
+static uint32_t fk_abi_version(void) { return 1; }
+static int      fk_lock_depth(void) { return 0; }
+void            strucpp_dbg_hit(uint32_t probe);
+void            strucpp_dbg_frame_link(strucpp_dbg_frame *f);
+void            strucpp_dbg_frame_unlink(strucpp_dbg_frame *f);
+}
+
+static int64_t mono_ns(void)
+{
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+/* STRUCPP_PROBE(id) under STRUCPP_THREADED. */
+static inline void probe(uint32_t id)
+{
+    if (__builtin_expect(__atomic_load_n(&g_flags[id], __ATOMIC_RELAXED) != 0, 0))
+        strucpp_dbg_hit(id);
+}
+
+/* strucpp::dbg::Frame. */
+struct Frame : strucpp_dbg_frame
+{
+    explicit Frame(const void *s)
+    {
+        linked = 0;
+        at     = 0;
+        if (*static_cast<volatile uint8_t *>(&g_active) & 1u)
+        {
+            pou    = 0;
+            self   = s;
+            locals = nullptr;
+            strucpp_dbg_frame_link(this);
+        }
+    }
+    ~Frame()
+    {
+        if (linked) strucpp_dbg_frame_unlink(this);
+    }
+};
+
+static uint16_t m_witness, m_counter;
+
+/* Mirrors of program storage the test reads while the task is parked or between scans. */
+static std::atomic<int> g_witness_st{0}, g_counter_st{0};
+static std::atomic<long> g_scans{0};
+static std::atomic<bool> g_dwell{false}, g_in_dwell{false};
+
+struct Prog : strucpp::ProgramBase
+{
+    void run() override
+    {
+        Frame f(this);
+        probe(P_WITNESS);
+        m_witness   = (uint16_t)(m_witness + 1);
+        g_witness_st = m_witness;
+        probe(P_K);
+        m_counter   = (uint16_t)(m_counter + 1);
+        g_counter_st = m_counter;
+        probe(P_OUT);
+        if (g_dwell.load())
+        {
+            const int64_t t0 = mono_ns();
+            g_in_dwell       = true;
+            while ((probe(P_DWELL), mono_ns() - t0 < kDwellNs)) {}
+            g_in_dwell = false;
+        }
+        probe(P_L);
+        g_scans++;
+    }
+    void located_range(uint32_t *o, uint32_t *c) const override
+    {
+        *o = 0;
+        *c = 2;
+    }
+};
+
+static Prog                  g_prog;
+static strucpp::ProgramBase *g_progs[] = {&g_prog};
+static strucpp::TaskInstance g_tasks[] = {{"Main", kTaskNs, 1, g_progs, 1}};
+static strucpp::ResourceInstance g_res[] = {{"res", "cpu", g_tasks, 1}};
+
+struct FakeConfig : strucpp::ConfigurationInstance
+{
+    const char *get_name() const override { return "cfg"; }
+    strucpp::ResourceInstance *get_resources() override { return g_res; }
+    size_t get_resource_count() const override { return 1; }
+};
+static FakeConfig g_cfg;
+
+using A = strucpp::LocatedArea;
+using S = strucpp::LocatedSize;
+static strucpp::LocatedVar g_lv[] = {
+    {A::Output, S::Word, 0, 0, {}, &m_witness},
+    {A::Output, S::Word, 1, 0, {}, &m_counter},
+};
+
+static char g_md5[33] = "0123456789abcdef0123456789abcdef";
+
+extern "C" {
+static void fk_advance(uint64_t) {}
+static void fk_set_time(int64_t) {}
+static strucpp::ConfigurationInstance *fk_config(void) { return &g_cfg; }
+static const strucpp::LocatedVar *fk_lv(void) { return g_lv; }
+static uint32_t fk_lv_count(void) { return 2; }
+static uint8_t  fk_arr_count(void) { return 0; }
+static uint16_t fk_elem_count(uint8_t) { return 0; }
+static uint16_t fk_size(uint8_t, uint16_t) { return 0; }
+static uint8_t  fk_set(uint8_t, uint16_t, bool, const uint8_t *, uint16_t) { return 0; }
+static uint16_t fk_read(uint8_t, uint16_t, uint8_t *) { return 0; }
+static uint8_t  fk_write(uint8_t, uint16_t, const uint8_t *, uint16_t) { return 0; }
+
+static char g_pm_storage[16];
+
+char *find_libplc_file(const char *) { return strdup("libplc_fake.so"); }
+PluginManager *plugin_manager_create(const char *)
+{
+    return reinterpret_cast<PluginManager *>(g_pm_storage);
+}
+bool plugin_manager_load(PluginManager *) { return true; }
+void plugin_manager_destroy(PluginManager *) {}
+void *plugin_manager_get_symbol(PluginManager *, const char *n)
+{
+    struct { const char *name; void *fn; } t[] = {
+        {"strucpp_advance_time", (void *)fk_advance},
+        {"strucpp_set_current_time", (void *)fk_set_time},
+        {"strucpp_get_config", (void *)fk_config},
+        {"strucpp_get_located_vars", (void *)fk_lv},
+        {"strucpp_get_located_var_count", (void *)fk_lv_count},
+        {"strucpp_debug_array_count", (void *)fk_arr_count},
+        {"strucpp_debug_elem_count", (void *)fk_elem_count},
+        {"strucpp_debug_size", (void *)fk_size},
+        {"strucpp_debug_set", (void *)fk_set},
+        {"strucpp_debug_read", (void *)fk_read},
+        {"strucpp_debug_write", (void *)fk_write},
+        {"strucpp_program_md5", (void *)g_md5},
+    };
+    for (auto &e : t)
+        if (std::strcmp(e.name, n) == 0) return e.fn;
+    return nullptr;
+}
+void *plugin_manager_try_get_symbol(PluginManager *, const char *n)
+{
+    struct { const char *name; void *fn; } t[] = {
+        {"strucpp_dbg_flags", (void *)g_flags},
+        {"strucpp_dbg_active_addr", (void *)fk_active_addr},
+        {"strucpp_dbg_probe_count", (void *)fk_probe_count},
+        {"strucpp_dbg_abi_version", (void *)fk_abi_version},
+        {"strucpp_dbg_lock_depth", (void *)fk_lock_depth},
+    };
+    for (auto &e : t)
+        if (std::strcmp(e.name, n) == 0) return e.fn;
+    return nullptr;
+}
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+static int         g_failures = 0;
+static const char *g_case     = "";
+
+#define CHECK(cond, ...)                                                                           \
+    do                                                                                             \
+    {                                                                                              \
+        if (!(cond))                                                                               \
+        {                                                                                          \
+            std::printf("  FAIL  [%s] ", g_case);                                                  \
+            std::printf(__VA_ARGS__);                                                              \
+            std::printf("\n");                                                                     \
+            g_failures++;                                                                          \
+        }                                                                                          \
+    } while (0)
+
+static void sleep_ms(int ms)
+{
+    timespec t = {ms / 1000, (long)(ms % 1000) * 1000000L};
+    nanosleep(&t, nullptr);
+}
+
+static bool wait_for(const std::function<bool()> &pred, int timeout_ms)
+{
+    for (int i = 0; i < timeout_ms; i += 1)
+    {
+        if (pred()) return true;
+        sleep_ms(1);
+    }
+    return pred();
+}
+
+static std::string cmd(const char *c)
+{
+    char buf[512] = {0};
+    handle_unix_socket_commands(c, buf, sizeof buf);
+    std::string s(buf);
+    while (!s.empty() && s.back() == '\n') s.pop_back();
+    return s;
+}
+
+/* The plant's view: the output image, under the image lock as a plugin reads it. */
+static int plant_word(int idx)
+{
+    image_lock();
+    int v = int_output[idx] ? *int_output[idx] : -1;
+    image_unlock();
+    return v;
+}
+
+// ---- Core-link client: u32 BE length + JSON ----
+
+struct Msg
+{
+    int64_t t_ns;
+    cJSON  *j;
+};
+
+struct Link
+{
+    int               fd = -1;
+    std::thread       rd;
+    std::mutex        mu;
+    std::vector<Msg>  msgs;
+    std::atomic<bool> closed{false};
+    int               seq = 0;
+
+    bool open(const char *path)
+    {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un a{};
+        a.sun_family = AF_UNIX;
+        std::snprintf(a.sun_path, sizeof a.sun_path, "%s", path);
+        for (int i = 0; i < 200; ++i)
+        {
+            if (connect(fd, (sockaddr *)&a, sizeof a) == 0)
+            {
+                rd = std::thread([this] { reader(); });
+                return true;
+            }
+            sleep_ms(10);
+        }
+        return false;
+    }
+    void reader()
+    {
+        for (;;)
+        {
+            uint32_t be;
+            if (!read_all(&be, 4)) break;
+            std::string body(ntohl(be), '\0');
+            if (!read_all(&body[0], body.size())) break;
+            cJSON *j = cJSON_Parse(body.c_str());
+            std::lock_guard<std::mutex> g(mu);
+            msgs.push_back({mono_ns(), j});
+        }
+        closed = true;
+    }
+    bool read_all(void *p, size_t n)
+    {
+        char *c = static_cast<char *>(p);
+        while (n)
+        {
+            ssize_t r = ::read(fd, c, n);
+            if (r <= 0) return false;
+            c += r;
+            n -= (size_t)r;
+        }
+        return true;
+    }
+    int send(const char *command, const char *args_json)
+    {
+        char buf[65536];
+        int  s = ++seq;
+        int  n = std::snprintf(buf, sizeof buf,
+                               "{\"type\":\"request\",\"seq\":%d,\"command\":\"%s\",\"arguments\":%s}", s,
+                               command, args_json ? args_json : "{}");
+        uint32_t be = htonl((uint32_t)n);
+        (void)!::write(fd, &be, 4);
+        (void)!::write(fd, buf, (size_t)n);
+        return s;
+    }
+    /* Waits for the response to a request; nullptr on timeout. */
+    cJSON *response(int s, int timeout_ms = 2000)
+    {
+        cJSON *r = nullptr;
+        wait_for([&] {
+            std::lock_guard<std::mutex> g(mu);
+            for (auto &m : msgs)
+            {
+                cJSON *rs = cJSON_GetObjectItem(m.j, "request_seq");
+                if (rs && rs->valueint == s) { r = m.j; return true; }
+            }
+            return false;
+        }, timeout_ms);
+        return r;
+    }
+    cJSON *call(const char *command, const char *args_json = nullptr, int timeout_ms = 2000)
+    {
+        return response(send(command, args_json), timeout_ms);
+    }
+    size_t mark()
+    {
+        std::lock_guard<std::mutex> g(mu);
+        return msgs.size();
+    }
+    /* First event named `name` received at or after index `from` that pred accepts. */
+    bool event(size_t from, const char *name, Msg *out, int timeout_ms,
+               const std::function<bool(cJSON *)> &pred = nullptr)
+    {
+        return wait_for([&] {
+            std::lock_guard<std::mutex> g(mu);
+            for (size_t i = from; i < msgs.size(); ++i)
+            {
+                cJSON *e = cJSON_GetObjectItem(msgs[i].j, "event");
+                if (!e || !cJSON_IsString(e) || std::strcmp(e->valuestring, name) != 0) continue;
+                cJSON *b = cJSON_GetObjectItem(msgs[i].j, "body");
+                if (pred && !pred(b)) continue;
+                if (out) *out = msgs[i];
+                return true;
+            }
+            return false;
+        }, timeout_ms);
+    }
+    int count(size_t from, const char *name)
+    {
+        std::lock_guard<std::mutex> g(mu);
+        int n = 0;
+        for (size_t i = from; i < msgs.size(); ++i)
+        {
+            cJSON *e = cJSON_GetObjectItem(msgs[i].j, "event");
+            if (e && cJSON_IsString(e) && std::strcmp(e->valuestring, name) == 0) n++;
+        }
+        return n;
+    }
+};
+
+static bool ok(cJSON *r)
+{
+    cJSON *s = r ? cJSON_GetObjectItem(r, "success") : nullptr;
+    return s && cJSON_IsTrue(s);
+}
+
+static const char *err_code(cJSON *r)
+{
+    cJSON *e = r ? cJSON_GetObjectItem(r, "error") : nullptr;
+    cJSON *c = e ? cJSON_GetObjectItem(e, "code") : nullptr;
+    return c && cJSON_IsString(c) ? c->valuestring : "";
+}
+
+static int body_int(cJSON *m, const char *key)
+{
+    cJSON *b = m ? cJSON_GetObjectItem(m, "body") : nullptr;
+    cJSON *v = b ? cJSON_GetObjectItem(b, key) : nullptr;
+    return v && cJSON_IsNumber(v) ? v->valueint : -1;
+}
+
+static std::string body_str(cJSON *m, const char *key)
+{
+    cJSON *b = m ? cJSON_GetObjectItem(m, "body") : nullptr;
+    cJSON *v = b ? cJSON_GetObjectItem(b, key) : nullptr;
+    return v && cJSON_IsString(v) ? v->valuestring : "";
+}
+
+static std::function<bool(cJSON *)> stopped_at(const char *reason, int probe_id)
+{
+    return [=](cJSON *b) {
+        cJSON *r = cJSON_GetObjectItem(b, "reason");
+        cJSON *p = cJSON_GetObjectItem(b, "probe");
+        return r && std::strcmp(r->valuestring, reason) == 0 &&
+               (probe_id < 0 || (p && p->valueint == probe_id));
+    };
+}
+
+static std::function<bool(cJSON *)> state_is(const char *s)
+{
+    return [=](cJSON *b) {
+        cJSON *v = cJSON_GetObjectItem(b, "state");
+        return v && cJSON_IsString(v) && std::strcmp(v->valuestring, s) == 0;
+    };
+}
+
+static char g_sock[108];
+static Link g_link;
+
+static bool start_plc(void)
+{
+    const long n = g_scans.load();
+    return cmd("START") == "START:OK" &&
+           wait_for([] { return plc_get_state() == PLC_STATE_RUNNING; }, 3000) &&
+           wait_for([&] { return g_scans.load() > n + 3; }, 2000);
+}
+
+static void cont(void)
+{
+    cJSON *r = g_link.call("continue");
+    CHECK(ok(r), "continue refused: %s", err_code(r));
+}
+
+// ---------------------------------------------------------------------------
+// Cases
+// ---------------------------------------------------------------------------
+
+/* The handshake declares the probes and the breakpoint limit; a beat arrives every 250 ms. */
+static void case_handshake(void)
+{
+    g_case   = "handshake";
+    cJSON *r = g_link.call("initialize", "{\"protocol\":\"1.0\"}");
+    CHECK(ok(r), "initialize refused: %s", err_code(r));
+    CHECK(body_int(r, "maxBreakpoints") == DBG_MAX_BREAKPOINTS, "maxBreakpoints %d",
+          body_int(r, "maxBreakpoints"));
+    CHECK(body_int(r, "probes") == (int)kProbes, "probes %d", body_int(r, "probes"));
+    r = g_link.call("attach", "{\"by\":\"tester\"}");
+    CHECK(ok(r), "attach refused: %s", err_code(r));
+    const size_t m = g_link.mark();
+    sleep_ms(600);
+    CHECK(g_link.count(m, "beat") >= 2, "%d beats in 600 ms", g_link.count(m, "beat"));
+}
+
+/* A034, A031(a), A047: stop before K with no side effect, step, a breakpoint set while halted
+ * later in the same scan, and the run state pushed and readable. The park outlasts the stuck
+ * limit (10 periods), so the watchdog stand-down is exercised too. */
+static void case_before_statement(void)
+{
+    g_case       = "A034 before statement";
+    size_t m     = g_link.mark();
+    const int64_t t_set = mono_ns();
+    cJSON *r     = g_link.call("setBreakpoint", "{\"probe\":1}");
+    CHECK(ok(r), "setBreakpoint refused: %s", err_code(r));
+    Msg st{};
+    CHECK(g_link.event(m, "stopped", &st, 1000, stopped_at("breakpoint", P_K)),
+          "no breakpoint stop at K");
+    Msg rs{};
+    CHECK(g_link.event(m, "runState", &rs, 500, state_is("HALTED_AT_BP")),
+          "no HALTED_AT_BP runState within 500 ms");
+    CHECK(rs.t_ns - st.t_ns <= 500 * kMs, "runState %.0f ms after the stop",
+          (double)(rs.t_ns - st.t_ns) / 1e6);
+    (void)t_set;
+
+    const int c0 = g_counter_st.load(), w_st = g_witness_st.load();
+    const int plant_c = plant_word(1), plant_w = plant_word(0);
+    const int64_t vt0 = plc_task_virtual_time_ns(0);
+    sleep_ms(300);
+    CHECK(g_counter_st.load() == c0, "counter moved while halted before K (%d -> %d)", c0,
+          g_counter_st.load());
+    CHECK(plant_word(1) == plant_c && plant_word(0) == plant_w,
+          "the plant saw an output change during the halt");
+    CHECK(plant_c == c0, "the plant's counter %d is not the last complete scan's %d", plant_c, c0);
+    CHECK(plc_task_virtual_time_ns(0) == vt0, "the task's virtual clock moved while parked");
+
+    cJSON *s = g_link.call("status");
+    CHECK(body_str(s, "state") == "HALTED_AT_BP", "status state '%s'", body_str(s, "state").c_str());
+    cJSON *tasks = cJSON_GetObjectItem(cJSON_GetObjectItem(s, "body"), "tasks");
+    cJSON *t0    = tasks ? cJSON_GetArrayItem(tasks, 0) : nullptr;
+    CHECK(t0 && cJSON_GetObjectItem(t0, "probe") && cJSON_GetObjectItem(t0, "probe")->valueint == 1 &&
+              cJSON_GetObjectItem(t0, "since") && cJSON_GetObjectItem(t0, "name"),
+          "status does not carry the halted task's name, probe and since");
+    CHECK(body_str(s, "by") == "tester", "status 'by' is '%s'", body_str(s, "by").c_str());
+
+    /* Step over K: the counter changes by one; the plant sees nothing until the scan ends. */
+    g_case = "A034 step";
+    m      = g_link.mark();
+    r      = g_link.call("next", "{\"task\":0}");
+    CHECK(ok(r), "next refused: %s", err_code(r));
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("step", P_OUT)),
+          "the step did not land on the next statement");
+    CHECK(g_counter_st.load() == c0 + 1, "counter %d after the step, want %d", g_counter_st.load(),
+          c0 + 1);
+    CHECK(plant_word(1) == plant_c, "the plant saw the step's write before the scan ended");
+
+    /* A031(a): set L while halted, continue: the stop is at L in the same scan. */
+    g_case = "A031 same scan";
+    r      = g_link.call("setBreakpoint", "{\"probe\":4}");
+    CHECK(ok(r), "setBreakpoint L refused: %s", err_code(r));
+    m = g_link.mark();
+    cont();
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_L)), "no stop at L");
+    CHECK(g_witness_st.load() == w_st, "witness %d at L, want %d: not the same scan",
+          g_witness_st.load(), w_st);
+    CHECK(plant_word(0) == plant_w, "the plant's witness advanced between K and L");
+    CHECK(plc_get_state() == PLC_STATE_RUNNING, "PLC state %d after a park past the stuck limit",
+          (int)plc_get_state());
+
+    /* The scan completes on continue: the next stop at K sees its outputs in the plant. */
+    m = g_link.mark();
+    cont();
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_K)), "no stop at K");
+    CHECK(plant_word(1) == c0 + 1, "plant counter %d at the next scan, want %d", plant_word(1), c0 + 1);
+    CHECK(plant_word(0) == w_st, "plant witness %d, want %d", plant_word(0), w_st);
+
+    r = g_link.call("clearAllBreakpoints");
+    CHECK(body_int(r, "removed") == 2, "clearAllBreakpoints removed %d", body_int(r, "removed"));
+    m = g_link.mark();
+    cont();
+    CHECK(g_link.event(m, "runState", nullptr, 500, state_is("RUNNING")), "no RUNNING runState");
+}
+
+/* A031(b): set L while the scan is in the dwell before it; the stop is in that scan, judged by
+ * the plant's witness. Then clear it: no stop in 100 scans. */
+static void case_armed_in_dwell(void)
+{
+    g_case = "A031 armed in dwell";
+    g_dwell = true;
+    CHECK(wait_for([] { return g_in_dwell.load(); }, 1000), "the program never entered its dwell");
+    size_t m   = g_link.mark();
+    cJSON *r   = g_link.call("setBreakpoint", "{\"probe\":4}");
+    const int w = plant_word(0);
+    CHECK(ok(r), "setBreakpoint refused: %s", err_code(r));
+    CHECK(g_in_dwell.load(), "the response arrived after the dwell (test timing)");
+    g_dwell = false;
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_L)), "no stop at L");
+    bool moved = false;
+    for (int i = 0; i < 30; ++i, sleep_ms(10)) moved |= plant_word(0) != w;
+    CHECK(!moved, "the plant's witness left %d during the halt: the stop came a scan late", w);
+    CHECK(g_witness_st.load() == w + 1, "the session read witness %d, want %d", g_witness_st.load(),
+          w + 1);
+
+    r = g_link.call("clearBreakpoint", "{\"probe\":4}");
+    CHECK(ok(r), "clearBreakpoint refused: %s", err_code(r));
+    m = g_link.mark();
+    cont();
+    std::vector<int> seen;
+    const long       n0 = g_scans.load();
+    wait_for([&] {
+        int v = plant_word(0);
+        if (seen.empty() || seen.back() != v) seen.push_back(v);
+        return g_scans.load() >= n0 + 100;
+    }, 5000);
+    CHECK(g_scans.load() >= n0 + 100, "only %ld scans after the clear", g_scans.load() - n0);
+    CHECK(g_link.count(m, "stopped") == 0, "%d stops after the clear", g_link.count(m, "stopped"));
+    CHECK(seen.size() >= 2 && seen[1] == w + 1, "after the resume the plant saw %d, want %d",
+          seen.size() >= 2 ? seen[1] : -1, w + 1);
+    int gaps = 0;
+    for (size_t i = 1; i < seen.size(); ++i) gaps += seen[i] != seen[i - 1] + 1;
+    CHECK(gaps == 0, "%d gaps in the plant's witness after the resume", gaps);
+}
+
+/* A032 over the link: the limit is honoured, the one past it refused, and nothing displaced. */
+static void case_limit(void)
+{
+    g_case = "A032 limit";
+    std::string args = "{\"breakpoints\":[{\"probe\":1}";
+    for (uint32_t p = 100; p < 100 + DBG_MAX_BREAKPOINTS - 1; ++p)
+        args += ",{\"probe\":" + std::to_string(p) + "}";
+    args += "]}";
+    cJSON *r  = g_link.call("setBreakpoints", args.c_str());
+    cJSON *bs = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "breakpoints");
+    int verified = 0;
+    for (int i = 0; bs && i < cJSON_GetArraySize(bs); ++i)
+        verified += cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(bs, i), "verified"));
+    CHECK(verified == DBG_MAX_BREAKPOINTS, "%d of %d verified", verified, DBG_MAX_BREAKPOINTS);
+    r = g_link.call("setBreakpoint", "{\"probe\":1500}");
+    CHECK(!ok(r) && std::strcmp(err_code(r), "LIMIT_EXCEEDED") == 0,
+          "the breakpoint past the limit was answered '%s'", err_code(r));
+    size_t m = g_link.mark();
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_K)),
+          "no stop at a previously set breakpoint after the refusal");
+    r = g_link.call("clearAllBreakpoints");
+    CHECK(body_int(r, "removed") == DBG_MAX_BREAKPOINTS, "clearAllBreakpoints removed %d",
+          body_int(r, "removed"));
+    cont();
+}
+
+/* A033: pause halts within one interval + 100 ms, 20 times at random points; continue resumes. */
+static void case_pause(void)
+{
+    g_case = "A033 pause";
+    std::mt19937 rng(7);
+    int64_t      worst = 0;
+    for (int i = 0; i < 20; ++i)
+    {
+        sleep_ms((int)(rng() % 40));
+        size_t        m  = g_link.mark();
+        const int64_t t0 = mono_ns();
+        cJSON        *r  = g_link.call("pause");
+        CHECK(ok(r), "pause refused: %s", err_code(r));
+        Msg st{};
+        CHECK(g_link.event(m, "stopped", &st, 1000, stopped_at("pause", -1)), "no pause stop");
+        /* The plant's witness is frozen once no scan can complete. */
+        int  w = plant_word(0);
+        int64_t frozen_at = 0;
+        for (int k = 0; k < 400; ++k)
+        {
+            const int v = plant_word(0);
+            if (v != w) { w = v; frozen_at = 0; }
+            else if (!frozen_at) frozen_at = mono_ns();
+            if (frozen_at && mono_ns() - frozen_at > 3 * kTaskNs) break;
+            sleep_ms(1);
+        }
+        worst = std::max(worst, frozen_at - t0);
+        if (i == 0)
+            CHECK(g_link.event(m, "runState", nullptr, 500, state_is("PAUSED")), "no PAUSED runState");
+        m = g_link.mark();
+        const long n = g_scans.load();
+        cont();
+        CHECK(wait_for([&] { return g_scans.load() > n + 1; }, 500), "no scans after continue");
+    }
+    CHECK(worst <= kTaskNs + 100 * kMs, "the plant froze %.0f ms after the pause request (bound %lld)",
+          (double)worst / 1e6, (long long)((kTaskNs + 100 * kMs) / kMs));
+}
+
+/* A033 stop: the program stops, the session stays; a stop while parked lands STOPPED, not ERROR. */
+static void case_stop(void)
+{
+    g_case   = "A033 stop";
+    size_t m = g_link.mark();
+    cJSON *r = g_link.call("stop");
+    CHECK(ok(r), "stop refused: %s", err_code(r));
+    CHECK(wait_for([] { return plc_get_state() == PLC_STATE_STOPPED; }, 3000), "state %d after stop",
+          (int)plc_get_state());
+    CHECK(g_link.event(m, "runState", nullptr, 1000, state_is("STOPPED")), "no STOPPED runState");
+    r = g_link.call("status");
+    cJSON *att = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "attached");
+    CHECK(att && cJSON_IsTrue(att), "the session is no longer attached after stop");
+    CHECK(g_link.count(m, "sessionEnded") == 0 && !g_link.closed, "stop ended the session");
+
+    g_case = "D7.4 stop while parked";
+    CHECK(start_plc(), "restart failed");
+    m = g_link.mark();
+    r = g_link.call("setBreakpoint", "{\"probe\":0}");
+    CHECK(ok(r), "setBreakpoint refused after a restart: %s", err_code(r));
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_WITNESS)),
+          "no stop after the restart");
+    r = g_link.call("stop");
+    CHECK(wait_for([] { return plc_get_state() == PLC_STATE_STOPPED || plc_get_state() == PLC_STATE_ERROR; }, 3000) &&
+              plc_get_state() == PLC_STATE_STOPPED,
+          "a stop while parked landed %d, not STOPPED", (int)plc_get_state());
+}
+
+int main()
+{
+    std::snprintf(g_sock, sizeof g_sock, "/tmp/plc_debug_test_%d.sock", (int)getpid());
+    if (debug_link_start(g_sock) != 0)
+    {
+        std::printf("  FAIL  the core link did not start on %s\n", g_sock);
+        return 1;
+    }
+    if (!start_plc())
+    {
+        std::printf("  FAIL  the PLC did not start\n");
+        return 1;
+    }
+    if (!g_link.open(g_sock))
+    {
+        std::printf("  FAIL  cannot connect to the core link\n");
+        return 1;
+    }
+    case_handshake();
+    case_before_statement();
+    case_armed_in_dwell();
+    case_limit();
+    case_pause();
+    case_stop();
+    if (plc_get_state() == PLC_STATE_RUNNING) cmd("STOP");
+    wait_for([] { return !plc_state_is_transitioning(); }, 3000);
+    unlink(g_sock);
+    if (g_failures == 0)
+    {
+        std::printf("  all cases passed\n");
+        std::fflush(stdout);
+        _exit(0);
+    }
+    std::printf("  %d check(s) failed\n", g_failures);
+    std::fflush(stdout);
+    _exit(1);
+}

@@ -26,8 +26,16 @@ TESTS=(
   "tests/host/test_rt_mutex.cpp:"
   "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
   "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
-  "tests/host/test_safe_stop.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c"
-  "tests/host/test_virtual_clock.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c"
+  "tests/host/test_safe_stop.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c:core/src/plc_app/debug_agent.cpp:core/src/plc_app/debug_link.cpp"
+  "tests/host/test_virtual_clock.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c:core/src/plc_app/debug_agent.cpp:core/src/plc_app/debug_link.cpp"
+  "tests/host/test_breakpoint_table.cpp:core/src/plc_app/debug_agent.cpp"
+  "tests/host/test_run_control.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c:core/src/plc_app/debug_agent.cpp:core/src/plc_app/debug_link.cpp"
+)
+
+# Also built with ThreadSanitizer, where the compiler supports it: any report fails the run
+# (A205's race check on the breakpoint table).
+TSAN_TESTS=(
+  "tests/host/test_breakpoint_table.cpp:core/src/plc_app/debug_agent.cpp"
 )
 
 failures=0
@@ -60,6 +68,27 @@ for entry in "${TESTS[@]}"; do
     failures=$((failures + 1))
   fi
 done
+
+if echo 'int main(){}' | $CXX -x c++ -fsanitize=thread - -o "$OUT/tsan_probe" 2>/dev/null &&
+   "$OUT/tsan_probe" 2>/dev/null; then
+  for entry in "${TSAN_TESTS[@]}"; do
+    test_src="${entry%%:*}"
+    deps="${entry#*:}"
+    name="$(basename "$test_src" .cpp)_tsan"
+    printf '\n=== %s ===\n' "$name"
+    # shellcheck disable=SC2086
+    if ! $CXX $CXXFLAGS -O1 -fsanitize=thread $INCLUDES "$test_src" ${deps//:/ } -o "$OUT/$name" -lpthread; then
+      echo "  FAIL  $name did not compile"
+      failures=$((failures + 1))
+      continue
+    fi
+    if ! TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$OUT/$name"; then
+      failures=$((failures + 1))
+    fi
+  done
+else
+  printf '\n=== ThreadSanitizer unavailable (needs Linux; in Docker, --security-opt seccomp=unconfined): TSan builds SKIPPED ===\n'
+fi
 
 printf '\n'
 if [ "$failures" -eq 0 ]; then
