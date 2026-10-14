@@ -442,10 +442,11 @@ def test_only_a_logged_in_user_over_tls_attaches(serve, app, tokens):
     assert plain.core is not None and plain.core.received == []
 
 
-def test_attach_and_detach_leave_the_program_alone(serve, admin_token):
+def test_attach_and_detach_leave_the_program_alone(serve, admin_token, monkeypatch):
     """A117: 20 attach/detach cycles while running neither stop nor restart the program. A118:
     detach while halted with another breakpoint armed resumes the program and clears every
-    breakpoint, so no stop follows."""
+    breakpoint, so no stop follows. ADR-003 D9: while halted, the webserver's own GET
+    /api/status handler (webserver/app.py) carries the gateway's `debug` block."""
     server = serve()
     core = server.core
     assert core is not None
@@ -462,6 +463,14 @@ def test_attach_and_detach_leave_the_program_alone(serve, admin_token):
     assert c.initialize()["success"] is True
     assert c.request("setBreakpoints", {"file": "program.st", "lines": [4, 7]})["success"] is True
     c.event("stopped", {"reason": "breakpoint"})
+    from webserver import app as app_module  # noqa: PLC0415 - starts the runtime manager
+
+    monkeypatch.setattr(app_module.runtime_manager, "status_plc", lambda: "STATUS:RUNNING")
+    monkeypatch.setattr(app_module.runtime_manager, "switch_plc", lambda: "SWITCH:RUN")
+    monkeypatch.setattr(app_module, "debug_gateway", server.gateway, raising=False)
+    debug = as_obj(app_module.handle_status({}).get("debug"))
+    assert debug.get("state") == "HALTED_AT_BP", debug
+    assert [s.get("role") for s in debug.get("sessions") or []] == ["controller"], debug
     assert as_obj(c.request("detach")["body"])["forces"] == []
     time.sleep(0.05)
     halted_at = core.witness()

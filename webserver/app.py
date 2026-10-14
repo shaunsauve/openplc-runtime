@@ -30,7 +30,7 @@ import flask_login
 
 from webserver import project_snapshot
 from webserver.credentials import CertGen
-from webserver.debug_gateway import UnixCoreLink, init_debug_gateway
+from webserver.debug_gateway import DebugGateway, UnixCoreLink, init_debug_gateway
 from webserver.debug_websocket import init_debug_websocket
 from webserver.discovery.discovery_routes import discovery_bp
 from webserver.etherdog_manager import EtherDogManager, legacy_ethercat_config_in_use
@@ -88,6 +88,9 @@ runtime_manager = RuntimeManager(
 )
 
 runtime_manager.start()
+
+# Set by run_https; GET /api/status reads its `debug` block (ADR-003 D9).
+debug_gateway: Optional[DebugGateway] = None
 
 # UDP discovery responder so the editor can find this runtime on the LAN.
 # Failure to bind is logged and ignored — discovery is a convenience, not a
@@ -199,6 +202,10 @@ def handle_status(data: dict) -> dict:
         timing_stats = parse_timing_stats(stats_response)
         if timing_stats is not None:
             result["timing_stats"] = timing_stats
+
+    # ADR-003 D9: the debug run state and attached sessions. Additive, like switchPosition.
+    if debug_gateway is not None:
+        result["debug"] = debug_gateway.status_block()
 
     return result
 
@@ -565,8 +572,9 @@ def run_https():
     register_callback_get(restapi_callback_get)
     register_callback_post(restapi_callback_post)
 
+    global debug_gateway
     socketio = init_debug_websocket(app_restapi, runtime_manager.runtime_socket)
-    init_debug_gateway(
+    debug_gateway = init_debug_gateway(
         socketio,
         UnixCoreLink(DEBUG_CORE_SOCKET),
         Path("core/generated") / "debug-info.json",

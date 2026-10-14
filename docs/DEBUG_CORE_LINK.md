@@ -226,10 +226,8 @@ pm: please fold them into ADR-003 D1.3.
 ADR-003 D9's `debug` block of `GET /api/status` is `DebugGateway.status_block()`: the core's
 `status` body, with `sessions` narrowed to the gateway's sessions the core still holds (as
 `[{user, role}]`), so a stop never reads as a detach. The gateway strips the core's session IDs
-from everything it forwards to clients. **Follow-up for the webserver owner:**
-`webserver/app.py` `handle_status` must add `result["debug"] = gateway.status_block()`; until it
-does, only the e2e server (`tests/debug/wire/serve.py`, which registers the status handler the
-same way) serves the block.
+from everything it forwards to clients. `webserver/app.py` `handle_status` adds it as
+`debug` (and the e2e server, `tests/debug/wire/serve.py`, serves the same block).
 
 ## Not built here
 
