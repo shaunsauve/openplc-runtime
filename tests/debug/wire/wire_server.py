@@ -53,13 +53,21 @@ class WireServer:
         capabilities: Optional[JsonObj] = None,
         delays: Optional[Dict[str, float]] = None,
         info: Optional[JsonObj] = None,
+        core_path: Optional[str] = None,
+        info_path: Optional[Path] = None,
     ) -> None:
+        """`core_path`/`info_path` serve a real core (plc_main's plc_debug.socket and its
+        debug-info.json) instead of the fake; `core` is then None."""
         self.workdir = workdir
-        self.info_path = workdir / "debug-info.json"
-        self.info_path.write_text(json.dumps(info if info is not None else debug_info()))
-        # AF_UNIX paths are capped near 104 bytes; the pytest tmp path can exceed that.
-        self.core_path = f"/tmp/fc-{os.getpid()}-{id(self)}.sock"
-        self.core = FakeCore(self.core_path, capabilities=capabilities, delays=delays)
+        self.core: Optional[FakeCore] = None
+        if core_path is not None and info_path is not None:
+            self.info_path, self.core_path = info_path, core_path
+        else:
+            self.info_path = workdir / "debug-info.json"
+            self.info_path.write_text(json.dumps(info if info is not None else debug_info()))
+            # AF_UNIX paths are capped near 104 bytes; the pytest tmp path can exceed that.
+            self.core_path = f"/tmp/fc-{os.getpid()}-{id(self)}.sock"
+            self.core = FakeCore(self.core_path, capabilities=capabilities, delays=delays)
         self.legacy = LegacyCore()
         self.socketio = init_debug_websocket(app, self.legacy)
         self.link = UnixCoreLink(self.core_path)
@@ -72,12 +80,13 @@ class WireServer:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         if not self.link.wait_ready(5.0):
-            raise RuntimeError("the gateway never received the fake core's hello")
+            raise RuntimeError("the gateway never received the core's hello")
 
     def close(self) -> None:
         self.server.shutdown()
         self.link.close()
-        self.core.close()
+        if self.core is not None:
+            self.core.close()
 
 
 _CERT: List[str] = []

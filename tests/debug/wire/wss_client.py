@@ -15,6 +15,7 @@ See also:
 from __future__ import annotations
 
 import json
+import socket
 import ssl
 import threading
 from typing import Callable, Dict, List, Optional, Union
@@ -134,5 +135,22 @@ class WssSio:
     def close(self, abort: bool = False) -> None:
         del abort
         ws, self.ws = self.ws, None
-        if ws is not None:
-            ws.close()
+        if ws is None:
+            return
+        # simple-websocket's Client.close() closes the socket while its reader thread is still in
+        # recv(). The TLS object keeps the raw fd number, so once the next connection in this
+        # process reuses that number, the old reader consumes the new connection's bytes (bad
+        # record MAC / wrong version number on the second session). Shut the socket down first so
+        # the reader returns, and join it, before the fd is released.
+        try:
+            simple_websocket.ws.Base.close(ws)  # the close frame, as Client.close() sends it
+        except simple_websocket.ConnectionClosed:
+            pass
+        try:
+            ws.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        reader = getattr(ws, "thread", None)
+        if reader is not None and reader is not threading.current_thread():
+            reader.join(2.0)
+        ws.sock.close()

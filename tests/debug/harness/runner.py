@@ -432,9 +432,14 @@ class _Run:
         where = name if client == MAIN else f"{client}:{name}"
         for key, body_key in EVENT_KEYS.items():
             if key in expect:
-                self._check(
-                    expect[key], body[body_key] if body_key in body else MISSING, f"{where}.{key}"
-                )
+                got = body[body_key] if body_key in body else MISSING
+                want = expect[key]
+                # A task name is an IEC identifier, case-insensitive (IEC 61131-3 6.1.2): the
+                # oracle names the source spelling, the runtime STruCpp's upper case
+                # (docs/DEBUG_CORE_LINK.md, pm ruling 12).
+                if key == "task" and isinstance(want, str) and isinstance(got, str):
+                    got = want if got.casefold() == want.casefold() else got
+                self._check(want, got, f"{where}.{key}")
         if "body" in expect:
             self._check(expect["body"], body, f"{where}.body")
         if "stack" in expect:
@@ -447,6 +452,9 @@ class _Run:
         # oracle's frames must match the innermost ones in order (a prefix).
         resp = self._request(client, "stackTrace", {"task": task} if isinstance(task, str) else {})
         if resp.get("success") is not True:
+            # As _read_variable: a request this runtime does not serve cannot be judged here.
+            if _obj(resp.get("error")).get("code") == "UNSUPPORTED":
+                raise Blocked("stackTrace: UNSUPPORTED")
             raise Diverge(f"stackTrace refused: {json.dumps(resp.get('error'))}")
         frames = _obj(resp.get("body")).get("stackFrames")
         if not isinstance(frames, list) or not isinstance(expected, list):
@@ -762,6 +770,9 @@ def append_results(path: Path, rows: Iterable[JsonObj]) -> None:
 
 
 def _commit() -> str:
+    # A run from a copy of the tree (a container) has no .git; its caller names the commit.
+    if os.environ.get("HARNESS_COMMIT"):
+        return os.environ["HARNESS_COMMIT"]
     try:
         out = subprocess.run(
             ["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"],

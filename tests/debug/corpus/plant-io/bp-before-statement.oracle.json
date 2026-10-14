@@ -8,7 +8,7 @@
   "title": "A breakpoint stops before its statement; a second one set while halted stops later in the same scan",
   "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IW0": 7, "%ID0": 70000}}},
   "steps": [
-    {"request": "initialize", "args": {"identity": "build"}, "expect": {"success": true, "body": {"comparison": "match"}}},
+    {"request": "initialize", "args": {"identity": {"~build": "identity"}}, "expect": {"success": true, "body": {"comparison": "match"}}},
     {"wait": {"scans": 3}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]},
      "expect": {"success": true, "body": {"breakpoints": [{"verified": true, "line": "@K"}]}}},

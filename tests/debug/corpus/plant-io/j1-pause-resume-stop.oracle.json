@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/j1-pause-resume-stop",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A033"],
+  "title": "J1 beat 13 on what is built: pause stops the program with reason pause and freezes the plant; resume advances it; stop stops the program, not the session",
+  "notes": "The run-control subset of pause-resume-stop at corpus:plant-io's own 100 ms interval (no deploy step yet for the 500 ms task) and with the session's status request in place of GET /api/status's debug block (not built), so it does not discharge A033's 20-pause bound or its status-API read. Nor the plant freeze after stop: the reference plant is a runtime plugin and stops with the program (its socket is gone within 800 ms of the stop), so no plant read is possible once the program is stopped.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"request": "pause", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 200, "expect": {"reason": "pause", "task": "Main"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "p"}}}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ref": "p"}}}},
+    {"request": "status", "expect": {"success": true, "body": {"state": "PAUSED", "by": "admin", "attached": true}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "continued", "withinMs": 500},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 3}}, "scanDelta": {"Main": {"~ge": 3}}}},
+    {"request": "stop", "expect": {"success": true}},
+    {"wait": {"wallMs": 1500}, "note": "runState events queue in arrival order, so the state is read back"},
+    {"request": "status", "note": "stop stops the program, not the session", "expect": {"success": true, "body": {"state": "STOPPED", "attached": true}}},
+    {"noEvent": "sessionEnded", "forMs": 500}
+  ]
+}
