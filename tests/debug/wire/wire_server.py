@@ -58,6 +58,7 @@ class WireServer:
         info_path: Optional[Path] = None,
         tls: bool = True,
         params: Optional[HeartbeatParams] = None,
+        image: Optional[JsonObj] = None,
     ) -> None:
         """`core_path`/`info_path` serve a real core (plc_main's plc_debug.socket and its
         debug-info.json) instead of the fake; `core` is then None. `tls=False` serves plain HTTP,
@@ -71,7 +72,9 @@ class WireServer:
             self.info_path.write_text(json.dumps(info if info is not None else debug_info()))
             # AF_UNIX paths are capped near 104 bytes; the pytest tmp path can exceed that.
             self.core_path = f"/tmp/fc-{os.getpid()}-{id(self)}.sock"
-            self.core = FakeCore(self.core_path, capabilities=capabilities, delays=delays)
+            self.core = FakeCore(
+                self.core_path, capabilities=capabilities, delays=delays, image=image
+            )
         self.legacy = LegacyCore()
         self.socketio = init_debug_websocket(app, self.legacy)
         self.link = UnixCoreLink(self.core_path)

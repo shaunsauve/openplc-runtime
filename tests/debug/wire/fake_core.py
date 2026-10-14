@@ -119,8 +119,10 @@ class FakeCore:
         capabilities: Optional[JsonObj] = None,
         delays: Optional[Dict[str, float]] = None,
         scan_period_s: float = 0.005,
+        image: Optional[JsonObj] = None,
     ) -> None:
         self.path = path
+        self.image = dict(image or {})  # overrides of hello.image, e.g. a pre-buildId program
         self.capabilities = dict(FULL_CAPS if capabilities is None else capabilities)
         self.delays = dict(delays or {})
         self.scan_period_s = scan_period_s
@@ -178,6 +180,7 @@ class FakeCore:
                 "buildId": BUILD_ID,
                 "buildTime": "2026-10-14T00:00:00Z",
                 "sourceHash": None,
+                **self.image,
             },
             "params": {"P1": 2, "P2": 15},
         }

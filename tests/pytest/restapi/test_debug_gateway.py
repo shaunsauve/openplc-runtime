@@ -42,7 +42,7 @@ sys.path.insert(0, str(WIRE))
 
 from conftest import create_user, token_for  # noqa: E402
 import link_spec  # noqa: E402
-from fake_core import FULL_CAPS, FakeCore, Json, JsonObj, debug_info  # noqa: E402
+from fake_core import BUILD_ID, FULL_CAPS, MD5, FakeCore, Json, JsonObj, debug_info  # noqa: E402
 from wire_server import WireServer, as_obj  # noqa: E402
 from wss_client import WssSio  # noqa: E402
 
@@ -382,6 +382,20 @@ def test_each_refusal_has_its_code_a_sentence_and_changes_nothing(code, serve, t
     if code in gateway_refusals:
         reached = [cmd for cmd, _ in server.core.received if cmd in changing]
         assert reached == [], f"{code} was refused only after reaching the core: {reached}"
+    if code == "STALE_BUILD":
+        # ADR-002 D1/D5, ruling 11 retired: debug info binds by buildId alone. A program built
+        # before STruCpp emitted strucpp_dbg_build_id (image buildId null, same md5) is not bound,
+        # and a client presenting a buildId is told its build differs.
+        legacy = serve(image={"buildId": None})
+        c = Client(legacy.url, tokens["admin"])
+        hs = as_obj(c.initialize(identity={"md5": MD5, "buildId": BUILD_ID})["body"])
+        assert hs["comparison"] == "build", hs
+        anon = Client(legacy.url, tokens["admin"])
+        assert anon.initialize(role="observer")["success"] is True
+        got, _ = _refusal(anon.request("breakpointLocations", {"file": "program.st", "line": 1}))
+        details = as_obj(as_obj(anon.request("stackTrace")["error"])["details"])
+        assert got == "STALE_BUILD" and details["reason"] == "debugInfo", details
+        assert details["expected"] is None and details["found"] == BUILD_ID, details
 
 
 def test_a_revoked_token_ends_the_session(serve, client, admin_token):

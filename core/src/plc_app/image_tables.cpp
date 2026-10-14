@@ -207,7 +207,8 @@ extern "C" int symbols_init(PluginManager *pm)
     *(void **)&ext_strucpp_set_current_time  = resolve(pm, "strucpp_set_current_time",  true);
 
     *(void **)&ext_strucpp_program_md5 = plugin_manager_get_symbol(pm, "strucpp_program_md5");
-    /* Optional: STruCpp does not emit it yet; the core link reports buildId null without it. */
+    /* Optional: a program built before STruCpp emitted it reports buildId null, and the gateway
+     * then refuses to bind its debug info (ADR-002 D1, docs/DEBUG_CORE_LINK.md ruling 11). */
     ext_strucpp_dbg_build_id = static_cast<const char *>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_build_id"));
 
     *(void **)&ext_strucpp_get_config = resolve(pm, "strucpp_get_config", true);

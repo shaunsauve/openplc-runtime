@@ -63,8 +63,9 @@ it arrives, and drops a link whose `link` major is not 1. `initialize` is **not*
 it is the client's handshake with the gateway (ADR-003 D3), answered from `hello`.
 
 `image` names the running program (ADR-002 D5). `md5` is the program's `strucpp_program_md5`.
-`buildId` is the program's `strucpp_dbg_build_id`, and `null` while STruCpp does not emit that
-symbol; the gateway then binds `debug-info.json` to the image by `md5` alone (see "pm rulings").
+`buildId` is the program's `strucpp_dbg_build_id` (STruCpp emits it in every build since
+9728166), and `null` for a program built before that. The gateway binds `debug-info.json` to the
+image by `buildId` alone and refuses a `null` one (ADR-002 D1, D5; ruling 11, retired).
 `buildTime` and `sourceHash` are `null` until a program exports them. Every field is `null` when
 no program is loaded.
 
@@ -207,10 +208,12 @@ pm: please fold them into ADR-003 D1.3.
 9. **`terminate`** ends the session and stops the program; **`detach`** answers `{forces: []}`
    until the force registry exists.
 10. **The frame cap is 1 MiB in both directions** (the gateway had 16 MiB).
-11. **Interim build binding:** while STruCpp does not emit `strucpp_dbg_build_id` (ADR-002 D1
-    says it always does), `hello.image.buildId` is `null`, and the gateway binds
-    `debug-info.json` and compares the client's identity by `md5` alone. Remove when STruCpp
-    emits the symbol.
+11. *Retired* (was: interim md5-only build binding while STruCpp did not emit
+    `strucpp_dbg_build_id`). STruCpp emits it in every build (9728166). The gateway binds
+    `debug-info.json` by `buildId` alone: a probe-dependent request against an image whose
+    `buildId` is `null` or differs from the file's is `STALE_BUILD`
+    `{reason: "debugInfo", expected, found}` (`expected` the image's, `found` the file's), and a
+    client presenting a `buildId` against such an image compares `build`.
 12. **Task names are IEC identifiers, compared case-insensitively.** The core reports a task's
     name as the program's configuration gives it, which STruCpp upper-cases (`TASK Main` runs as
     `MAIN`); the core matches a request's `task` name case-insensitively, and so does the harness.

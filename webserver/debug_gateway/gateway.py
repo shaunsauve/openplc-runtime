@@ -540,15 +540,19 @@ class DebugGateway:
             raise Refusal(ErrorCode.NO_PROBES, "The running program has no debug information.")
         info.check_supported()
         image = _obj(_obj(hello).get("image"))
-        # pm ruling 11 (docs/DEBUG_CORE_LINK.md): a program without strucpp_dbg_build_id reports
-        # buildId null, and the debug info is bound to it by md5 until STruCpp emits the symbol.
+        # ADR-002 D1/D5: debug info binds to the loaded .so by buildId alone. A program with no
+        # strucpp_dbg_build_id (built before STruCpp emitted it) reports null and is not bound:
+        # md5 is the program's identity, not its build's.
         running = image.get("buildId")
-        bound = info.build_id == running if running is not None else info.md5 == image.get("md5")
-        if not bound:
+        if not isinstance(running, str) or info.build_id != running:
             raise Refusal(
                 ErrorCode.STALE_BUILD,
-                "The debug information on the runtime does not belong to the running program.",
-                {"reason": "debugInfo"},
+                "The debug information on the runtime does not belong to the running program; "
+                "rebuild and upload it."
+                if isinstance(running, str)
+                else "The running program carries no build ID, so its debug information cannot "
+                "be bound to it; rebuild and upload it with a current compiler.",
+                {"reason": "debugInfo", "expected": running, "found": info.build_id},
             )
         if session.comparison in ("source", "build"):
             raise Refusal(
@@ -925,9 +929,9 @@ def _compare(identity: JsonObj, image: JsonObj) -> str:
         return "none"
     if md5 != image.get("md5"):
         return "source"
-    # An image with no buildId (pm ruling 11) can only be compared by md5.
-    running = image.get("buildId")
-    if isinstance(build_id, str) and running is not None and build_id != running:
+    # A client that names its build is compared by buildId (ADR-002 D5); an image with none
+    # (built before strucpp_dbg_build_id) cannot be that build.
+    if isinstance(build_id, str) and build_id != image.get("buildId"):
         return "build"
     return "match"
 

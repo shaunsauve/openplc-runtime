@@ -622,7 +622,7 @@ Every failure carries one of these codes. The message names the problem in a sen
 | `LOCKED` | A control or modify request while the production lock is on |
 | `UNSUPPORTED` | A request this runtime does not serve (not in the handshake's `requests`), including a compiled-out build |
 | `NO_PROBES` | A probe-dependent request on a probe-off build, or with no debug information loaded |
-| `STALE_BUILD` | A probe-dependent request while the client's build or the loaded debug information differs from the running program; `details.comparison` or `details.reason` |
+| `STALE_BUILD` | A probe-dependent request while the client's build or the loaded debug information differs from the running program; `details.comparison`, or `details.reason: "debugInfo"` with `expected` (the running image's `buildId`, `null` for a program built without one) and `found` (the debug information's) |
 | `UNSUPPORTED_DEBUG_INFO` | The loaded debug information has an unsupported major; `details: {found, supported}` |
 | `INVALID_LOCATION` | No such source file |
 | `NO_CODE` | No line with code at or after the requested line |
