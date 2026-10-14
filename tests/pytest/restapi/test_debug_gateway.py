@@ -68,11 +68,19 @@ class Client:
         self.responses: Dict[int, "queue.Queue[JsonObj]"] = {}
         self.arrival: List[int] = []
         self.events: "queue.Queue[JsonObj]" = queue.Queue()
+        # Every message both ways, for the spec check (A084).
+        self.frames: List[JsonObj] = []
+        self.sent: List[Tuple[str, JsonObj]] = []
+        self.command_of: Dict[int, str] = {}
 
     def _on_msg(self, data: Json) -> None:
         msg = as_obj(json.loads(data) if isinstance(data, str) else data)
+        with self.lock:
+            self.frames.append(msg)
         if msg.get("type") == "response":
             rseq = msg.get("request_seq")
+            if rseq is None:
+                rseq = -1  # a message whose seq could not be read
             if isinstance(rseq, int):
                 with self.lock:
                     self.arrival.append(rseq)
@@ -86,6 +94,8 @@ class Client:
             self.seq += 1
             use = self.seq if seq is None else seq
             self.responses.setdefault(use, queue.Queue())
+            self.command_of[use] = command
+            self.sent.append((command, dict(args or {})))
         self.sio.emit(
             "msg", {"type": "request", "seq": use, "command": command, "arguments": args or {}}, NS
         )
@@ -96,6 +106,13 @@ class Client:
 
     def request(self, command: str, args: Optional[JsonObj] = None) -> JsonObj:
         return self.wait(self.send(command, args))
+
+    def raw(self, data: Json) -> JsonObj:
+        """Send any payload on `msg`; the reply to an unreadable one has request_seq null."""
+        with self.lock:
+            q = self.responses.setdefault(-1, queue.Queue())
+        self.sio.emit("msg", data, NS)
+        return q.get(timeout=5.0)
 
     def initialize(self, **args: Json) -> JsonObj:
         full: JsonObj = {"protocol": "1.0", "role": "controller"}
@@ -566,6 +583,113 @@ def test_a_resume_token_within_p2_keeps_the_session(serve, admin_token):
     back.close()
     assert _wait_for(lambda: len(_detaches(core)) == 1, 0.3)
     assert _detaches(core)[0].get("reason") == "disconnect"
+
+
+# --------------------------------------------------------------------------- A087, A084: wire
+
+
+GARBAGE: List[Json] = [
+    '{"type":"request","seq":7,"command":"pau',  # truncated
+    "{not json}",
+    "",
+    "null",
+    "[1, 2]",
+    "NaN",
+    "[" * 100000,  # nested past the JSON parser's recursion limit
+    {"type": "request", "seq": True, "command": "status"},
+    {"type": "request", "seq": 3.5, "command": "status"},
+    {"type": "request", "command": "status"},
+    [{"type": "request", "seq": 1, "command": "status"}],
+]
+
+
+def test_malformed_messages_are_refused_and_change_nothing(serve, admin_token):
+    """A087, gateway half: each malformed message gets a BAD_REQUEST reply with request_seq null,
+    a binary one too; 1,000 garbage messages in a burst neither stall the program nor break the
+    session, and a valid request then works. The scan-gap half needs the real core
+    (tests/debug/plant/sec_e2e.sh)."""
+    server = serve()
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    for frame in GARBAGE:
+        resp = c.raw(frame)
+        assert resp["request_seq"] is None and _refusal(resp)[0] == "BAD_REQUEST", (str(frame)[:40], resp)
+    resp = server.gateway.handle("no-such-sid", b"\xff\x00binary")  # type: ignore[arg-type]
+    assert _refusal(resp)[0] == "BAD_REQUEST", resp
+    before = core.witness()
+    for i in range(1000):
+        c.sio.emit("msg", f"garbage {i}", NS)
+    replies = [c.wait(-1) for _ in range(1000)]
+    assert {_refusal(r)[0] for r in replies} == {"BAD_REQUEST"}
+    assert core.witness() > before and core.state == "RUNNING"
+    assert c.request("status")["success"] is True
+    assert [cmd for cmd, _ in core.received if cmd not in ("attach", "status")] == []
+
+
+def test_every_message_on_the_wire_is_in_the_spec_and_back(serve, admin_token):
+    """A084 against the fake core: every message of a full session (every served request
+    succeeding, every event, failures, an unreadable message, a P2 timeout, a resume) matches
+    DEBUG_PROTOCOL.md's sessionspec block, and every request and event the block specifies was
+    observed. The real core's half is the frame check in tests/debug/plant/sec_e2e.py.
+    NO-FOLD: contract."""
+    spec = link_spec.load(SPEC, block="sessionspec")
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    watcher, c = Client(server.url, admin_token), Client(server.url, admin_token)
+    assert watcher.initialize(role="observer")["success"] is True
+    assert c.initialize()["success"] is True
+
+    def ok(command: str, args: Optional[JsonObj] = None, then: Optional[str] = None) -> None:
+        assert c.request(command, args)["success"] is True, command
+        if then is not None:
+            c.event(then)
+
+    ok("pause", {}, "stopped")
+    for command, args in (("next", {}), ("stepIn", {"task": "Main"}), ("stepOut", {}),
+                          ("cycleStep", {}), ("runScans", {"n": 1}),
+                          ("runToCursor", {"file": "program.st", "line": 7})):
+        ok(command, args, "stopped")
+    ok("setBreakpoints", {"file": "program.st", "lines": [6, 4]})
+    ok("continue", {}, "stopped")
+    ok("setBreakpoints", {"file": "program.st", "lines": []})
+    ok("continue", {}, "continued")
+    core.inject_print("hello")
+    c.event("output")
+    for command in ("status", "version", "heartbeat", "attach", "setLock", "breakpointLocations",
+                    "clearAllBreakpoints", "setExceptionBreakpoints", "setHaltMode", "stop",
+                    "restart"):
+        ok(command, VALID_ARGS.get(command, {}))
+    assert _refusal(c.request("next"))[0] in STATE_REFUSALS
+    assert c.raw("{not json}")["request_seq"] is None
+    assert watcher.event("sessionEnded", timeout=3 * P.p2_s)["reason"] == "heartbeat_timeout"
+    ok("detach")
+    other = Client(server.url, admin_token)
+    token = str(as_obj(other.initialize()["body"])["resumeToken"])
+    other.kill()
+    back = Client(server.url)
+    assert as_obj(back.initialize(resumeToken=token)["body"])["resumed"] is True
+    assert back.request("terminate")["success"] is True
+
+    problems: List[str] = []
+    seen: Dict[str, int] = {}
+    for client in (watcher, c, other, back):
+        for command, args in client.sent:
+            problems += spec.check_request(command, args)
+        for frame in client.frames:
+            if frame.get("type") == "response" and frame.get("request_seq") is None:
+                problems += spec._check(spec.types["Error"], frame.get("error"), "unreadable")
+                continue
+            problems += spec.check_frame(frame, client.command_of)  # type: ignore[arg-type]
+            if frame.get("type") == "event":
+                seen[str(frame.get("event"))] = 1
+            elif frame.get("success") is True:
+                seen[client.command_of[int(str(frame["request_seq"]))]] = 1
+    assert not problems, problems[:10]
+    unobserved = (set(spec.requests) | set(spec.events)) - set(seen)
+    assert not unobserved, f"specified but never on the wire: {sorted(unobserved)}"
 
 
 # --------------------------------------------------------------------------- A067 handshake

@@ -26,7 +26,11 @@ class _Socket:
 @pytest.mark.parametrize(
     "replies,user,sent",
     [
-        (["START:ERROR_SAFE_STOPPED\n", "START:OK\n"], "tech", ["START\n", "START_AUTHORISED:tech\n"]),
+        (
+            ["START:ERROR_SAFE_STOPPED\n", "START:OK\n"],
+            "tech",
+            ["START\n", "START_AUTHORISED:tech\n"],
+        ),
         (["START:OK\n"], "tech", ["START\n"]),
         (["START:ERROR\n"], "tech", ["START\n"]),
         (["START:ERROR_SAFE_STOPPED\n"], None, ["START\n"]),

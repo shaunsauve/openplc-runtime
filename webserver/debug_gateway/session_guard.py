@@ -62,7 +62,8 @@ def parse_params(text: str) -> HeartbeatParams:
             values[key] = float(value.strip())
         except ValueError as exc:
             raise ConfigError(f"line {n}: {key} is not a number of seconds") from exc
-    params = HeartbeatParams(values.get("P1", HeartbeatParams.p1_s), values.get("P2", HeartbeatParams.p2_s))
+    default = HeartbeatParams()
+    params = HeartbeatParams(values.get("P1", default.p1_s), values.get("P2", default.p2_s))
     for name, value, (low, high) in (
         ("P1", params.p1_s, P1_RANGE_S),
         ("P2", params.p2_s, P2_RANGE_S),

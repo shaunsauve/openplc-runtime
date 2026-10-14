@@ -392,6 +392,10 @@ additive, so a 1.x client and a 1.y runtime interoperate.
   JSON object (a JSON string of one is accepted from clients).
 - A message above 1 MiB (1,048,576 bytes, serialized) is refused `LIMIT_EXCEEDED`, with the
   request's `seq` echoed when it could be read.
+- Every other malformed message (not JSON, truncated, not an object, binary, nested deeper than
+  the parser allows, no integer `seq`) is refused `BAD_REQUEST`; when no integer `seq` could be
+  read the response has `request_seq: null` and `command: null`. A refusal never ends the
+  session or touches the program.
 - Connecting needs no credential; the JWT travels in `initialize`. Every request before a
   successful `initialize` is refused `BAD_REQUEST`.
 
@@ -489,24 +493,24 @@ and the lock off; `admin` requests need an administrator account.
 | `detach` | - | - | Ends the session. A controller's breakpoints are cleared and a halted program resumes. Body `{forces, safeStopped?}` |
 | `terminate` | `control` | control | Stops the PLC and ends the session |
 | `heartbeat` | - | - | Keeps the session alive (P1/P2); body `{}` |
-| `status` | - | - | Body `{state, tasks}` |
+| `status` | - | - | Body: the `runState` event's body, answered at once |
 | `version` | - | - | See "Handshake" |
 | `setLock` | - | admin | `{on, reason?}`; body `{on}` |
 | `setBreakpoints` | `control` | control, probe | `{file, lines[]}` replaces the file's breakpoints. A line moves to the next line with code. Body `{breakpoints:[{id, verified, line, col, requestedLine}]}` |
 | `breakpointLocations` | - | probe | `{file, line, endLine?}`; body `{breakpoints:[{line}]}` |
 | `clearAllBreakpoints` | `control` | control | Body `{removed}` |
-| `setExceptionBreakpoints` | `control`, `exceptionBreakpoints` | control | `{filters[]}` |
-| `continue` | `control` | control | `{task?}` |
+| `setExceptionBreakpoints` | `control`, `exceptionBreakpoints` | control | `{filters[]}`; body `{filters}` |
+| `continue` | `control` | control | `{task?}`; all-stop, every halted task resumes. Body `{allThreadsContinued}` |
 | `pause` | `control` | control | `{task?}` |
-| `next` | `control` | control | `{task?}` |
-| `stepIn` | `control` | control | `{task?}` |
-| `stepOut` | `control` | control | `{task?}` |
+| `next` | `control` | control | `{task?}`; absent, the task of the latest stop. Body `{task, taskId}` |
+| `stepIn` | `control` | control | `{task?}`; body `{task, taskId}` |
+| `stepOut` | `control` | control | `{task?}`; body `{task, taskId}` |
 | `cycleStep` | `control`, `cycleStep` | control | `{task?}` |
 | `runScans` | `control`, `runScans` | control | `{n, task?}` |
 | `runToCursor` | `control` | control, probe | `{file, line, task?}` |
 | `stop` | `control` | control | Stops the PLC |
 | `restart` | `control` | control | `{kind: warm\|cold\|reset, startHalted?}` |
-| `setHaltMode` | `control`, `nonStop` | control | `{mode: allStop\|nonStop}` |
+| `setHaltMode` | `control`, `nonStop` | control | `{mode: allStop\|nonStop}`; body `{mode}` |
 | `setFunctionBreakpoints` | `control`, `functionBreakpoints` | control | planned |
 | `setInstanceBreakpoints` | `control`, `instanceBreakpoints` | control | planned |
 | `threads` | - | - | planned |
@@ -540,12 +544,65 @@ Pushed, never polled. The controller receives every event; observers receive `st
 
 | Event | Body |
 |---|---|
-| `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, taskId, since, scan?, location:{file, line, col}, breakpointIds?, exception?}`; one per stop. `task` is the task's name (an IEC identifier: compare it case-insensitively), `taskId` its index |
+| `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, taskId, since, scan?, location?:{file, line, col}, depth?, breakpointIds?, hits?, heldAtBoundary?, exception?}`; one per stop. `task` is the task's name (an IEC identifier: compare it case-insensitively), `taskId` its index. `location` is absent for a task held at its scan boundary (`heldAtBoundary: true`); `depth` is the call depth of the stop and `hits` the breakpoint's hit count |
 | `continued` | `{allThreadsContinued: true}` on `continue` (all-stop), `{task, taskId}` on a step |
-| `runState` | `{state, tasks:[{task, taskId, state, reason?, probe?, since?}], attached, by?, location?, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING` |
-| `output` | `{category: logpoint\|print\|runtime\|plugin, task, scan, text}` |
+| `runState` | `{state, tasks:[{task, taskId, state, reason?, probe?, heldAtBoundary?, since?, scan?}], attached, by?, location?:{task, taskId, probe?}, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING` |
+| `output` | `{category: logpoint\|print\|runtime\|plugin, task?, taskId?, scan?, text?, kind?, count?}`: `print` carries `task`, `taskId`, `scan` and `text`; `runtime` carries `kind` (`conditionError`, `breakpointSkippedLocked`) and `count` |
 | `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
 | `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `heartbeat_timeout` (no message for P2), `core_lost` (the core link dropped) or a reason from the core |
+
+### Message shapes
+
+Every served request's arguments and success body, and every event's body, in the grammar of
+[DEBUG_CORE_LINK.md](DEBUG_CORE_LINK.md) ("Messages": `{k: T}` an object, `k?` optional, `...`
+other keys allowed, `[T]` a list, `A|B` either). The gateway tests and the real-core end-to-end
+run check every message on the wire against this block (`tests/debug/wire/link_spec.py`), so a
+field the runtime sends that is not here, or a field here the runtime never sends, fails them.
+A failure response carries `Error` instead of `body`; a reply to a message whose `seq` could not
+be read has `request_seq: null` and `command: null`.
+
+```sessionspec
+Error        = {code: str, message: str, details?: obj}
+Image        = {md5: str|null, buildId: str|null, buildTime: str|null, sourceHash: str|null}
+Versions     = {protocol: str, runtime: str, compiler: str|null, debugInfo: {major: int, minor: int}|null, engineAbi: int|null}
+Handshake    = {protocol: str, runtime: str, compiler: str|null, debugInfo: {major: int, minor: int}|null, engineAbi: int|null, image: Image, comparison: str, params: {P1: num, P2: num}, capabilities: obj, requests: [str], role: str, locked: bool, resumeToken: str, resumed?: bool}
+Location     = {file: str, line: int, col: int|null}
+TaskState    = {task: str, taskId: int, state: str, reason?: str, probe?: int, heldAtBoundary?: bool, since?: num, scan?: int}
+RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, location?: {task: str, taskId: int, probe?: int}, since?: num}
+Breakpoint   = {id: int|null, verified: bool, line: int, col: int|null, requestedLine: int, message?: str}
+Step         = {task: str, taskId: int}
+
+stopped                 evt {reason: str, task: str, taskId: int, since: num, scan?: int, location?: Location, depth?: int, breakpointIds?: [int], hits?: int, heldAtBoundary?: bool, exception?: obj}
+continued               evt {allThreadsContinued?: bool, task?: str, taskId?: int}
+runState                evt RunState
+output                  evt {category: str, kind?: str, count?: int, task?: str, taskId?: int, scan?: int, text?: str}
+control                 evt {controller: str|null, observers: int}
+sessionEnded            evt {reason: str}
+
+initialize              req {protocol: str, role?: str, token?: str, identity?: obj, resumeToken?: str} -> Handshake
+attach                  req {} -> {role: str}
+detach                  req {} -> {forces: list, safeStopped?: bool}
+terminate               req {} -> {}
+heartbeat               req {} -> {}
+status                  req {} -> RunState
+version                 req {} -> Versions
+setLock                 req {on: bool, reason?: str} -> {on: bool}
+setBreakpoints          req {file: str, lines: [int]} -> {breakpoints: [Breakpoint]}
+breakpointLocations     req {file: str, line: int, endLine?: int} -> {breakpoints: [{line: int}]}
+clearAllBreakpoints     req {} -> {removed: int}
+setExceptionBreakpoints req {filters: [str]} -> {filters: [str]}
+continue                req {task?: str} -> {allThreadsContinued: bool}
+pause                   req {task?: str} -> {}
+next                    req {task?: str} -> Step
+stepIn                  req {task?: str} -> Step
+stepOut                 req {task?: str} -> Step
+cycleStep               req {task?: str} -> {}
+runScans                req {n: int, task?: str} -> {}
+runToCursor             req {file: str, line: int, task?: str} -> {}
+stop                    req {} -> {}
+restart                 req {kind?: str, startHalted?: bool} -> {}
+setHaltMode             req {mode: str} -> {mode: str}
+```
 
 ### Error codes
 

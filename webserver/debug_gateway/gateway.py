@@ -147,7 +147,7 @@ class DebugGateway:
         del auth  # the JWT travels in initialize (ADR-005 D1.1)
         # ADR-005 D2.2: TLS only, loopback included; a plaintext upgrade never gets a namespace.
         if not request.is_secure:
-            logger.warning("Debug session refused: plaintext connection from %s", request.remote_addr)
+            logger.warning("Debug session refused: plaintext from %s", request.remote_addr)
             return False
         return True
 
@@ -165,7 +165,10 @@ class DebugGateway:
             self._core_detach(session, "disconnect")
             self._broadcast_control()
         else:
-            logger.info("Debug session of %s lost its transport (%s); kept for P2", session.user, reason)
+            # The reconnect window is P2 from the drop, so a loss never ends a session early.
+            with self.lock:
+                session.last_seen = max(session.last_seen, time.monotonic())
+            logger.info("Debug session of %s lost its transport (%s)", session.user, reason)
 
     def _watch(self) -> None:
         while not self._closed.wait(WATCH_TICK_S):
@@ -194,7 +197,7 @@ class DebugGateway:
 
     # ------------------------------------------------------------------ requests
 
-    def handle(self, sid: str, raw: Json) -> JsonObj:
+    def handle(self, sid: str, raw: object) -> JsonObj:
         request_seq: Json = None
         command: Json = None
         with self.lock:
@@ -203,7 +206,8 @@ class DebugGateway:
                 live.last_seen = time.monotonic()
         try:
             msg, size = self._parse(raw)
-            request_seq = msg.get("seq") if isinstance(msg.get("seq"), int) else None
+            seq = msg.get("seq")
+            request_seq = seq if isinstance(seq, int) and not isinstance(seq, bool) else None
             command = msg.get("command") if isinstance(msg.get("command"), str) else None
             if size > MAX_MESSAGE_BYTES:
                 raise Refusal(
@@ -237,15 +241,22 @@ class DebugGateway:
             )
 
     @staticmethod
-    def _parse(raw: Json) -> Tuple[JsonObj, int]:
-        if isinstance(raw, str):
-            size = len(raw.encode("utf-8"))
+    def _parse(raw: object) -> Tuple[JsonObj, int]:
+        # Anything a client can put on the wire ends here as a Refusal, never as an exception:
+        # binary payloads, invalid UTF-8, JSON nested past the parser's recursion limit.
+        if isinstance(raw, (bytes, bytearray)):
             try:
+                raw = bytes(raw).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise Refusal(ErrorCode.BAD_REQUEST, "The message is not UTF-8 JSON text.") from exc
+        try:
+            if isinstance(raw, str):
+                size = len(raw.encode("utf-8"))
                 raw = json.loads(raw)
-            except ValueError as exc:
-                raise Refusal(ErrorCode.BAD_REQUEST, "The message is not valid JSON.") from exc
-        else:
-            size = len(json.dumps(raw, separators=(",", ":")).encode("utf-8"))
+            else:
+                size = len(json.dumps(raw, separators=(",", ":")).encode("utf-8"))
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise Refusal(ErrorCode.BAD_REQUEST, "The message is not valid JSON.") from exc
         if not isinstance(raw, dict):
             raise Refusal(ErrorCode.BAD_REQUEST, "The message must be a JSON object.")
         return raw, size
