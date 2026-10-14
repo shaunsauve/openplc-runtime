@@ -31,6 +31,7 @@ extern "C" {
 // Runtime-side strucpp ABI mirror — see core/src/lib/strucpp_abi.hpp
 #include "../lib/strucpp_abi.hpp"
 
+#include "debug_agent.h"
 #include "debug_write_journal.h"
 #include "image_tables.h"
 #include "journal_buffer.h"
@@ -94,12 +95,14 @@ static void init_done_cond(void)
     pthread_condattr_destroy(&cattr);
 }
 
-/* Called by a worker when it leaves a scan by any path. Decrements the
+/* Called by a worker when it leaves a scan by any path, and by park. Decrements the
  * in-flight count and, if it was the last, wakes the dispatcher so it can
  * retire cycle_end. Cheap: one atomic; the mutex+signal only on the 1->0
- * edge. */
-static void worker_scan_done(void)
+ * edge. Idempotent per release (ADR-001 D7.4): only the holder of the slot gives
+ * it back, so a crash or abort of a parked task cannot drive the count negative. */
+static void worker_scan_done(PlcTaskCtx *ctx)
 {
+    if (ctx->holds_slot.exchange(0, std::memory_order_acq_rel) == 0) return;
     if (g_tasks_running.fetch_sub(1, std::memory_order_acq_rel) == 1)
     {
         pthread_mutex_lock(&done_mutex);
@@ -272,7 +275,8 @@ static void plc_task_body(PlcTaskCtx *ctx)
         plc_task_release_locks(ctx);
         ctx->alive.store(0, std::memory_order_release);
         /* Both signals only jump from a scan body, so release the in-flight slot. */
-        worker_scan_done();
+        worker_scan_done(ctx);
+        debug_agent_task_exit();
         if (ctx->crash_sig == PLC_TASK_ABORT_SIGNAL)
             log_error("[task %s] scan aborted by the watchdog", ctx->name);
         else
@@ -282,6 +286,7 @@ static void plc_task_body(PlcTaskCtx *ctx)
     }
 
     auto *task = static_cast<strucpp::TaskInstance *>(ctx->task_handle);
+    debug_agent_task_enter(ctx->idx);
 
     /* Worker loop. No clock: the GCD dispatcher owns all timing. One
      * scan per release; `completed` is bumped so overrun logic sees it. */
@@ -338,12 +343,24 @@ static void plc_task_body(PlcTaskCtx *ctx)
                 if (cnt) image_tables_threaded_copy_out(off, cnt);
             }
         }
+        catch (const plc_dbg::Abandon &)
+        {
+            /* A stop or safe-stop while parked (ADR-001 D7.4): the frames have unwound, the scan
+             * never copies out, and it is not a fault. The slot was given back at park. */
+            ctx->in_body = 0;
+            plc_task_release_locks(ctx);
+            ctx->alive.store(0, std::memory_order_release);
+            debug_agent_task_exit();
+            log_info("[task %s] parked scan abandoned", ctx->name);
+            return;
+        }
         catch (const std::exception &e)
         {
             ctx->in_body = 0;
             plc_task_release_locks(ctx);
             ctx->alive.store(0, std::memory_order_release);
-            worker_scan_done();   /* release the in-flight slot before exiting */
+            worker_scan_done(ctx);   /* release the in-flight slot before exiting */
+            debug_agent_task_exit();
             log_error("[task %s] terminated by unhandled exception: %s — "
                       "other tasks keep running", ctx->name, e.what());
             return;
@@ -353,7 +370,8 @@ static void plc_task_body(PlcTaskCtx *ctx)
             ctx->in_body = 0;
             plc_task_release_locks(ctx);
             ctx->alive.store(0, std::memory_order_release);
-            worker_scan_done();   /* release the in-flight slot before exiting */
+            worker_scan_done(ctx);   /* release the in-flight slot before exiting */
+            debug_agent_task_exit();
             log_error("[task %s] terminated by unknown exception — "
                       "other tasks keep running", ctx->name);
             return;
@@ -369,9 +387,10 @@ static void plc_task_body(PlcTaskCtx *ctx)
         /* Release this scan's in-flight slot; if we're the last task still
          * running this frame, wake the dispatcher so it retires cycle_end off
          * the hot path. */
-        worker_scan_done();
+        worker_scan_done(ctx);
     }
 
+    debug_agent_task_exit();
     log_info("[task %s] stopped after %llu scans", ctx->name,
              (unsigned long long)ctx->local_tick.load());
 }
@@ -410,14 +429,16 @@ static int64_t task_scan_limit_ns(const PlcTaskCtx *c)
 }
 
 /* Waits for the worker to return. An in-flight scan may run until scan_deadline; an idle
- * worker (already woken) until idle_deadline. Returns true when it exited. */
+ * worker (already woken) until idle_deadline. An abandoned parked task counts as idle: it is
+ * unwinding, not scanning, and its release time says nothing about it. True when it exited. */
 static bool wait_task_exit(const PlcTaskCtx *c, int64_t scan_deadline, int64_t idle_deadline)
 {
     const timespec poll = {0, PLC_TASK_EXIT_POLL_NS};
     while (!c->exited.load(std::memory_order_acquire))
     {
-        const int64_t now = monotonic_ns();
-        if (task_in_scan(c) ? now >= scan_deadline : now >= idle_deadline)
+        const int64_t now     = monotonic_ns();
+        const bool    unwinds = c->run_state.load(std::memory_order_acquire) == PLC_TASK_RUN_ABANDONING;
+        if (task_in_scan(c) && !unwinds ? now >= scan_deadline : now >= idle_deadline)
             return false;
         nanosleep(&poll, nullptr);
     }
@@ -463,6 +484,16 @@ static void abort_task(PlcTaskCtx *c)
 static void reap_task_threads(void)
 {
     log_info("Stopping %zu PLC task thread(s)", plc_task_count);
+    /* Parked tasks first (ADR-001 D7.4): park returns ABANDON and the scan unwinds. */
+    for (size_t i = 0; i < plc_task_count; ++i)
+    {
+        PlcTaskCtx *c = &plc_tasks[i];
+        if (c->run_state.load(std::memory_order_acquire) == PLC_TASK_RUN_PARKED)
+        {
+            c->run_state.store(PLC_TASK_RUN_ABANDONING, std::memory_order_release);
+            sem_post(&c->resume);
+        }
+    }
     for (size_t i = 0; i < plc_task_count; ++i)
     {
         sem_post(&plc_tasks[i].go);
@@ -492,6 +523,7 @@ static void reap_task_threads(void)
     {
         scan_cycle_tracker_cleanup(&plc_tasks[i].tracker);
         sem_destroy(&plc_tasks[i].go);
+        sem_destroy(&plc_tasks[i].resume);
     }
     std::free(plc_tasks);
     plc_tasks      = nullptr;
@@ -603,31 +635,149 @@ static uint64_t safe_stop_entry(unsigned long long base_ns, bool *cycle_end_pend
     return divisor;
 }
 
-/* Applies run-control requests at the top of a tick; the dispatcher owns run_state. */
-static void apply_run_requests(void)
+/* Set by every run-control request so the dispatcher applies it while waiting out a tick. */
+static std::atomic<bool> g_run_requests_pending{false};
+
+/* True while any task is stopped inside its scan: the window must not read a half-finished
+ * scan (ADR-001 D7.1, ADR-004 D6.5). */
+static bool any_task_parked(void)
 {
+    for (size_t i = 0; i < plc_task_count; ++i)
+    {
+        const long st = plc_tasks[i].run_state.load(std::memory_order_acquire);
+        if (st == PLC_TASK_RUN_PARKED || st == PLC_TASK_RUN_ABANDONING) return true;
+    }
+    return false;
+}
+
+static void hold_at_boundary(PlcTaskCtx *c, int64_t now)
+{
+    c->pause_pending.store(0, std::memory_order_relaxed);
+    c->held_since_ns.store(now, std::memory_order_relaxed);
+    c->run_state.store(PLC_TASK_RUN_HELD, std::memory_order_release);
+    debug_agent_wake();
+}
+
+/* Applies run-control requests; the dispatcher owns run_state (ADR-001 D11). Runs at the top of
+ * a tick and, for prompt resumes, whenever a request wakes the dispatcher's wait. Returns true
+ * when a parked task resumed: its scan is in flight again. */
+static bool apply_run_requests(void)
+{
+    bool resumed_parked = false;
+    g_run_requests_pending.store(false, std::memory_order_relaxed);
     const int64_t now = monotonic_ns();
     for (size_t i = 0; i < plc_task_count; ++i)
     {
-        PlcTaskCtx *c   = &plc_tasks[i];
-        const long  req = c->run_request.exchange(PLC_TASK_REQ_NONE, std::memory_order_acq_rel);
-        if (req == PLC_TASK_REQ_NONE) continue;
-        const long state = c->run_state.load(std::memory_order_relaxed);
+        PlcTaskCtx *c     = &plc_tasks[i];
+        const long  req   = c->run_request.exchange(PLC_TASK_REQ_NONE, std::memory_order_acq_rel);
+        const long  state = c->run_state.load(std::memory_order_acquire);
         if (req == PLC_TASK_REQ_HOLD && state == PLC_TASK_RUN_RUNNING)
         {
             c->held_since_ns.store(now, std::memory_order_relaxed);
             c->run_state.store(PLC_TASK_RUN_HELD, std::memory_order_release);
         }
+        else if (req == PLC_TASK_REQ_PAUSE && state == PLC_TASK_RUN_RUNNING)
+        {
+            if (task_in_scan(c))
+                c->pause_pending.store(1, std::memory_order_relaxed);
+            else
+                hold_at_boundary(c, now);
+        }
         else if (req == PLC_TASK_REQ_RESUME && state == PLC_TASK_RUN_HELD)
         {
             /* Re-arm: the stuck limit measures execution time only, not the hold. */
+            c->pause_pending.store(0, std::memory_order_relaxed);
             c->stuck_ticks.store(0, std::memory_order_relaxed);
             c->release_ns.fetch_add(now - c->held_since_ns.load(std::memory_order_relaxed),
                                     std::memory_order_acq_rel);
             scan_cycle_tracker_resumed(&c->tracker);
             c->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_release);
+            c->resumes.fetch_add(1, std::memory_order_release);
+        }
+        else if (req == PLC_TASK_REQ_RESUME && state == PLC_TASK_RUN_PARKED)
+        {
+            /* Ordered like a release (D11): count it in flight before the post, so its
+             * worker_scan_done() can never drive the count negative. */
+            const int64_t halted = now - c->held_since_ns.load(std::memory_order_relaxed);
+            c->pause_pending.store(0, std::memory_order_relaxed);
+            c->stuck_ticks.store(0, std::memory_order_relaxed);
+            c->release_ns.fetch_add(halted, std::memory_order_acq_rel);
+            scan_cycle_tracker_halted(&c->tracker, halted);
+            c->holds_slot.store(1, std::memory_order_relaxed);
+            g_tasks_running.fetch_add(1, std::memory_order_acq_rel);
+            c->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_release);
+            c->resumes.fetch_add(1, std::memory_order_release);
+            sem_post(&c->resume);
+            resumed_parked = true;
+        }
+
+        /* A pause that found the task mid-scan: hold it at the boundary its scan reaches without
+         * passing a probe, or forget it once the task parked. */
+        if (c->pause_pending.load(std::memory_order_relaxed))
+        {
+            const long st = c->run_state.load(std::memory_order_acquire);
+            if (st == PLC_TASK_RUN_RUNNING && !task_in_scan(c))
+                hold_at_boundary(c, now);
+            else if (st != PLC_TASK_RUN_RUNNING)
+                c->pause_pending.store(0, std::memory_order_relaxed);
         }
     }
+    return resumed_parked;
+}
+
+/* A resumed scan finishes inside a frame of its own, so its copy-out is drained and the plugins
+ * see it at a cycle_end (ADR-004 D1.1: published when the halted scan completes). */
+static void open_resume_frame(bool resumed_parked, bool *cycle_end_pending)
+{
+    if (!resumed_parked || *cycle_end_pending) return;
+    if (plugin_driver) plugin_driver_cycle_start(plugin_driver);
+    *cycle_end_pending = true;
+}
+
+/* The host's park (ADR-001 D2.2), on the scan thread inside strucpp_dbg_hit: mark the task
+ * parked, give back its in-flight slot so the window and the other tasks run, wake the agent,
+ * and block until the dispatcher resumes or abandons it. Futex calls only. */
+static int plc_task_park(size_t task_idx)
+{
+    PlcTaskCtx *c = current_task_ctx;
+    if (!c || c->idx != task_idx) return DBG_PARK_RESUME;
+    c->held_since_ns.store(monotonic_ns(), std::memory_order_relaxed);
+    c->run_state.store(PLC_TASK_RUN_PARKED, std::memory_order_release);
+    worker_scan_done(c);
+    debug_agent_wake();
+    while (sem_wait(&c->resume) != 0 && errno == EINTR) { /* SIGUSR1 wake: retry */ }
+    return c->run_state.load(std::memory_order_acquire) == PLC_TASK_RUN_ABANDONING
+               ? DBG_PARK_ABANDON
+               : DBG_PARK_RESUME;
+}
+
+__attribute__((constructor)) static void register_debug_host(void)
+{
+    static const dbg_host_t host = {plc_task_park};
+    debug_agent_set_host(&host);
+}
+
+/* Binds the program's probes to the debug agent; a probe-off or pre-probe build has none. */
+static void bind_debug_probes(PluginManager *pm)
+{
+    auto *flags   = static_cast<volatile uint8_t *>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_flags"));
+    auto  count   = reinterpret_cast<uint32_t (*)(void)>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_probe_count"));
+    auto  abi     = reinterpret_cast<uint32_t (*)(void)>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_abi_version"));
+    auto  active  = reinterpret_cast<uint8_t *(*)(void)>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_active_addr"));
+    auto  lockdep = reinterpret_cast<int (*)(void)>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_lock_depth"));
+    if (!flags || !count || !abi || !active || count() == 0)
+    {
+        log_info("[debug] program has no probes: run control unavailable (NO_PROBES)");
+        return;
+    }
+    if (abi() != STRUCPP_DBG_ABI_VERSION_SUPPORTED)
+    {
+        log_warn("[debug] program probe ABI %u, runtime supports %u: probes not bound", abi(),
+                 STRUCPP_DBG_ABI_VERSION_SUPPORTED);
+        return;
+    }
+    debug_agent_bind(flags, count(), active(), lockdep, plc_task_count);
+    log_info("[debug] %u probes bound", count());
 }
 
 static bool task_is_running(const PlcTaskCtx *c)
@@ -885,6 +1035,10 @@ void *plc_cycle_thread(void *arg)
                  * master tick N iff N % divisor == 0. The release semaphore
                  * starts at 0 (worker blocks until the dispatcher posts). */
                 sem_init(&ctx->go, 0, 0);
+                sem_init(&ctx->resume, 0, 0);
+                ctx->holds_slot.store(0,    std::memory_order_relaxed);
+                ctx->pause_pending.store(0, std::memory_order_relaxed);
+                ctx->resumes.store(0,       std::memory_order_relaxed);
                 ctx->divisor          = (uint64_t)(ctx->interval_ns / (int64_t)base_ns);
                 if (ctx->divisor == 0) ctx->divisor = 1;
                 ctx->time_at_dispatch = 0;
@@ -942,6 +1096,8 @@ void *plc_cycle_thread(void *arg)
                  plc_tasks[fastest_idx].priority);
     }
 
+    bind_debug_probes(pm);
+
     /* Spawn task threads. On partial failure (pthread_create succeeds
      * for 0..i-1, fails at i): flip state to ERROR, post every
      * surviving thread's release so it wakes, join them, free the
@@ -979,6 +1135,7 @@ void *plc_cycle_thread(void *arg)
             {
                 scan_cycle_tracker_cleanup(&plc_tasks[k].tracker);
                 sem_destroy(&plc_tasks[k].go);
+                sem_destroy(&plc_tasks[k].resume);
             }
             std::free(plc_tasks);
             plc_tasks      = nullptr;
@@ -1061,7 +1218,7 @@ void *plc_cycle_thread(void *arg)
         }
         else
         {
-            apply_run_requests();
+            open_resume_frame(apply_run_requests(), &cycle_end_pending);
 
             {
                 int64_t oldest = 0;
@@ -1108,7 +1265,7 @@ void *plc_cycle_thread(void *arg)
                 /* Prime config-scope shared globals from the input image.
                  * Guarded by quiescence (no overrunning task is in run())
                  * to avoid racing a per-global mutex. */
-                if (g_tasks_running.load(std::memory_order_acquire) == 0)
+                if (g_tasks_running.load(std::memory_order_acquire) == 0 && !any_task_parked())
                 {
                     image_lock();
                     image_tables_copy_config_globals_in();
@@ -1141,6 +1298,7 @@ void *plc_cycle_thread(void *arg)
                         c->release_ns.store(monotonic_ns(), std::memory_order_release);
                         c->time_at_dispatch = vt;
                         c->released.store(r + 1, std::memory_order_relaxed);
+                        c->holds_slot.store(1, std::memory_order_relaxed);
                         g_tasks_running.fetch_add(1, std::memory_order_acq_rel);
                         sem_post(&c->go);
                     }
@@ -1234,18 +1392,21 @@ void *plc_cycle_thread(void *arg)
                 g_tasks_running.load(std::memory_order_acquire) == 0)
             {
                 pthread_mutex_unlock(&done_mutex);
+                /* A parked task holds no slot, so the window runs while it is parked; only what
+                 * would read its half-finished scan is skipped. */
+                const bool parked = any_task_parked();
                 image_lock();          /* drain: commit this frame's outputs */
                 /* Journal config-scope globals before the drain copies
                  * them to the image. Safe under quiescence; no per-global
                  * mutex needed. */
-                image_tables_copy_config_globals_out();
+                if (!parked) image_tables_copy_config_globals_out();
                 /* Apply queued external writes/forces (debugger, OPC-UA) here:
                  * g_tasks_running == 0 so no worker is mid-scan, and we hold
                  * image_lock. Cheap no-op when nothing is queued. */
                 debug_write_journal_drain();
                 /* Retained values once per scan, under quiescence. The
                  * plugin decides whether to actually commit now. */
-                plc_retain_save();
+                if (!parked) plc_retain_save();
                 image_unlock();
                 if (plugin_driver) plugin_driver_cycle_end(plugin_driver);
                 cycle_end_pending = false;
@@ -1255,6 +1416,13 @@ void *plc_cycle_thread(void *arg)
                     release_hold_after_first_copy_out();
                 pthread_mutex_lock(&done_mutex);
                 continue;              /* now just wait out the deadline */
+            }
+            if (g_run_requests_pending.load(std::memory_order_acquire))
+            {
+                pthread_mutex_unlock(&done_mutex);
+                open_resume_frame(apply_run_requests(), &cycle_end_pending);
+                pthread_mutex_lock(&done_mutex);
+                continue;
             }
             int rc = pthread_cond_timedwait(&done_cond, &done_mutex, &next_tick);
             if (rc == ETIMEDOUT) break;   /* deadline reached → next tick */
@@ -1429,6 +1597,8 @@ static int unload_plc_program_locked(PluginManager *pm, bool restart)
         pthread_mutex_unlock(&state_mutex);
 
         pthread_join(plc_thread, NULL);
+        /* Every task thread is gone; the .so is closed below. */
+        debug_agent_unbind();
 
         /* Commit retained values: AFTER the join (consistent snapshot)
          * and BEFORE plugin_driver_stop (plugin-backed stores need to
@@ -1897,6 +2067,11 @@ bool post_run_request(size_t task_idx, long req)
         c->run_request.store(req, std::memory_order_release);
     });
     pthread_mutex_unlock(&plc_tasks_lock);
+    /* Wake the dispatcher's wait so a resume costs microseconds, not a tick (D11). */
+    g_run_requests_pending.store(true, std::memory_order_release);
+    pthread_mutex_lock(&done_mutex);
+    pthread_cond_signal(&done_cond);
+    pthread_mutex_unlock(&done_mutex);
     return ok;
 }
 
@@ -1995,8 +2170,69 @@ extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
     /* Journaled before the release, so the resumed scan's copy-in reads the saved values. */
     LocatedRanges r = ranges_of(task_idx);
     halt_policy_restore_saved(output_in_scope, &r);
+    /* Wait for the resume itself, not for RUNNING: a resumed task may stop again at once
+     * (a step, a breakpoint later in the scan) before a poll would see it running. */
+    long before[DBG_MAX_TASKS] = {0};
+    bool halted[DBG_MAX_TASKS] = {false};
+    pthread_mutex_lock(&plc_tasks_lock);
+    for_targets(task_idx, [&](PlcTaskCtx *c) {
+        if (c->idx >= DBG_MAX_TASKS) return;
+        before[c->idx] = c->resumes.load(std::memory_order_acquire);
+        halted[c->idx] = c->run_state.load(std::memory_order_acquire) != PLC_TASK_RUN_RUNNING;
+    });
+    pthread_mutex_unlock(&plc_tasks_lock);
     if (!post_run_request(task_idx, PLC_TASK_REQ_RESUME)) return false;
-    return wait_run_state(task_idx, PLC_TASK_RUN_RUNNING, false, timeout_ms);
+    const timespec poll = {0, 200000L};
+    for (int64_t deadline = monotonic_ns() + (int64_t)timeout_ms * NS_PER_MS;;)
+    {
+        bool done = true;
+        pthread_mutex_lock(&plc_tasks_lock);
+        for_targets(task_idx, [&](PlcTaskCtx *c) {
+            if (c->idx < DBG_MAX_TASKS && halted[c->idx] && c->alive.load(std::memory_order_acquire) &&
+                c->resumes.load(std::memory_order_acquire) == before[c->idx])
+                done = false;
+        });
+        pthread_mutex_unlock(&plc_tasks_lock);
+        if (done) return true;
+        if (monotonic_ns() >= deadline) return false;
+        nanosleep(&poll, nullptr);
+    }
+}
+
+extern "C" bool plc_run_control_pause(size_t task_idx)
+{
+    if (plc_get_state() != PLC_STATE_RUNNING) return false;
+    return post_run_request(task_idx, PLC_TASK_REQ_PAUSE);
+}
+
+extern "C" void plc_run_control_halted(size_t task_idx)
+{
+    if (halt_policy_get()->kind != HALT_POLICY_SAFE) return;
+    LocatedRanges r = ranges_of(task_idx);
+    halt_policy_apply_safe(output_in_scope, &r);
+}
+
+extern "C" long plc_task_run_state(size_t task_idx, int64_t *since_ns)
+{
+    long st = -1;
+    pthread_mutex_lock(&plc_tasks_lock);
+    if (plc_tasks && task_idx < plc_task_count)
+    {
+        st = plc_tasks[task_idx].run_state.load(std::memory_order_acquire);
+        if (since_ns) *since_ns = plc_tasks[task_idx].held_since_ns.load(std::memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return st;
+}
+
+extern "C" size_t plc_task_names(char names[][32], size_t max)
+{
+    pthread_mutex_lock(&plc_tasks_lock);
+    size_t n = plc_tasks ? plc_task_count : 0;
+    for (size_t i = 0; i < n && i < max; ++i)
+        std::snprintf(names[i], 32, "%s", plc_tasks[i].name);
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return n;
 }
 
 /* ---- Boot with a hold file ---- */

@@ -47,15 +47,21 @@ typedef enum
     PLC_STATE_SAFE_STOPPED
 } PLCState;
 
-/* Per-task run state, owned by the dispatcher. HELD: not released, and excluded
- * from overrun, stuck and first-scan accounting. */
-#define PLC_TASK_RUN_RUNNING 0
-#define PLC_TASK_RUN_HELD    1
+/* Per-task run state, owned by the dispatcher (ADR-001 D11). HELD: idle at its scan boundary
+ * and not released. PARKED: stopped mid-scan inside a probe (the only state the task enters
+ * itself). ABANDONING: parked, told to unwind its scan. Every state but RUNNING is excluded from
+ * overrun, stuck and first-scan accounting, and its virtual clock does not move. */
+#define PLC_TASK_RUN_RUNNING    0
+#define PLC_TASK_RUN_HELD       1
+#define PLC_TASK_RUN_PARKED     2
+#define PLC_TASK_RUN_ABANDONING 3
 
-/* Pending run-control request in PlcTaskCtx::run_request. */
+/* Pending run-control request in PlcTaskCtx::run_request. PAUSE holds the task at its next
+ * boundary if it is idle; a task in its scan parks at its next probe through the trap instead. */
 #define PLC_TASK_REQ_NONE   0
 #define PLC_TASK_REQ_HOLD   1
 #define PLC_TASK_REQ_RESUME 2
+#define PLC_TASK_REQ_PAUSE  3
 
 /* Task index meaning "every task" for the run-control calls. */
 #define PLC_ALL_TASKS ((size_t)-1)
@@ -92,7 +98,11 @@ typedef struct PlcTaskCtx
 
     plc_atomic_long_t     run_state;       /* PLC_TASK_RUN_*, written by the dispatcher only */
     plc_atomic_long_t     run_request;     /* PLC_TASK_REQ_*, written by run control */
-    plc_atomic_i64_t      held_since_ns;   /* CLOCK_MONOTONIC time the hold was applied */
+    plc_atomic_i64_t      held_since_ns;   /* CLOCK_MONOTONIC time the hold or park began */
+    plc_atomic_long_t     holds_slot;      /* 1 while this task's scan counts in g_tasks_running */
+    plc_atomic_long_t     pause_pending;   /* a PAUSE waits for the scan in flight to end; dispatcher only */
+    sem_t                 resume;          /* a parked task waits here; posted by the dispatcher only */
+    plc_atomic_long_t     resumes;         /* resumes applied (held or parked -> running); dispatcher only */
 
     /* Per-task scan/cycle/latency tracker. The task thread updates it
      * around its scan body; STATS walks all trackers for per-task entries. */
@@ -274,6 +284,34 @@ bool plc_run_control_hold(size_t task_idx, int timeout_ms);
  * @return true when every targeted task is running again
  */
 bool plc_run_control_resume(size_t task_idx, int timeout_ms);
+
+/**
+ * @brief Pause a task (or PLC_ALL_TASKS) for the debugger. Asynchronous.
+ *
+ * An idle task is held at its scan boundary; a task in its scan is left running so it parks at
+ * its next probe (the caller has set the trap). The dispatcher applies it within one base tick,
+ * or at once when it is waiting out a tick.
+ *
+ * @return false when the PLC is not RUNNING or the index names no task
+ */
+bool plc_run_control_pause(size_t task_idx);
+
+/**
+ * @brief Apply the halt policy to a task that has just halted (ADR-004 D1.3).
+ *
+ * Under a safe policy, saves the outputs in the task's scope and journals their safe values.
+ * The debug agent calls it once per halt; plc_run_control_resume puts the saved values back.
+ */
+void plc_run_control_halted(size_t task_idx);
+
+/**
+ * @brief Run state of one task for the debugger: PLC_TASK_RUN_*, or -1 when the index names none.
+ * @param since_ns set to the CLOCK_MONOTONIC time the current hold or park began (may be NULL)
+ */
+long plc_task_run_state(size_t task_idx, int64_t *since_ns);
+
+/** @brief Number of tasks of the running program (0 with none), and each one's name. */
+size_t plc_task_names(char names[][32], size_t max);
 
 /**
  * @brief Virtual time of one task, in ns since the program started (ADR-004 D4).

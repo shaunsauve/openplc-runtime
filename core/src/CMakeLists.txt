@@ -57,6 +57,8 @@ add_executable(plc_main
     ${CMAKE_SOURCE_DIR}/core/src/drivers/vpp_plugin_seal.c
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/unix_socket.c
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/debug_handler.c
+    ${CMAKE_SOURCE_DIR}/core/src/plc_app/debug_agent.cpp
+    ${CMAKE_SOURCE_DIR}/core/src/plc_app/debug_link.cpp
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/client_tcp_udp.c
 )
 

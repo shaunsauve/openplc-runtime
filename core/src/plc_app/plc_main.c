@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "../drivers/plugin_driver.h"
+#include "debug_link.h"
 #include "image_tables.h"
 #include "plc_state_manager.h"
 #include "plc_switch.h"
@@ -217,6 +218,10 @@ int main(int argc, char *argv[])
         log_error("Failed to set up UNIX socket");
         return -1;
     }
+
+    // The debugger's core link (ADR-003 D1.3). Optional: the PLC runs without it.
+    if (debug_link_start(DEBUG_LINK_SOCKET_PATH) != 0)
+        log_error("Failed to set up the debug core link; run control is unavailable");
 
     // Auto-start (skipped in safe mode). The switch gate below reads
     // the default (RUN) when no plugin has reported yet — a VPP that

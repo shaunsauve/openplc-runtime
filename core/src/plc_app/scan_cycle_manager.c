@@ -110,6 +110,9 @@ void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker)
 
     pthread_mutex_lock(&tracker->mutex);
 
+    /* A mid-scan halt is not scan time (ADR-004 D3.1). */
+    now_us -= tracker->halted_us;
+    tracker->halted_us = 0;
     int64_t scan_time_us = (int64_t)(now_us - tracker->last_start_us);
     plc_timing_stats_t *s = &tracker->stats;
     if (scan_time_us < s->scan_time_min) s->scan_time_min = scan_time_us;
@@ -129,6 +132,15 @@ void scan_cycle_tracker_resumed(scan_cycle_tracker_t *tracker)
 {
     if (!tracker) return;
     pthread_mutex_lock(&tracker->mutex);
+    tracker->rearm = true;
+    pthread_mutex_unlock(&tracker->mutex);
+}
+
+void scan_cycle_tracker_halted(scan_cycle_tracker_t *tracker, int64_t halted_ns)
+{
+    if (!tracker || halted_ns <= 0) return;
+    pthread_mutex_lock(&tracker->mutex);
+    tracker->halted_us += (uint64_t)(halted_ns / 1000);
     tracker->rearm = true;
     pthread_mutex_unlock(&tracker->mutex);
 }

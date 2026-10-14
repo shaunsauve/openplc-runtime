@@ -84,7 +84,7 @@ int plugin_driver_cleanup_init(plugin_driver_t *) { return 0; }
 int plugin_driver_start(plugin_driver_t *) { return 0; }
 int plugin_driver_stop(plugin_driver_t *) { return 0; }
 void plugin_driver_cycle_start(plugin_driver_t *) {}
-void plugin_driver_cycle_end(plugin_driver_t *) {}
+void plugin_driver_cycle_end(plugin_driver_t *);
 size_t plugin_driver_append_stats_json(plugin_driver_t *, char *, size_t) { return 0; }
 size_t process_debug_data(uint8_t *, size_t) { return 0; }
 int plugin_driver_execute_command(plugin_driver_t *, const char *, const char *, char *, size_t)
@@ -117,7 +117,7 @@ void debug_write_journal_reset(void) {}
 
 static const int64_t kMs       = 1000000;
 static const int64_t kTaskNs   = 20 * kMs;
-static const int64_t kDwellNs  = 100 * kMs;
+static const int64_t kDwellNs  = 150 * kMs;  /* under the 10-period stuck limit */
 /* Probes the program reaches; the flag array is larger so the table can be filled (A032). */
 static const uint32_t kProbes  = 2048;
 enum : uint32_t { P_WITNESS = 0, P_K = 1, P_OUT = 2, P_DWELL = 3, P_L = 4 };
@@ -283,6 +283,47 @@ void *plugin_manager_try_get_symbol(PluginManager *, const char *n)
         if (std::strcmp(e.name, n) == 0) return e.fn;
     return nullptr;
 }
+}
+
+// ---------------------------------------------------------------------------
+// The plant: samples the output image at every cycle_end, as the reference plant does
+// ---------------------------------------------------------------------------
+
+static std::mutex       g_plant_mu;
+static std::vector<int> g_plant_witness;
+static std::vector<int64_t> g_plant_t;
+
+extern "C" void plugin_driver_cycle_end(plugin_driver_t *)
+{
+    image_lock();
+    const int w = int_output[0] ? *int_output[0] : -1;
+    image_unlock();
+    std::lock_guard<std::mutex> g(g_plant_mu);
+    g_plant_witness.push_back(w);
+    g_plant_t.push_back(mono_ns());
+}
+
+/* When the plant's witness took the value it has now, if that was after `from`; else `from`. */
+static int64_t plant_frozen_since(int64_t from)
+{
+    std::lock_guard<std::mutex> g(g_plant_mu);
+    size_t i = g_plant_witness.size();
+    if (i == 0) return from;
+    const int last = g_plant_witness[i - 1];
+    while (i > 0 && g_plant_witness[i - 1] == last && g_plant_t[i - 1] >= from) --i;
+    return i < g_plant_witness.size() && g_plant_t[i] > from ? g_plant_t[i] : from;
+}
+
+static size_t plant_mark(void)
+{
+    std::lock_guard<std::mutex> g(g_plant_mu);
+    return g_plant_witness.size();
+}
+
+static std::vector<int> plant_since(size_t from)
+{
+    std::lock_guard<std::mutex> g(g_plant_mu);
+    return std::vector<int>(g_plant_witness.begin() + (long)from, g_plant_witness.end());
 }
 
 // ---------------------------------------------------------------------------
@@ -635,27 +676,29 @@ static void case_armed_in_dwell(void)
     size_t m   = g_link.mark();
     cJSON *r   = g_link.call("setBreakpoint", "{\"probe\":4}");
     const int w = plant_word(0);
+    const size_t pm = plant_mark();
     CHECK(ok(r), "setBreakpoint refused: %s", err_code(r));
     CHECK(g_in_dwell.load(), "the response arrived after the dwell (test timing)");
     g_dwell = false;
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_L)), "no stop at L");
-    bool moved = false;
-    for (int i = 0; i < 30; ++i, sleep_ms(10)) moved |= plant_word(0) != w;
-    CHECK(!moved, "the plant's witness left %d during the halt: the stop came a scan late", w);
+    sleep_ms(300);
+    std::vector<int> halt = plant_since(pm);
+    CHECK(halt.size() >= 10, "only %zu plant frames during the halt", halt.size());
+    CHECK(std::all_of(halt.begin(), halt.end(), [&](int v) { return v == w; }),
+          "the plant's witness left %d during the halt: the stop came a scan late", w);
     CHECK(g_witness_st.load() == w + 1, "the session read witness %d, want %d", g_witness_st.load(),
           w + 1);
 
     r = g_link.call("clearBreakpoint", "{\"probe\":4}");
     CHECK(ok(r), "clearBreakpoint refused: %s", err_code(r));
     m = g_link.mark();
+    const size_t pr = plant_mark();
     cont();
-    std::vector<int> seen;
-    const long       n0 = g_scans.load();
-    wait_for([&] {
-        int v = plant_word(0);
-        if (seen.empty() || seen.back() != v) seen.push_back(v);
-        return g_scans.load() >= n0 + 100;
-    }, 5000);
+    const long n0 = g_scans.load();
+    wait_for([&] { return g_scans.load() >= n0 + 100; }, 5000);
+    std::vector<int> seen{w};
+    for (int v : plant_since(pr))
+        if (seen.back() != v) seen.push_back(v);
     CHECK(g_scans.load() >= n0 + 100, "only %ld scans after the clear", g_scans.load() - n0);
     CHECK(g_link.count(m, "stopped") == 0, "%d stops after the clear", g_link.count(m, "stopped"));
     CHECK(seen.size() >= 2 && seen[1] == w + 1, "after the resume the plant saw %d, want %d",
@@ -691,41 +734,32 @@ static void case_limit(void)
     cont();
 }
 
-/* A033: pause halts within one interval + 100 ms, 20 times at random points; continue resumes. */
+/* A033: pause halts within one interval + 100 ms, judged by when the plant's witness froze;
+ * at random points, idle (a boundary hold) and inside a long scan (a park at the next probe). */
 static void case_pause(void)
 {
     g_case = "A033 pause";
     std::mt19937 rng(7);
     int64_t      worst = 0;
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 25; ++i)
     {
-        sleep_ms((int)(rng() % 40));
+        g_dwell = i >= 10; /* scans of 150 ms: a pause deferred to a boundary misses the bound */
+        sleep_ms((int)(rng() % (i >= 10 ? 150 : 40)));
         size_t        m  = g_link.mark();
         const int64_t t0 = mono_ns();
         cJSON        *r  = g_link.call("pause");
         CHECK(ok(r), "pause refused: %s", err_code(r));
-        Msg st{};
-        CHECK(g_link.event(m, "stopped", &st, 1000, stopped_at("pause", -1)), "no pause stop");
-        /* The plant's witness is frozen once no scan can complete. */
-        int  w = plant_word(0);
-        int64_t frozen_at = 0;
-        for (int k = 0; k < 400; ++k)
-        {
-            const int v = plant_word(0);
-            if (v != w) { w = v; frozen_at = 0; }
-            else if (!frozen_at) frozen_at = mono_ns();
-            if (frozen_at && mono_ns() - frozen_at > 3 * kTaskNs) break;
-            sleep_ms(1);
-        }
-        worst = std::max(worst, frozen_at - t0);
+        CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("pause", -1)), "no pause stop");
         if (i == 0)
             CHECK(g_link.event(m, "runState", nullptr, 500, state_is("PAUSED")), "no PAUSED runState");
-        m = g_link.mark();
-        const long n = g_scans.load();
+        sleep_ms(250);
+        worst = std::max(worst, plant_frozen_since(t0) - t0);
+        g_dwell        = false;
+        const long n   = g_scans.load();
         cont();
-        CHECK(wait_for([&] { return g_scans.load() > n + 1; }, 500), "no scans after continue");
+        CHECK(wait_for([&] { return g_scans.load() > n + 1; }, 1000), "no scans after continue");
     }
-    CHECK(worst <= kTaskNs + 100 * kMs, "the plant froze %.0f ms after the pause request (bound %lld)",
+    CHECK(worst <= kTaskNs + 100 * kMs, "the plant froze %.0f ms after a pause request (bound %lld)",
           (double)worst / 1e6, (long long)((kTaskNs + 100 * kMs) / kMs));
 }
 
@@ -757,8 +791,16 @@ static void case_stop(void)
           "a stop while parked landed %d, not STOPPED", (int)plc_get_state());
 }
 
+static void on_wake(int) {}
+
 int main()
 {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    /* plc_main installs this wake handler; task threads are woken with SIGUSR1. */
+    struct sigaction wake;
+    std::memset(&wake, 0, sizeof wake);
+    wake.sa_handler = on_wake;
+    sigaction(SIGUSR1, &wake, nullptr);
     std::snprintf(g_sock, sizeof g_sock, "/tmp/plc_debug_test_%d.sock", (int)getpid());
     if (debug_link_start(g_sock) != 0)
     {

@@ -115,6 +115,8 @@ static std::vector<uint8_t> cond_long()
 
 static void bind_fresh(void)
 {
+    /* A clean table: breakpoints kept across an unbind would otherwise be re-armed. */
+    debug_agent_clear_all_breakpoints();
     debug_agent_unbind();
     std::memset((void *)g_flags, 0, sizeof g_flags);
     debug_agent_bind(g_flags, kProbes, &g_active, fake_lock_depth, 2);
@@ -145,7 +147,7 @@ static void case_limit(void)
     /* A stop still occurs at a previously set one, and at a sample of 10 across the range. */
     std::thread t([] {
         debug_agent_task_enter(0);
-        for (uint32_t p = 0; p < DBG_MAX_BREAKPOINTS; p += DBG_MAX_BREAKPOINTS / 10) probe(p);
+        for (uint32_t k = 0; k < 10; ++k) probe(k * (DBG_MAX_BREAKPOINTS / 10));
         probe(DBG_MAX_BREAKPOINTS);
         debug_agent_task_exit();
     });

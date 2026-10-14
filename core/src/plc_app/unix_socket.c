@@ -15,6 +15,7 @@
 
 #include "../drivers/plugin_driver.h"
 #include "debug_handler.h"
+#include "debug_link.h"
 #include "plc_state_manager.h"
 #include "plc_switch.h"
 #include "scan_cycle_manager.h"
@@ -364,6 +365,14 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
         {
             strncpy(response, "DEBUG:ERROR_PARSING\n", response_size);
         }
+    }
+    else if (strncmp(command, "DEBUG_LINK:", 11) == 0)
+    {
+        // One core-link request per line (docs/DEBUG_PROTOCOL.md § Core link); events are
+        // pushed only on the framed socket.
+        int n = snprintf(response, response_size, "DEBUG_LINK:");
+        debug_link_handle_request(&command[11], response + n, response_size - (size_t)n - 1);
+        strncat(response, "\n", response_size - strlen(response) - 1);
     }
     else if (strncmp(command, "PLUGIN_CMD:", 11) == 0)
     {

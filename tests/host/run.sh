@@ -38,11 +38,15 @@ TSAN_TESTS=(
   "tests/host/test_breakpoint_table.cpp:core/src/plc_app/debug_agent.cpp"
 )
 
+# ONLY=<substring>: build and run only the tests whose name contains it (red-proof scripts).
+ONLY="${ONLY:-}"
+
 failures=0
 for entry in "${TESTS[@]}"; do
   test_src="${entry%%:*}"
   deps="${entry#*:}"
   name=$(basename "$test_src" .cpp)
+  [[ -n "$ONLY" && "$name" != *"$ONLY"* ]] && continue
 
   printf '\n=== %s ===\n' "$name"
   # C sources are compiled as C, not C++.
@@ -75,6 +79,7 @@ if echo 'int main(){}' | $CXX -x c++ -fsanitize=thread - -o "$OUT/tsan_probe" 2>
     test_src="${entry%%:*}"
     deps="${entry#*:}"
     name="$(basename "$test_src" .cpp)_tsan"
+    [[ -n "$ONLY" && "$name" != *"$ONLY"* ]] && continue
     printf '\n=== %s ===\n' "$name"
     # shellcheck disable=SC2086
     if ! $CXX $CXXFLAGS -O1 -fsanitize=thread $INCLUDES "$test_src" ${deps//:/ } -o "$OUT/$name" -lpthread; then

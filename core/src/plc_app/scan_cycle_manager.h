@@ -46,6 +46,7 @@ typedef struct
     uint64_t           last_start_us;
     int64_t            interval_ns;
     bool               rearm;             /* next start follows a halt: skip its sample, re-anchor */
+    uint64_t           halted_us;         /* halt inside the scan in progress (ADR-004 D3.1) */
     pthread_mutex_t    mutex;
 } scan_cycle_tracker_t;
 
@@ -67,6 +68,10 @@ void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker);
  * or latency sample spanning the halt and re-anchors the expected start, so neither
  * the halt nor a missed deadline it caused enters the statistics. Any thread. */
 void scan_cycle_tracker_resumed(scan_cycle_tracker_t *tracker);
+
+/* A task parked mid-scan resumes: the halt is taken out of that scan's time and its overrun
+ * test, and the next start is re-anchored as after any halt. */
+void scan_cycle_tracker_halted(scan_cycle_tracker_t *tracker, int64_t halted_ns);
 
 /* Atomically copy the tracker's stats. Returns true if the task has
  * completed at least one full cycle (snapshot is meaningful). */
