@@ -1,0 +1,13 @@
+(* corpus: bench
+   members: bench_hot bench_call bench_mix
+   criteria: A012 A028 A032 A051 A062 A102 A159 A163 A187
+   fc: FC-TST-1 FC-TST-10 FC-BP-4 FC-BP-18 FC-DI-1 FC-DI-3 FC-HLT-3 FC-HLT-4
+     FC-PERF-2 FC-PERF-4 FC-PERF-6 FC-PERF-7
+
+   corpus:bench is the family of every program tagged `bench` (ADR-001 D10.1):
+   each has >= 500 executed statements per scan, nested FB calls, a function
+   call and a FOR loop, one task, and a probe-off scan >= 100 us on the
+   reference target. A criterion naming corpus:bench runs all three members,
+   and an oracle in this directory runs once per member: its markers resolve
+   in each member's program.st.
+*)

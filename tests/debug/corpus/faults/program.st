@@ -3,6 +3,7 @@
    fc: FC-TST-1 FC-TST-6 FC-BP-11 FC-DAP-1 FC-DAP-3 FC-DIAG-3 FC-HLT-5
      FC-HLT-11 FC-HLT-13 FC-RC-6 FC-ST-11 FC-TR-1 FC-TR-2 FC-TR-3
    witness: Main PROG0.witness %QD0
+   build: expect-fail STruCpp emits ADR(v) XOR 16#... as C++ pointer XOR, which does not compile
    ASSUMED: a Python block is the editor's generated stub, an FB whose body is
      native code calling the runtime's Python loader (ADR-008 Context). PyBlock
      stands in for that stub: its faults are a SIGSEGV in the stub's own code

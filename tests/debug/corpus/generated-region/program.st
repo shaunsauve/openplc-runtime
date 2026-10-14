@@ -2,7 +2,6 @@
    criteria: A026 A040
    fc: FC-TST-1 FC-ST-8
    witness: Main PROG0.witness %QD0
-   build: expect-fail F024: STruCpp does not lex the {strucpp generated} pragmas yet (ADR-002 D6)
 
    A pragma-marked generated POU (GenScale) and a marked region inside a user
    POU. Every statement inside either carries the generated flag (probes.flags

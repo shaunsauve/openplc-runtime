@@ -2,6 +2,7 @@
    criteria: A215
    fc: FC-TST-1 FC-RC-3 FC-FUT-3
    witness: Main PROG0.witness %QD0
+   build: expect-fail STruCpp runtime has no IECWStringVar <> char16_t[] operator: r_ws <> "" does not compile
 
    ADR-006 D8.9 (N1): 200 retained leaves of mixed types, more than the 128
    entries of the debug-write queue that restores go through today

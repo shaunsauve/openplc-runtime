@@ -12,6 +12,12 @@
 #        must fail to compile (a construct the compiler refuses), leave no generated code, and,
 #        when its header has `expect-diagnostic: <text>`, name that text in the diagnostic;
 #        variant-*.st must compile.
+#        "Compile" means the generated C++ too: every .cpp is syntax-checked against the
+#        STruCpp runtime headers with the flags scripts/Makefile.strucpp uses. STruCpp
+#        passes an unknown call (LOG_PRINT) or a construct its runtime lacks straight
+#        through to C++, so an ST-only check reported print-builtin as XPASS when the
+#        runtime build of it fails. CXX (default c++) names the compiler; none on PATH
+#        fails the run rather than silently skipping the check.
 #
 # See also:
 #   tests/debug/corpus/README.md - program header keys read here (sources, build).
@@ -29,6 +35,13 @@ if [ ! -f "$CLI" ]; then
   (cd "$STRUCPP" && npm ci --no-audit --no-fund --silent && npm run build --silent) || {
     echo "FAIL: cannot build STruCpp at $STRUCPP"; exit 1; }
 fi
+CXX=${CXX:-c++}
+command -v "$CXX" >/dev/null || { echo "FAIL: no C++ compiler ($CXX) for the generated-code check"; exit 1; }
+RTINC="$STRUCPP/src/runtime/include"
+[ -d "$RTINC" ] || { echo "FAIL: no STruCpp runtime headers at $RTINC"; exit 1; }
+cxx_check() {  # cxx_check <program dir out> <cpp> [lib dir]: the generated C++ compiles
+  "$CXX" -std=c++17 -DSTRUCPP_THREADED -fsyntax-only -I"$RTINC" -I"$1" ${3:+-I"$3"} "$2" >"${2%.cpp}.cxx.log" 2>&1
+}
 DEBUG_FLAG=()
 if node "$CLI" --help 2>&1 | grep -q -- '--debug-artifacts'; then DEBUG_FLAG=(--debug-artifacts); fi
 
@@ -54,12 +67,17 @@ for dir in "$HERE"/*/; do
   fi
   files=(); for s in $srcs; do files+=("$dir/$s"); done
   dbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && dbg=("${DEBUG_FLAG[@]}" "$out/debug")
-  node "$CLI" "${files[@]}" -o "$out/program.cpp" ${libargs[@]+"${libargs[@]}"} ${dbg[@]+"${dbg[@]}"} >"$out/build.log" 2>&1 || status=1
+  libinc=; [ -d "$out/lib" ] && libinc="$out/lib"
+  if node "$CLI" "${files[@]}" -o "$out/program.cpp" ${libargs[@]+"${libargs[@]}"} ${dbg[@]+"${dbg[@]}"} >"$out/build.log" 2>&1; then
+    cxx_check "$out" "$out/program.cpp" "$libinc" || status=1
+  else status=1; fi
   for v in "$dir"/variant-*.st; do
     [ -f "$v" ] || continue
     vn=$(basename "$v" .st)
     vdbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && vdbg=("${DEBUG_FLAG[@]}" "$out/$vn.debug")
-    node "$CLI" "$v" -o "$out/$vn.cpp" ${libargs[@]+"${libargs[@]}"} ${vdbg[@]+"${vdbg[@]}"} >"$out/$vn.log" 2>&1 || status=1
+    if node "$CLI" "$v" -o "$out/$vn.cpp" ${libargs[@]+"${libargs[@]}"} ${vdbg[@]+"${vdbg[@]}"} >"$out/$vn.log" 2>&1; then
+      cxx_check "$out" "$out/$vn.cpp" "$libinc" || status=1
+    else status=1; fi
   done
   for r in "$dir"/reject-*.st; do
     [ -f "$r" ] || continue
