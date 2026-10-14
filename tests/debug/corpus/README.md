@@ -15,7 +15,8 @@ tests/debug/corpus/
   <name>/program.st       the program (main source; more .st files allowed)
   <name>/<id>.oracle.json one scenario each
   <name>/variant-*.st     a whole alternative build the scenarios apply (online change, downloads); must compile
-  <name>/reject-*.st      a construct the compiler must refuse (shared-globals S8); must fail to compile
+  <name>/reject-*.st      a construct the compiler must refuse (ADR-001 D1.3 S8: shared-globals, multi-task);
+                          must fail to compile, leave no code, and name its `expect-diagnostic:` header text
   <name>/lib/*.st         a user library, compiled with --no-source and linked (library-pou)
   <name>/gen.py           generator of program.st when it is too big to hand-write (large-data); `--check` in build_all.sh
   <name>/*.origin.json    the LD/FBD transpiler's source map (ADR-002 D6) for ld-sample and fbd-sample

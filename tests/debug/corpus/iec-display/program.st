@@ -26,7 +26,7 @@ PROGRAM Display
     tod1 : TOD := TOD#12:30:15;
     col : Color := GREEN;
     name : STRING(20) := 'pump';
-    by : BYTE := 16#0F;
+    bt : BYTE := 16#0F;
     wo : WORD := 16#00FF;
     dw : DWORD := 16#DEADBEEF;
     lw : LWORD := 16#0123456789ABCDEF;

@@ -14,7 +14,7 @@
       "PROG0.t": {"~display": "T#1s200ms"}, "PROG0.d": {"~display": "D#2026-10-13"},
       "PROG0.dt1": {"~display": "DT#2026-10-13-12:30:00"}, "PROG0.tod1": {"~display": "TOD#12:30:15"},
       "PROG0.col": {"~display": "GREEN"}, "PROG0.name": {"~display": "'pump'"},
-      "PROG0.by": {"~display": "16#0F"}, "PROG0.wo": {"~display": "16#00FF"},
+      "PROG0.bt": {"~display": "16#0F"}, "PROG0.wo": {"~display": "16#00FF"},
       "PROG0.dw": {"~display": "16#DEADBEEF"}, "PROG0.lw": {"~display": "16#0123456789ABCDEF"},
       "PROG0.tmr.PT": {"~display": "T#5s"}, "PROG0.tmr.ET": {"~display": "T#0s"}, "PROG0.tmr.Q": false}}},
     {"observe": "session", "note": "named fields, read through the FB instance's children",

@@ -1,7 +1,7 @@
 (* retain-vars variant: the RETAIN variable kept is retyped DINT -> LINT, so a
    download starts it at its initial value (A215). *)
 
-PROGRAM Retain
+PROGRAM RetainProg
   VAR RETAIN
     kept : LINT;
     kcount : DINT;
@@ -41,6 +41,6 @@ END_PROGRAM
 CONFIGURATION Config0
   RESOURCE Res0 ON PLC
     TASK Main(INTERVAL := T#100ms, PRIORITY := 1);
-    PROGRAM PROG0 WITH Main : Retain;
+    PROGRAM PROG0 WITH Main : RetainProg;
   END_RESOURCE
 END_CONFIGURATION

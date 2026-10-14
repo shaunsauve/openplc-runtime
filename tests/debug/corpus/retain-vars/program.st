@@ -13,7 +13,7 @@
    landed before the first release (ADR-006 D8.6.4).
 *)
 
-PROGRAM Retain
+PROGRAM RetainProg
   VAR RETAIN
     kept : DINT;
     kcount : DINT;
@@ -53,6 +53,6 @@ END_PROGRAM
 CONFIGURATION Config0
   RESOURCE Res0 ON PLC
     TASK Main(INTERVAL := T#100ms, PRIORITY := 1);
-    PROGRAM PROG0 WITH Main : Retain;
+    PROGRAM PROG0 WITH Main : RetainProg;
   END_RESOURCE
 END_CONFIGURATION

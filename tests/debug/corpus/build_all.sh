@@ -9,7 +9,9 @@
 # Exit:  0 when every program compiles (or fails as its header's `build: expect-fail` says)
 #        and validate.py passes; 1 otherwise. Per program: OK, FAIL, XFAIL, or XPASS
 #        (an expect-fail program that now compiles: remove its marker). A reject-*.st file
-#        must fail to compile (a construct the compiler refuses); variant-*.st must compile.
+#        must fail to compile (a construct the compiler refuses), leave no generated code, and,
+#        when its header has `expect-diagnostic: <text>`, name that text in the diagnostic;
+#        variant-*.st must compile.
 #
 # See also:
 #   tests/debug/corpus/README.md - program header keys read here (sources, build).
@@ -64,6 +66,11 @@ for dir in "$HERE"/*/; do
     rn=$(basename "$r" .st)
     if node "$CLI" "$r" -o "$out/$rn.cpp" >"$out/$rn.log" 2>&1; then
       echo "      $rn compiled but must be refused"; status=1
+    fi
+    if [ -s "$out/$rn.cpp" ]; then echo "      $rn was refused but left $rn.cpp"; status=1; fi
+    diag=$(header "$r" expect-diagnostic)
+    if [ -n "$diag" ] && ! grep -qF -- "$diag" "$out/$rn.log"; then
+      echo "      $rn: the refusal does not name '$diag'"; status=1
     fi
   done
   case "$expect" in

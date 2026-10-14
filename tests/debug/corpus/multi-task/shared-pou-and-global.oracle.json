@@ -6,7 +6,7 @@
   "kind": "runtime",
   "criteria": ["A134"],
   "title": "ADR-004 D6.6 under non-stop: shared globals stay live and flagged shared; a breakpoint in a POU both tasks reach halts only the reaching task; a write to a shared global applies at the next quiescent window",
-  "notes": "Rule 4 (configuration-scope located globals freeze in the image during the halt) is the G_IN step at the end.",
+  "notes": "Rule 4 (configuration-scope located globals freeze in the image during the halt) is the G_IN step at the end. One FB instance called from both tasks is refused at build (ADR-001 D1.3 S8): reject-shared-fb-instance.st, checked by build_all.sh with its expect-diagnostic.",
   "setup": {"session": "controller", "haltMode": "nonStop", "plant": {"samplePeriodMs": 5, "inputs": {"%IX0.0": true}}},
   "steps": [
     {"request": "initialize", "expect": {"success": true}},
@@ -24,7 +24,7 @@
     {"observe": "plant", "expect": {"outputs": {"%QD3": 1000000}}},
     {"plant": {"set": {"%IX0.0": false}}},
     {"wait": {"wallMs": 300}},
-    {"observe": "plant", "note": "rule 4: G_IN frozen during the mid-scan halt, so the slow task still sees TRUE via G_CNT unchanged", "expect": {"witness": {"Slow": {"~ge": 1}}}},
+    {"observe": "plant", "note": "rule 4: G_IN frozen during the mid-scan halt, so the slow task still sees TRUE through its own Counter instance", "expect": {"witness": {"Slow": {"~ge": 1}}}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
     {"request": "continue", "expect": {"success": true}},
     {"wait": {"wallMs": 300}},
