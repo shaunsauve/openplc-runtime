@@ -36,9 +36,14 @@ IMAGE=${IMAGE:-ghcr.io/autonomy-logic/openplc-runtime:latest}
 SEED=${SEED:-}
 ORACLES=("$@")
 if [ ${#ORACLES[@]} -eq 0 ]; then
+  # Two invocations: an oracle that ends in `stop` leaves the PLC STOPPED, and nothing in the
+  # harness starts it again, so at most one such oracle can run per plc_main, and it runs last.
   C=tests/debug/corpus/plant-io
-  ORACLES=("$C/j1-run-control.oracle.json" "$C/bp-before-statement.oracle.json"
-           "$C/j1-pause-resume-stop.oracle.json" "$C/pause-resume-stop.oracle.json")
+  RC=0
+  "$0" "$C/j1-run-control.oracle.json" "$C/bp-before-statement.oracle.json" \
+       "$C/j1-pause-resume-stop.oracle.json" || RC=1
+  OUT=$OUT-2 "$0" "$C/pause-resume-stop.oracle.json" || RC=1
+  exit $RC
 fi
 C=$(dirname "${ORACLES[0]}")
 for o in "${ORACLES[@]}"; do
