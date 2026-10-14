@@ -713,7 +713,8 @@
             "rawFrame",
             "rest",
             "socket",
-            "plugin"
+            "plugin",
+            "writeFile"
           ]
         },
         "args": {
