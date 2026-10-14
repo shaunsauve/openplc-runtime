@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "nested-fb-loop/run-to-cursor",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A042"],
+  "title": "Run to cursor stops at the line, or first at an armed breakpoint before it, and leaves nothing behind",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry"}},
+    {"request": "runToCursor", "args": {"file": "program.st", "line": "@AFTER_LOOP"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"location": {"file": "program.st", "line": "@AFTER_LOOP", "col": 3}, "variables": {"PROG0.total": 6}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@TOTAL"]}, "expect": {"success": true}},
+    {"request": "runToCursor", "args": {"file": "program.st", "line": "@AFTER_LOOP"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@TOTAL"}}},
+    {"observe": "status", "expect": {"fields": {"breakpoints": {"~len": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 10, "note": "the cursor target was cancelled by the earlier stop"},
+    {"observe": "status", "expect": {"fields": {"armedProbes": 0}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 10}}}}
+  ]
+}

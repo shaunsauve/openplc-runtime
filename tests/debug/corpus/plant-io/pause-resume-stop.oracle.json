@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/pause-resume-stop",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A033"],
+  "title": "Pause freezes the plant scan count within interval + 100 ms; resume advances it; stop stops the program, not the session",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 500}}, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"request": "pause", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 600, "expect": {"reason": "pause", "task": "Main"}},
+    {"observe": "plant", "note": "freeze within 600 ms of the request", "expect": {"witness": {"Main": {"~capture": "p"}}}},
+    {"wait": {"wallMs": 3000}},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ref": "p"}}}},
+    {"observe": "status", "expect": {"state": "PAUSED", "fields": {"by": {"~any": true}, "since": {"~any": true}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "continued", "withinMs": 500},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 3}}, "scanDelta": {"Main": {"~ge": 3}}}},
+    {"request": "stop", "expect": {"success": true}},
+    {"observe": "status", "expect": {"state": "STOPPED", "fields": {"sessions": {"~len": 1}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "s"}}}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ref": "s"}}}}
+  ]
+}

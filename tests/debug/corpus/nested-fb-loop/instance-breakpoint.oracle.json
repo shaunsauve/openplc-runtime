@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "nested-fb-loop/instance-breakpoint",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A105"],
+  "title": "An instance breakpoint in FB_Motor stops only in motor1, once per scan, never in motor2",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setInstanceBreakpoints", "args": {"breakpoints": [{"pou": "FB_Motor", "instance": "PROG0.motor1", "file": "program.st", "line": "@MOTOR_FIRST"}]},
+     "expect": {"success": true, "body": {"breakpoints": [{"verified": true}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "stack": [{"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"}, {"pou": "Cell", "kind": "program", "instance": "PROG0"}],
+      "variables": {"PROG0.witness": {"~capture": "k"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "note": "next stop is the next scan: motor2's call was not a hit",
+     "expect": {"reason": "breakpoint", "stack": [{"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"}, {"pou": "Cell", "kind": "program", "instance": "PROG0"}],
+      "variables": {"PROG0.witness": {"~ref": "k", "~add": 1}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "variables": {"PROG0.witness": {"~ref": "k", "~add": 2}, "PROG0.motor2.calls": {"~ref": "k", "~add": 1}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "k", "~add": 1}}}},
+    {"request": "setInstanceBreakpoints", "args": {"breakpoints": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 20}
+  ]
+}

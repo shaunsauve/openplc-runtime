@@ -1,0 +1,24 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/step-past-last",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A037"],
+  "title": "Stepping past the task's last statement completes the scan's I/O and stops at the next scan's first statement",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 3}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COPY_B"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@COPY_B"},
+      "variables": {"PROG0.witness": {"~capture": "k"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"plant": {"set": {"%IW0": 9}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@WITNESS", "col": 3}}},
+    {"observe": "plant", "note": "scan k's outputs arrived before this stop", "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 3}}},
+    {"request": "next", "repeat": 7, "expect": {"success": true}},
+    {"event": "stopped", "repeat": 7, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"request": "variables", "args": {"path": "PROG0.out_int"}, "note": "the new scan read the plant's new input", "expect": {"success": true, "body": {"value": 9}}}
+  ]
+}

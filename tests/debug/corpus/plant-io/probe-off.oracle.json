@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/probe-off",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A019"],
+  "title": "A probe-off build keeps live watch and force and refuses run control with NO_PROBES",
+  "setup": {"session": "controller", "build": {"probes": false}, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 77}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "subscribe", "args": {"paths": ["PROG0.in_value", "PROG0.counter"], "rateHz": 10}, "expect": {"success": true}},
+    {"event": "values", "withinMs": 1000, "expect": {"body": {"changes": {"~any": true}}}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 5, "reason": "probe-off check"}, "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 5}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": false, "error": "NO_PROBES"}},
+    {"request": "pause", "expect": {"success": false, "error": "NO_PROBES"}},
+    {"request": "next", "expect": {"success": false, "error": "NO_PROBES"}},
+    {"wait": {"scans": 10}},
+    {"observe": "plant", "throughout": true, "note": "never stalls", "expect": {"scanDelta": {"Main": {"~ge": 10}}}}
+  ]
+}

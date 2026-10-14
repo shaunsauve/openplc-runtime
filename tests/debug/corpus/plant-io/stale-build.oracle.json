@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/stale-build",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A014", "A171"],
+  "title": "Debug info from another build is refused STALE_BUILD with both identities; a matching attach in the same process proceeds",
+  "notes": "Build B = program.st with the @INT statement changed to out_int := in_value + 1 (ADR-002 D5: md5 differs, reason source).",
+  "setup": {"session": "none", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "args": {"identity": "B"},
+     "expect": {"success": false, "error": "STALE_BUILD", "body": {"reason": "source", "image": {"md5": {"~any": true}, "buildId": {"~any": true}}, "client": {"md5": {"~any": true}}}}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 0}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"wait": {"scans": 5}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 5}}}},
+    {"request": "initialize", "args": {"identity": "build"},
+     "expect": {"success": true, "body": {"comparison": "match", "image": {"md5": {"~any": true}, "buildId": {"~any": true}, "buildTime": {"~any": true}, "sourceHash": {"~any": true}}}}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@INT"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@INT", "col": 3}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~gt": 0}}}}
+  ]
+}

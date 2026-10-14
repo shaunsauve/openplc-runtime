@@ -1,0 +1,31 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "nested-fb-loop/function-breakpoint",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A106"],
+  "title": "A POU-entry breakpoint on Clamp stops before its first statement on every call (one call per scan with motor2 off)",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setFunctionBreakpoints", "args": {"breakpoints": [{"name": "Clamp"}]}, "expect": {"success": true, "body": {"breakpoints": [{"verified": true}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@CLAMP_FIRST", "col": 3},
+      "stack": [{"pou": "Clamp", "kind": "function", "instance": null}, {"pou": "PID", "kind": "fb", "instance": "PROG0.motor1.pid"},
+                {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"}, {"pou": "Cell", "kind": "program", "instance": "PROG0"}],
+      "variables": {"PROG0.witness": {"~capture": "k"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@CLAMP_FIRST"}, "variables": {"PROG0.witness": {"~ref": "k", "~add": 1}}}},
+    {"plant": {"set": {"%IX0.0": true}}, "note": "motor2 enabled: two calls per scan from the next scan"},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "variables": {"PROG0.witness": {"~ref": "k", "~add": 2}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "stack": [{"pou": "Clamp", "kind": "function", "instance": null}, {"pou": "PID", "kind": "fb", "instance": "PROG0.motor2.pid"},
+                {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor2"}, {"pou": "Cell", "kind": "program", "instance": "PROG0"}],
+      "variables": {"PROG0.witness": {"~ref": "k", "~add": 2}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "k", "~add": 1}}}},
+    {"request": "setFunctionBreakpoints", "args": {"breakpoints": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 10}
+  ]
+}

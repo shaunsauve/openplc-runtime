@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/cycle-step",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A036"],
+  "title": "Cycle step runs exactly one scan and advances virtual time by one interval; statement steps add none",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 100}}, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w0"}}, "vtMs": {"Main": {"~capture": "t0"}}}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@K"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "w0", "~add": 1}}, "vtMs": {"Main": {"~ref": "t0", "~add": 100}}}},
+    {"request": "next", "repeat": 3, "expect": {"success": true}},
+    {"event": "stopped", "repeat": 3, "withinMs": 1000, "expect": {"reason": "step", "vtMs": {"~ref": "t0", "~add": 100}}},
+    {"observe": "plant", "note": "3 statement steps change virtual time by 0", "expect": {"vtMs": {"Main": {"~ref": "t0", "~add": 100}}}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "repeat": 4, "expect": {"success": true}},
+    {"event": "stopped", "repeat": 4, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "w0", "~add": 5}}, "vtMs": {"Main": {"~ref": "t0", "~add": 500}}}}
+  ]
+}

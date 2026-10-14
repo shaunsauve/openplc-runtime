@@ -1,0 +1,20 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "nested-fb-loop/step-onto-breakpoint",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A038"],
+  "title": "A step landing on an armed breakpoint yields exactly one stop, reason breakpoint, with that breakpoint's ID",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@TOTAL", "@FOR"]},
+     "expect": {"success": true, "body": {"breakpoints": [{"id": {"~capture": "bpTotal"}}, {"id": {"~capture": "bpFor"}}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@TOTAL"}, "body": {"breakpointIds": [{"~ref": "bpTotal"}]}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@FOR"}, "body": {"breakpointIds": [{"~ref": "bpFor"}]}}},
+    {"noEvent": "stopped", "forMs": 1000, "note": "no second event for the same step"},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ge": 0}}}}
+  ]
+}

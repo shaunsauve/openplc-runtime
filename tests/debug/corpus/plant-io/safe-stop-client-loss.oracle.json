@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/safe-stop-client-loss",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A057", "A177"],
+  "title": "Losing the controller while halted safe-stops within P2 + 1 s with every output held; a new attach sees the reason",
+  "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15},
+            "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IX0.1": true, "%IW0": 1234, "%ID0": 99999}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}, "outputs": {
+      "%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QW100": 1235, "%QD1": {"~capture": "c"}}}},
+    {"inject": "killClient", "args": {"signal": "SIGKILL"}},
+    {"wait": {"wallMs": 16000}},
+    {"observe": "status", "expect": {"state": "SAFE_STOPPED", "fields": {"reason": "heartbeat_timeout",
+      "location": {"file": "program.st", "line": {"~any": true}}}}},
+    {"observe": "plant", "throughout": true, "note": "frozen scan count; nothing zeroed or reset",
+     "expect": {"witness": {"Main": {"~ref": "w"}}, "outputs": {
+       "%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QW100": 1235, "%QD1": {"~ref": "c"}}}},
+    {"request": "initialize", "note": "a new client, same runtime process",
+     "expect": {"success": true, "body": {"safeStop": {"reason": "heartbeat_timeout", "user": {"~any": true}, "location": {"~any": true}, "time": {"~any": true}}}}},
+    {"observe": "plant", "throughout": true, "expect": {"outputs": {"%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QW100": 1235}}}
+  ]
+}

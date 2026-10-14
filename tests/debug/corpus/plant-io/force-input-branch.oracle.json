@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/force-input-branch",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A173", "A114"],
+  "title": "Force an input while halted, step into the branch it selects, release it",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WITNESS"}}},
+    {"request": "force", "args": {"path": "PROG0.in_enable", "value": true, "reason": "corpus J5"}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "note": "the forced input applies at the next copy-in, before logic (A114)", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@WITNESS"}}},
+    {"request": "variables", "args": {"path": "PROG0.in_enable"}, "expect": {"success": true, "body": {"value": true, "forced": true}}},
+    {"request": "next", "repeat": 3, "expect": {"success": true}},
+    {"event": "stopped", "repeat": 3, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@THEN", "col": 5}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "the branch the forced value selects reaches the plant", "expect": {"outputs": {"%QX0.0": true}}},
+    {"request": "unforce", "args": {"path": "PROG0.in_enable"}, "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "the plant's own input drives the branch again", "expect": {"outputs": {"%QX0.0": false}}}
+  ]
+}

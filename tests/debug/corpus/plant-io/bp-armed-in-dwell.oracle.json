@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/bp-armed-in-dwell",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A031"],
+  "title": "A breakpoint armed while running, inside the 300 ms dwell, stops at L in that same scan (judged by the plant)",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 500}},
+            "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.2": true}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@L"], "timing": "insideDwell"},
+     "note": "harness times the send so the response arrives inside the dwell; w = plant witness at receipt",
+     "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"event": "stopped", "withinMs": 600, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@L"},
+      "variables": {"PROG0.witness": {"~ref": "w", "~add": 1}}}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "note": "no scan completed between the response and the stop",
+     "expect": {"witness": {"Main": {"~ref": "w"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@L"}}},
+    {"observe": "plant", "note": "w + 1 exactly once after the resume",
+     "expect": {"witness": {"Main": {"~ref": "w", "~add": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 100},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": {"~ge": 100}}}}
+  ]
+}

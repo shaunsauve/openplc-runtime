@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/halt-holds-outputs",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A049"],
+  "title": "While halted (default hold policy) every output kind holds its pre-halt value for 30 s",
+  "setup": {"session": "controller", "haltPolicy": "hold",
+            "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IX0.1": true, "%IW0": 1234, "%ID0": 99999}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"haltPolicy": "hold"}}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "note": "every kind non-zero and non-initial before the halt", "expect": {"outputs": {
+      "%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QD3": {"~approx": [617.0, 0.001]}, "%QW100": 1235,
+      "%QW1": 1234, "%QW2": 1234, "%QW3": 2468, "%QD1": {"~capture": "c"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": {"~capture": "held"}}}},
+    {"plant": {"set": {"%IW0": 4321, "%IX0.0": false}}, "note": "input changes during the halt must not reach the outputs"},
+    {"wait": {"wallMs": 30000}},
+    {"observe": "plant", "throughout": true, "expect": {"outputs": {
+      "%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QD3": {"~approx": [617.0, 0.001]}, "%QW100": 1235,
+      "%QW1": 1234, "%QW2": 1234, "%QW3": 2468, "%QD1": {"~ref": "held"}}}}
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "nested-fb-loop/line-placement",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A018"],
+  "title": "A breakpoint on a comment line moves to the next probe line in the POU; past the POU's last statement it is unverified NO_CODE",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@CMT_MAIN", "@CMT_MOTOR", "@END_MAIN"]},
+     "expect": {"success": true, "body": {"breakpoints": [
+       {"verified": true, "line": "@CALL_M1"}, {"verified": true, "line": "@MOTOR_IF"}, {"verified": false, "reason": "NO_CODE"}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@CALL_M1"}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@MOTOR_IF", "col": 3}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 10},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 10}}}}
+  ]
+}

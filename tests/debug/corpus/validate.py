@@ -387,9 +387,13 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                 fname = node.get("file")
                 if isinstance(fname, str) and "line" in node and fname not in files:
                     out.append(f"{where}: file {fname!r} is not a source of {prog.name}")
+                listed = node.get("lines")
+                for val in listed if isinstance(listed, list) else []:
+                    if isinstance(val, str) and val.startswith("@"):
+                        out.extend(f"{where}.lines: {p}" for p in marker_lines(prog, val, programs)[0])
                 for key in ("line", "endLine"):
                     val = node.get(key)
-                    if not (isinstance(val, str) and val.startswith("@") and "file" in node):
+                    if not (isinstance(val, str) and val.startswith("@")):
                         continue
                     missing, texts = marker_lines(prog, val, programs)
                     out.extend(f"{where}.{key}: {p}" for p in missing)

@@ -1,0 +1,21 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/start-halted",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A041"],
+  "title": "Start halted stops before the first statement of the first scan",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry", "task": "Main",
+      "location": {"file": "program.st", "line": "@WITNESS", "col": 3},
+      "variables": {"PROG0.witness": 0}}},
+    {"observe": "plant", "note": "no output write yet, 0 scans counted", "expect": {"witness": {"Main": 0}, "outputs": {"%QD1": 0}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 2}}}}
+  ]
+}

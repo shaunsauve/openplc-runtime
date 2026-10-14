@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "plant-io/write-while-halted",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A110"],
+  "title": "A write while halted is what the next read sees, and the logic may overwrite it",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.1": false, "%IW0": 5}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@L"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@L"}}},
+    {"request": "setVariable", "args": {"path": "PROG0.x", "value": 42}, "expect": {"success": true}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@COPY_B"},
+      "variables": {"PROG0.x_seen": 84, "PROG0.x": 42}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 1}},
+    {"observe": "plant", "expect": {"outputs": {"%QW3": 84, "%QW2": 42}}},
+    {"plant": {"set": {"%IX0.1": true}}, "note": "the logic assigns x := in_value"},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW3": 10, "%QW2": 5}}}
+  ]
+}
