@@ -5,7 +5,7 @@
 # /run/runtime/plc_debug.socket), driven by the headless harness over WSS with the
 # simple-websocket client (tests/debug/wire/wss_client.py).
 #
-# Usage: tests/debug/plant/session_e2e.sh [ORACLE...]   (default: the J1 run-control set)
+# Usage: tests/debug/plant/session_e2e.sh [--results PATH] [ORACLE...]   (default: the J1 run-control set)
 #        Every ORACLE must be of one corpus program (the first one's directory), which is built and run
 #        with the task intervals the oracles' setup.tasks state (tests/debug/plant/deploy_tasks.py).
 # Env:   STRUCPP  STruCpp checkout (default ../STruCpp), with dist/ built
@@ -34,6 +34,7 @@ STRUCPP=${STRUCPP:-$REPO/../STruCpp}
 OUT=${OUT:-$REPO/build/session-e2e}
 IMAGE=${IMAGE:-ghcr.io/autonomy-logic/openplc-runtime:latest}
 SEED=${SEED:-}
+if [ "${1:-}" = "--results" ]; then export RESULTS=$2; shift 2; fi
 ORACLES=("$@")
 if [ ${#ORACLES[@]} -eq 0 ]; then
   # Two invocations: an oracle that ends in `stop` leaves the PLC STOPPED, and nothing in the
