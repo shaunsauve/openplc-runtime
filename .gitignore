@@ -23,6 +23,8 @@ __pycache__/
 
 # Temporary files
 *.txt
+# corpus:bench is a family file, not a temp file (validate.py reads it)
+!tests/debug/corpus/bench/family.txt
 *.log
 *.env
 *.pem
