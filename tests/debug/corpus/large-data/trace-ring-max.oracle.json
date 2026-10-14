@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "large-data/trace-ring-max",
+  "corpus": "large-data",
+  "kind": "runtime",
+  "criteria": ["A209"],
+  "title": "A trace ring of 1,000,000 samples is accepted, wraps and reports drops while scanning never gaps; a 1,000,001 capacity is refused LIMIT_EXCEEDED and the first trace keeps recording",
+  "notes": "partial: VmRSS/VmHWM of plc_main (<= 32 MiB growth) is the bench instrument's read of /proc, and 'the newest sample matches the oracle' needs per-sample arithmetic. 64 samples per scan x 17,000 scans wraps the ring; a 10 ms task keeps that under 3 min. The first trace still recording shows as a growing drop count once the ring is full.",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 10}}, "plant": {"samplePeriodMs": 5}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "traceStart", "args": {"paths": ["PROG0.e00", "PROG0.e01", "PROG0.e02", "PROG0.e03", "PROG0.e04", "PROG0.e05", "PROG0.e06", "PROG0.e07", "PROG0.e08", "PROG0.e09", "PROG0.e10", "PROG0.e11", "PROG0.e12", "PROG0.e13", "PROG0.e14", "PROG0.e15", "PROG0.e16", "PROG0.e17", "PROG0.e18", "PROG0.e19", "PROG0.e20", "PROG0.e21", "PROG0.e22", "PROG0.e23", "PROG0.e24", "PROG0.e25", "PROG0.e26", "PROG0.e27", "PROG0.e28", "PROG0.e29", "PROG0.e30", "PROG0.e31", "PROG0.e32", "PROG0.e33", "PROG0.e34", "PROG0.e35", "PROG0.e36", "PROG0.e37", "PROG0.e38", "PROG0.e39", "PROG0.e40", "PROG0.e41", "PROG0.e42", "PROG0.e43", "PROG0.e44", "PROG0.e45", "PROG0.e46", "PROG0.e47", "PROG0.e48", "PROG0.e49", "PROG0.e50", "PROG0.e51", "PROG0.e52", "PROG0.e53", "PROG0.e54", "PROG0.e55", "PROG0.e56", "PROG0.e57", "PROG0.e58", "PROG0.e59", "PROG0.e60", "PROG0.e61", "PROG0.e62", "PROG0.e63"], "capacity": 1000000}, "expect": {"success": true, "body": {"id": {"~capture": "tr"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}},
+    {"wait": {"scans": 17000}},
+    {"observe": "plant", "throughout": true, "note": "no gap over 2 task intervals", "expect": {"maxGapMs": {"Main": {"~le": 20}}}},
+    {"request": "traceRead", "args": {"id": {"~ref": "tr"}, "max": 1000, "from": "tail"}, "expect": {"success": true, "body": {"count": 1000000, "dropped": {"~gt": 0, "~capture": "d"}, "samples": {"~maxLen": 1000}}}},
+    {"request": "traceStart", "args": {"paths": ["PROG0.e00", "PROG0.e01", "PROG0.e02", "PROG0.e03", "PROG0.e04", "PROG0.e05", "PROG0.e06", "PROG0.e07", "PROG0.e08", "PROG0.e09", "PROG0.e10", "PROG0.e11", "PROG0.e12", "PROG0.e13", "PROG0.e14", "PROG0.e15", "PROG0.e16", "PROG0.e17", "PROG0.e18", "PROG0.e19", "PROG0.e20", "PROG0.e21", "PROG0.e22", "PROG0.e23", "PROG0.e24", "PROG0.e25", "PROG0.e26", "PROG0.e27", "PROG0.e28", "PROG0.e29", "PROG0.e30", "PROG0.e31", "PROG0.e32", "PROG0.e33", "PROG0.e34", "PROG0.e35", "PROG0.e36", "PROG0.e37", "PROG0.e38", "PROG0.e39", "PROG0.e40", "PROG0.e41", "PROG0.e42", "PROG0.e43", "PROG0.e44", "PROG0.e45", "PROG0.e46", "PROG0.e47", "PROG0.e48", "PROG0.e49", "PROG0.e50", "PROG0.e51", "PROG0.e52", "PROG0.e53", "PROG0.e54", "PROG0.e55", "PROG0.e56", "PROG0.e57", "PROG0.e58", "PROG0.e59", "PROG0.e60", "PROG0.e61", "PROG0.e62", "PROG0.e63"], "capacity": 1000001}, "expect": {"success": false, "error": "LIMIT_EXCEEDED"}},
+    {"wait": {"scans": 100}},
+    {"request": "traceRead", "args": {"id": {"~ref": "tr"}, "max": 1, "from": "tail"}, "expect": {"success": true, "body": {"count": 1000000, "dropped": {"~notRef": "d"}}}},
+    {"request": "traceStop", "args": {"id": {"~ref": "tr"}}, "expect": {"success": true}}
+  ]
+}

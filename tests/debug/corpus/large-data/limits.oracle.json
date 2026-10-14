@@ -1,0 +1,22 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "large-data/limits",
+  "corpus": "large-data",
+  "kind": "runtime",
+  "criteria": ["A129"],
+  "title": "Session A's oversize message and 10,001-variable subscription are refused LIMIT_EXCEEDED while controller B keeps working and the plant scans on undisturbed",
+  "notes": "partial: the 500 requests/s burst (some refused, not all) and B's p95 against N012 are bench measurements, not oracle steps. ASSUMED: rawFrame acts on the first opened stream (a) and returns the envelope the runtime answered.",
+  "setup": {"session": "none", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"client": "a", "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}},
+    {"client": "b", "request": "initialize", "args": {"role": "controller"}, "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}},
+    {"inject": "rawFrame", "args": {"frame": "oversize", "bytes": 1100000}, "note": "> 1 MiB on A's stream (P6)", "expect": {"success": false, "error": {"code": "LIMIT_EXCEEDED"}}},
+    {"client": "a", "request": "subscribe", "args": {"paths": {"~leaves": "PROG0", "~count": 10001}, "rateHz": 10}, "expect": {"success": false, "error": "LIMIT_EXCEEDED"}},
+    {"client": "a", "request": "subscribe", "args": {"paths": {"~leaves": "PROG0", "~count": 10000}, "rateHz": 10}, "expect": {"success": true}, "note": "at the limit, accepted"},
+    {"loop": 20, "steps": [{"client": "b", "request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}}, {"client": "b", "event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}}, {"client": "b", "request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}}, {"client": "b", "request": "continue", "expect": {"success": true}}]},
+    {"wait": {"scans": 5}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 5}}}}
+  ]
+}

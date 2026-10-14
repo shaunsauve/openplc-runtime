@@ -1,0 +1,20 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "large-data/trace-on-change",
+  "corpus": "large-data",
+  "kind": "runtime",
+  "criteria": ["A098"],
+  "title": "A per-scan on-change trace of 64 every-scan variables collects >= 100,000 samples, each stamped with scan number, virtual time and wall time, with no halt",
+  "notes": "partial: 'values equal the oracle per scan' (e_n = k + n at scan k) needs per-sample arithmetic the matchers lack; export to JSON lines and CSV is the CLI's, not the session's (ADR-003 D6.1); the A063 scan-thread counter is an instrument. 64 changes per scan x 1,600 scans > 100,000.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "traceStart", "args": {"paths": ["PROG0.e00", "PROG0.e01", "PROG0.e02", "PROG0.e03", "PROG0.e04", "PROG0.e05", "PROG0.e06", "PROG0.e07", "PROG0.e08", "PROG0.e09", "PROG0.e10", "PROG0.e11", "PROG0.e12", "PROG0.e13", "PROG0.e14", "PROG0.e15", "PROG0.e16", "PROG0.e17", "PROG0.e18", "PROG0.e19", "PROG0.e20", "PROG0.e21", "PROG0.e22", "PROG0.e23", "PROG0.e24", "PROG0.e25", "PROG0.e26", "PROG0.e27", "PROG0.e28", "PROG0.e29", "PROG0.e30", "PROG0.e31", "PROG0.e32", "PROG0.e33", "PROG0.e34", "PROG0.e35", "PROG0.e36", "PROG0.e37", "PROG0.e38", "PROG0.e39", "PROG0.e40", "PROG0.e41", "PROG0.e42", "PROG0.e43", "PROG0.e44", "PROG0.e45", "PROG0.e46", "PROG0.e47", "PROG0.e48", "PROG0.e49", "PROG0.e50", "PROG0.e51", "PROG0.e52", "PROG0.e53", "PROG0.e54", "PROG0.e55", "PROG0.e56", "PROG0.e57", "PROG0.e58", "PROG0.e59", "PROG0.e60", "PROG0.e61", "PROG0.e62", "PROG0.e63"], "capacity": 100000}, "expect": {"success": true, "body": {"id": {"~capture": "tr"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"wait": {"scans": 1600}},
+    {"observe": "plant", "throughout": true, "note": "no halt while tracing", "expect": {"maxGapMs": {"Main": {"~le": 250}}}},
+    {"request": "traceRead", "args": {"id": {"~ref": "tr"}, "max": 1000}, "expect": {"success": true, "body": {"total": {"~ge": 100000}, "samples": {"~contains": {"scan": {"~any": true}, "vt": {"~any": true}, "wall": {"~any": true}, "id": {"~any": true}, "value": {"~any": true}}}}}},
+    {"request": "traceStop", "args": {"id": {"~ref": "tr"}}, "expect": {"success": true}}
+  ]
+}
