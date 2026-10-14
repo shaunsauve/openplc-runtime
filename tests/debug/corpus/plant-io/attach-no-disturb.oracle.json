@@ -1,0 +1,18 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/attach-no-disturb",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A117"],
+  "title": "Twenty attaches while running neither restart nor stall the program",
+  "notes": "ASSUMED: the status block carries the runtime `pid` and the task `overruns` count; the plant's restart check (witness going back) stands in for uptime.",
+  "setup": {"session": "none", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~capture": "pid"}, "overruns": {"~capture": "ov"}}}},
+    {"loop": 20, "steps": [{"client": "att", "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}}, {"client": "att", "request": "detach", "expect": {"success": true}}]},
+    {"observe": "plant", "throughout": true, "note": "the witness never goes back (a reload) and never pauses longer than one interval + jitter", "expect": {"scanDelta": {"Main": {"~ge": 1}}, "maxGapMs": {"Main": {"~le": 150}}}},
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~ref": "pid"}, "overruns": {"~ref": "ov"}}}}
+  ]
+}

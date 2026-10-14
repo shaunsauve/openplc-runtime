@@ -1,0 +1,113 @@
+# A# -> the scenario(s) whose oracle cites it, as tests/debug/harness/runner.py::<scenario id>.
+# Generated from each oracle's `criteria` (2026-10-14). `partial:` names what the scenario does not
+# check; such a criterion still needs that part judged before PASS. The last section lists MVP
+# criteria (headless-harness, plant-sim, fault-injection) with no scenario, and why.
+#
+# See also: tests/debug/corpus/README.md (oracle format), tests/debug/harness/run_all.sh.
+
+A011 tests/debug/harness/runner.py::nested-fb-loop/probe-map  # partial: corpus:consumer-shape, also cited, has no probe-map scenario
+A013 tests/debug/harness/runner.py::all-scopes-types/scopes
+A014 tests/debug/harness/runner.py::plant-io/stale-build
+A015 tests/debug/harness/runner.py::multi-stmt-line/columns
+A016 tests/debug/harness/runner.py::rich-types/describe
+A018 tests/debug/harness/runner.py::nested-fb-loop/line-placement tests/debug/harness/runner.py::sparse-lines/placement
+A019 tests/debug/harness/runner.py::plant-io/probe-off
+A020 tests/debug/harness/runner.py::library-pou/pou-inventory
+A021 tests/debug/harness/runner.py::large-50k/load-and-footprint
+A024 tests/debug/harness/runner.py::fbd-sample/origins tests/debug/harness/runner.py::ld-sample/origins
+A026 tests/debug/harness/runner.py::generated-region/generated-flags
+A027 tests/debug/harness/runner.py::bench_call/probe-site-shape tests/debug/harness/runner.py::bench_hot/probe-site-shape
+A031 tests/debug/harness/runner.py::plant-io/bp-armed-in-dwell tests/debug/harness/runner.py::plant-io/bp-before-statement
+A032 tests/debug/harness/runner.py::bench/breakpoint-limit
+A033 tests/debug/harness/runner.py::plant-io/pause-resume-stop
+A034 tests/debug/harness/runner.py::plant-io/bp-before-statement
+A035 tests/debug/harness/runner.py::nested-fb-loop/step-sequence
+A036 tests/debug/harness/runner.py::plant-io/cycle-step
+A037 tests/debug/harness/runner.py::plant-io/step-past-last
+A038 tests/debug/harness/runner.py::nested-fb-loop/step-onto-breakpoint
+A039 tests/debug/harness/runner.py::loop-bodies/hits-and-steps
+A040 tests/debug/harness/runner.py::generated-region/step-into-generated tests/debug/harness/runner.py::library-pou/step-into-no-source
+A041 tests/debug/harness/runner.py::plant-io/start-halted
+A042 tests/debug/harness/runner.py::nested-fb-loop/run-to-cursor
+A044 tests/debug/harness/runner.py::retain-vars/restarts
+A047 tests/debug/harness/runner.py::faults/exception-then-error tests/debug/harness/runner.py::plant-io/run-state-visibility  # partial: runtime log and web UI status page cross-check not expressed (no read-back)
+A049 tests/debug/harness/runner.py::plant-io/halt-holds-outputs
+A050 tests/debug/harness/runner.py::watchdog-overrun/long-halt-then-overrun
+A051 tests/debug/harness/runner.py::bench/halt-no-catch-up
+A052 tests/debug/harness/runner.py::ton-timer/halt-mid-timing
+A053 tests/debug/harness/runner.py::ton-timer/halt-mid-timing
+A054 tests/debug/harness/runner.py::ton-timer/clocks-in-halt
+A055 tests/debug/harness/runner.py::plant-io/input-frozen-latest-wins
+A057 tests/debug/harness/runner.py::plant-io/safe-stop-client-loss
+A058 tests/debug/harness/runner.py::plant-io/client-loss-running
+A059 tests/debug/harness/runner.py::plant-io/safe-stop-start-gate  # partial: runtime log entries for each refused start not matched (no log read-back)
+A060 tests/debug/harness/runner.py::faults/located-no-session
+A064 tests/debug/harness/runner.py::faults/exception-then-error tests/debug/harness/runner.py::nested-fb-loop/control-responses
+A065 tests/debug/harness/runner.py::print-builtin/with-and-without-session
+A066 tests/debug/harness/runner.py::plant-io/refusal-codes  # partial: UNSUPPORTED class and the session's gated start not provoked
+A067 tests/debug/harness/runner.py::nested-fb-loop/handshake-major  # partial: major-version half only; advertised-implies-works needs a conditional step
+A069 tests/debug/harness/runner.py::large-data/delta-watch
+A070 tests/debug/harness/runner.py::nested-fb-loop/version-report
+A087 tests/debug/harness/runner.py::plant-io/malformed-requests
+A088 tests/debug/harness/runner.py::all-scopes-types/scopes tests/debug/harness/runner.py::nested-fb-loop/step-sequence
+A089 tests/debug/harness/runner.py::all-scopes-types/lazy-expand
+A090 tests/debug/harness/runner.py::iec-display/display
+A092 tests/debug/harness/runner.py::large-data/paging
+A095 tests/debug/harness/runner.py::consumer-shape/located-io
+A097 tests/debug/harness/runner.py::consumer-shape/live-watch-one-scan
+A099 tests/debug/harness/runner.py::loop-bodies/conditions-and-logpoint
+A100 tests/debug/harness/runner.py::print-builtin/with-and-without-session
+A103 tests/debug/harness/runner.py::loop-bodies/conditions-and-logpoint
+A104 tests/debug/harness/runner.py::loop-bodies/one-shot-and-disable
+A105 tests/debug/harness/runner.py::nested-fb-loop/instance-breakpoint
+A106 tests/debug/harness/runner.py::nested-fb-loop/function-breakpoint
+A107 tests/debug/harness/runner.py::faults/exception-stops
+A108 tests/debug/harness/runner.py::loop-bodies/one-shot-and-disable
+A109 tests/debug/harness/runner.py::consumer-shape/force-symbolic
+A110 tests/debug/harness/runner.py::plant-io/write-while-halted
+A112 tests/debug/harness/runner.py::rich-types/checked-writes
+A114 tests/debug/harness/runner.py::plant-io/force-input-branch
+A117 tests/debug/harness/runner.py::plant-io/attach-no-disturb
+A118 tests/debug/harness/runner.py::plant-io/detach-clears
+A119 tests/debug/harness/runner.py::plant-io/auth-attach
+A121 tests/debug/harness/runner.py::plant-io/heartbeat-params  # partial: heartbeat spacing on the wire not expressed (needs a frame capture)
+A130 tests/debug/harness/runner.py::multi-task/all-stop
+A131 tests/debug/harness/runner.py::multi-task/all-stop
+A132 tests/debug/harness/runner.py::multi-task/non-stop-resume-one
+A133 tests/debug/harness/runner.py::multi-task/non-stop-resume-one
+A134 tests/debug/harness/runner.py::multi-task/shared-pou-and-global
+A143 tests/debug/harness/runner.py::online-change-pair/inplace-running
+A144 tests/debug/harness/runner.py::online-change-pair/classify
+A146 tests/debug/harness/runner.py::online-change-pair/rebind-breakpoints
+A165 tests/debug/harness/runner.py::nested-fb-loop/j1-break-inspect-step
+A167 tests/debug/harness/runner.py::nested-fb-loop/j1-break-inspect-step
+A169 tests/debug/harness/runner.py::ton-timer/halt-mid-timing
+A171 tests/debug/harness/runner.py::plant-io/stale-build
+A173 tests/debug/harness/runner.py::plant-io/force-input-branch
+A175 tests/debug/harness/runner.py::multi-task/non-stop-resume-one
+A177 tests/debug/harness/runner.py::plant-io/safe-stop-client-loss
+A179 tests/debug/harness/runner.py::loop-bodies/conditions-and-logpoint
+A181 tests/debug/harness/runner.py::faults/exception-stops
+A183 tests/debug/harness/runner.py::online-change-pair/inplace-running
+A204 tests/debug/harness/runner.py::shared-globals/lock-sites
+A205 tests/debug/harness/runner.py::loop-bodies/condition-race  # partial: normal build only; TSan report, source inspection, 1,024-breakpoint clear-all and arm past the limit not expressed
+A206 tests/debug/harness/runner.py::plant-io/safe-stop-outputs-held
+A207 tests/debug/harness/runner.py::faults/stop-from-error tests/debug/harness/runner.py::plant-io/stop-from-error
+A208 tests/debug/harness/runner.py::plant-io/rest-start-gated  # partial: audit log content fetched, not matched (no contains-matcher)
+A211 tests/debug/harness/runner.py::bench_mix/observers-16
+A214 tests/debug/harness/runner.py::faults/native-depth
+A215 tests/debug/harness/runner.py::retain-vars/downloads
+A216 tests/debug/harness/runner.py::retain-vars/downloads
+A217 tests/debug/harness/runner.py::constant-overrun/apply-under-overrun
+
+# MVP criteria with no scenario (inexpressible as an oracle, or not a scenario's job):
+# A017 -- the reader under test is the STruCpp client library's (headless CLI F065, adapter), not the runtime this harness drives
+# A056 -- needs external Modbus and OPC-UA client steps and the plugin exchange counter; the format has neither
+# A063 -- scan-thread allocation/syscall/futex counting is an instrument attached across the whole run, not a scenario step
+# A068 -- transport is a runner parameter: run nested-fb-loop/j1-break-inspect-step over a local socket and over WSS (the endpoint has no local-socket transport yet)
+# A080 -- byte-for-byte replay of 0x41-0x45 PDUs against two runtimes; no PDU client or cross-runtime comparison
+# A120 -- a plaintext ws:// attempt from a non-loopback host plus a packet capture; transport-level, not a session step
+# A149 -- harness self-check: build_all.sh (FC tags, STruCpp build) and validate.py (witness contract); the 100-scan run per program has no scenario
+# A150 -- harness self-check: validate.py over every oracle and test_validate.py's mutated-oracle red-proof
+# A151 -- harness self-check: run_all.sh against a real runtime and test_runner.py's seeded defects; not an oracle
+# A152 -- compares the plant output logs of two runs by virtual time; an oracle judges one run

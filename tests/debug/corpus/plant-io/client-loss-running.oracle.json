@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/client-loss-running",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A058"],
+  "title": "Losing the controller while running detaches: the program keeps running, its breakpoints are gone, its force stays",
+  "notes": "The breakpoints sit on lines the plant keeps unreached until after the loss, so the program runs with them armed. ASSUMED: listForces' body lists the forces as `forces`.",
+  "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IX0.1": false, "%IW0": 5}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@THEN", "@LOAD_X"]}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 77, "reason": "A058"}, "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 77}}},
+    {"inject": "killClient", "args": {"signal": "SIGKILL"}, "note": "the program is running: no halt to safe-stop"},
+    {"wait": {"wallMs": 17000}},
+    {"observe": "plant", "throughout": true, "note": "keeps running through P2 + 2 s, the force held", "expect": {"scanDelta": {"Main": {"~ge": 150}}, "maxGapMs": {"Main": {"~le": 250}}, "outputs": {"%QW0": 77}}},
+    {"observe": "status", "expect": {"state": "RUNNING"}},
+    {"client": "next", "request": "initialize", "args": {"role": "controller"}, "expect": {"success": true}},
+    {"client": "next", "request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 1}}}, "note": "the force survives the client"},
+    {"plant": {"set": {"%IX0.0": true, "%IX0.1": true}}, "note": "now both old breakpoint lines execute every scan"},
+    {"noEvent": "stopped", "forScans": 100, "client": "next"},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 100}}, "outputs": {"%QW0": 77}}}
+  ]
+}

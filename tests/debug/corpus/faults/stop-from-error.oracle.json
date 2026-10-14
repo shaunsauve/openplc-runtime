@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "faults/stop-from-error",
+  "corpus": "faults",
+  "kind": "runtime",
+  "criteria": ["A207"],
+  "title": "Fault route: a granted start whose scan 1 faults reaches ERROR with the hold set; STOP answers OK, zeroes the outputs and keeps the start gate",
+  "notes": "Held values before the STOP are plugin-defined on this route (ADR-004 N10) and not asserted. ASSUMED: test users `control` (holds the control right) and `nocontrol` exist on the runtime; a refused REST start answers a non-200 status. `plugin` injections drive the corpus test plugin (`request_plc_start`, `segv_in_cycle_start`) and the VPP switch plugin (`run`, `stop`).",
+  "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15}, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 0}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": 100}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WITNESS"}}},
+    {"plant": {"set": {"%IW0": 1}}, "note": "the next copy-in selects the division by zero"},
+    {"inject": "killClient", "args": {"signal": "SIGKILL"}},
+    {"wait": {"wallMs": 16000}},
+    {"observe": "status", "expect": {"state": "SAFE_STOPPED"}},
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/start-plc", "user": "control"}, "expect": {"status": 200}, "note": "scan 1 of the granted start faults"},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "status", "expect": {"state": "ERROR", "fields": {"safeStop": {"~any": true}, "lastFault": {"kind": "divByZero"}}}},
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/stop-plc", "user": "control"}, "expect": {"status": 200}},
+    {"observe": "status", "expect": {"state": "STOPPED"}},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": 0, "%QD0": 0}, "witness": {"Main": {"~capture": "w"}}}},
+    {"inject": "plugin", "args": {"name": "vpp-switch", "action": "run"}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ref": "w"}}}},
+    {"observe": "status", "expect": {"state": "STOPPED"}}
+  ]
+}

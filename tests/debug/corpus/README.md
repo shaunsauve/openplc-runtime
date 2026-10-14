@@ -246,4 +246,5 @@ except where a `noEvent` step forbids them.
 A program header lists every criterion that cites the program; each oracle lists the ones it
 discharges. Criteria listed in a header but in no oracle still need a scenario (E13.4: every
 A# gets a `Test:` naming one). `validate.py` reports nothing for those: the gap is tracked in
-`docs/STATUS.md`, not here.
+`docs/STATUS.md`, not here. `tests/debug/harness/coverage.txt` maps each criterion to the
+scenarios that cite it, marks the partial ones, and lists the MVP criteria no oracle can express.

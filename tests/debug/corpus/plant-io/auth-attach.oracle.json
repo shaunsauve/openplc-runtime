@@ -1,0 +1,28 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/auth-attach",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A119"],
+  "title": "No token, a forged and an expired JWT are refused UNAUTHORISED with no session; a logged-in user's control, inspect and modify work",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 5}}},
+  "steps": [
+    {"client": "anon", "request": "initialize", "args": {"role": "controller", "token": {"~token": "none"}}, "expect": {"success": false, "error": "UNAUTHORISED"}},
+    {"client": "forged", "request": "initialize", "args": {"role": "controller", "token": {"~token": "forged"}}, "expect": {"success": false, "error": "UNAUTHORISED"}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 0}}}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"request": "variables", "args": {"path": "PROG0.counter"}, "expect": {"success": true, "body": {"value": {"~capture": "c"}}}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 4242, "reason": "A119"}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "control, inspect and modify each took effect", "expect": {"outputs": {"%QW0": 4242, "%QD1": {"~ge": 1}}}},
+    {"request": "unforce", "args": {"path": "PROG0.out_int"}, "expect": {"success": true}},
+    {"client": "old", "request": "initialize", "args": {"role": "controller", "token": {"~token": "expired"}}, "expect": {"success": false, "error": "UNAUTHORISED"}, "note": "last: BLOCKED until the harness can mint an expired JWT"},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 1}}}}
+  ]
+}

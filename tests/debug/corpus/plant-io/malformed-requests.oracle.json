@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/malformed-requests",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A087"],
+  "title": "Malformed, oversize and out-of-order requests are refused with a code and never stall the scan; a valid request then works",
+  "notes": "ASSUMED: a rawFrame injection returns the gateway's response envelope (none for garbage frames); a fault would show as status lastFault.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"inject": "rawFrame", "args": {"frame": "truncated"}, "expect": {"error": {"code": "BAD_REQUEST"}}},
+    {"inject": "rawFrame", "args": {"frame": "invalid"}, "expect": {"error": {"code": "BAD_REQUEST"}}},
+    {"inject": "rawFrame", "args": {"frame": "oversize", "bytes": 2097152}, "expect": {"error": {"code": "LIMIT_EXCEEDED"}}},
+    {"request": "next", "expect": {"success": false, "error": "NOT_HALTED"}, "note": "step while running"},
+    {"client": "fresh", "request": "continue", "expect": {"success": false, "error": "BAD_REQUEST"}, "note": "resume before attach: out of order"},
+    {"inject": "rawFrame", "args": {"frame": "garbage", "count": 1000}},
+    {"wait": {"scans": 5}},
+    {"observe": "plant", "throughout": true, "note": "no gap over one interval + jitter while any of it was parsed", "expect": {"scanDelta": {"Main": {"~ge": 5}}, "maxGapMs": {"Main": {"~le": 150}}}},
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"lastFault": {"~absent": true}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~gt": 0}}}}
+  ]
+}

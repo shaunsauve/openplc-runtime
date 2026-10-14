@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/heartbeat-params",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A121"],
+  "title": "The handshake reports P1 and P2, a config with P2 < 3 x P1 is rejected, and a 30 min halt at 300 ms RTT keeps the session",
+  "notes": "Not expressed: heartbeat spacing = P1 +/- 10 % on the wire (needs a frame capture of the session, not a step). ASSUMED: defaults P1 2 s, P2 15 s; upload answers {success}.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"params": {"P1": 2, "P2": 15}}}},
+    {"inject": "upload", "args": {"build": "program.st", "conf": {"P1_s": 2, "P2_s": 5}}, "expect": {"success": false}, "note": "P2 < 3 x P1 is rejected at load"},
+    {"observe": "status", "expect": {"state": "RUNNING"}},
+    {"inject": "delayNetwork", "args": {"rttMs": 300}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"noEvent": "sessionEnded", "forMs": 1800000, "note": "30 min halted at 300 ms RTT with the defaults: no timeout"},
+    {"observe": "status", "expect": {"state": "HALTED_AT_BP"}},
+    {"inject": "restoreNetwork"},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 2}}}}
+  ]
+}

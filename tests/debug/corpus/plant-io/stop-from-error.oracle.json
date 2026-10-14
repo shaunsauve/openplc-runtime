@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/stop-from-error",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A207"],
+  "title": "Crash route: from SAFE_STOPPED a plugin SIGSEGV reaches ERROR; STOP answers OK, zeroes the outputs and keeps the start gate",
+  "notes": "ASSUMED: test users `control` (holds the control right) and `nocontrol` exist on the runtime; a refused REST start answers a non-200 status. `plugin` injections drive the corpus test plugin (`request_plc_start`, `segv_in_cycle_start`) and the VPP switch plugin (`run`, `stop`).",
+  "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IX0.1": true, "%IW0": 1234, "%ID0": 99999}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QD3": {"~approx": [617.0, 0.001]}, "%QW100": 1235, "%QW1": 1234, "%QW2": 1234, "%QW3": 2468}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"inject": "killClient", "args": {"signal": "SIGKILL"}},
+    {"wait": {"wallMs": 16000}},
+    {"observe": "status", "expect": {"state": "SAFE_STOPPED"}},
+    {"inject": "plugin", "args": {"name": "test-plugin", "action": "segv_in_cycle_start"}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "status", "expect": {"state": "ERROR", "fields": {"safeStop": {"~any": true}}}},
+    {"observe": "plant", "note": "route (a): still the held values", "expect": {"outputs": {"%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QD3": {"~approx": [617.0, 0.001]}, "%QW100": 1235, "%QW1": 1234, "%QW2": 1234, "%QW3": 2468}}},
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/stop-plc", "user": "control"}, "expect": {"status": 200}, "note": "the core answers STOP:OK from ERROR with the hold set"},
+    {"observe": "status", "expect": {"state": "STOPPED"}},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false, "%QW0": 0, "%QD2": 0, "%QD3": 0.0, "%QW100": 0, "%QW1": 0, "%QW2": 0, "%QW3": 0}, "witness": {"Main": {"~capture": "w"}}}},
+    {"inject": "plugin", "args": {"name": "vpp-switch", "action": "run"}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "note": "the gate survived the STOP: the switch RUN is refused", "expect": {"witness": {"Main": {"~ref": "w"}}}},
+    {"observe": "status", "expect": {"state": "STOPPED"}}
+  ]
+}

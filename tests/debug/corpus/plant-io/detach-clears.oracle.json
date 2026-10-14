@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/detach-clears",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A118"],
+  "title": "Detach while halted clears every breakpoint, resumes the program and keeps the force",
+  "notes": "ASSUMED: listForces' body lists the forces as `forces`.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 5}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 55, "reason": "A118"}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K", "@L"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "detach", "expect": {"success": true}},
+    {"wait": {"scans": 5}},
+    {"observe": "plant", "note": "resumed; the force still reaches the plant", "expect": {"scanDelta": {"Main": {"~ge": 5}}, "outputs": {"%QW0": 55}}},
+    {"client": "next", "request": "initialize", "args": {"role": "controller"}, "expect": {"success": true}},
+    {"client": "next", "request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 1}}}},
+    {"noEvent": "stopped", "forScans": 100, "client": "next"},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 100}}, "outputs": {"%QW0": 55}}}
+  ]
+}

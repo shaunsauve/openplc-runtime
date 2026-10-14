@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "faults/exception-then-error",
+  "corpus": "faults",
+  "kind": "runtime",
+  "criteria": ["A047", "A064"],
+  "title": "An exception stop carries reason exception and its task; the fault that follows reaches ERROR as an event and in the status API",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 0}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"client": "watcher", "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}},
+    {"request": "setExceptionBreakpoints", "args": {"filters": ["divByZero"]}, "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": 100}}},
+    {"plant": {"set": {"%IW0": 1}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "exception", "location": {"file": "program.st", "line": "@DIV", "col": 3}, "task": "Main", "exception": {"kind": "divByZero"}}},
+    {"request": "continue", "expect": {"success": true}, "note": "the fault is delivered as without a debugger; the task terminates"},
+    {"client": "watcher", "event": "runState", "withinMs": 500, "expect": {"body": {"state": "ERROR"}}},
+    {"observe": "status", "expect": {"state": "ERROR", "fields": {"lastFault": {"kind": "divByZero"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "throughout": true, "expect": {"witness": {"Main": {"~ref": "w"}}}}
+  ]
+}

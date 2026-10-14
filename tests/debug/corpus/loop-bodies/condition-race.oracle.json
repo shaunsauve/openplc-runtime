@@ -1,0 +1,19 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "loop-bodies/condition-race",
+  "corpus": "loop-bodies",
+  "kind": "runtime",
+  "criteria": ["A205"],
+  "title": "10^5 condition replacements racing the scan never stop, stall or fault the task",
+  "notes": "Covers the normal build's run. Not expressed: the TSan build's race report and the source inspection of the read-side enter (a build variant and a code read, not steps); clear-all of 1,024 breakpoints and the arm past the limit (loop-bodies has far fewer breakpoint-able lines; ~lines would be BLOCKED); condition-error events (no event name for them is fixed). A stop during the churn shows as a scan gap.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"loop": 1000, "note": "10^5 replacements in all, alternating bytecode lengths, with disarm, re-arm and clear-all", "steps": [{"loop": 50, "steps": [{"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_BODY", "condition": "i < -1"}]}, "expect": {"success": true}}, {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_BODY", "condition": "(i < -1) AND (i < -2) AND (i < -3) AND (i < -4) AND (i < -5) AND (i < -6) AND (i < -7) AND (i < -8) AND (i < -9) AND (i < -10) AND (i < -11) AND (i < -12) AND (i < -13) AND (i < -14) AND (i < -15) AND (i < -16) AND (i < -17) AND (i < -18) AND (i < -19) AND (i < -20) AND (i < -21) AND (i < -22) AND (i < -23) AND (i < -24) AND (i < -25) AND (i < -26) AND (i < -27) AND (i < -28) AND (i < -29) AND (i < -30) AND (i < -31) AND (i < -32) AND (i < -33) AND (i < -34) AND (i < -35) AND (i < -36) AND (i < -37) AND (i < -38) AND (i < -39) AND (i < -40)"}]}, "expect": {"success": true}}]}, {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}}, {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_BODY", "condition": "i < -1"}]}, "expect": {"success": true}}, {"request": "clearAllBreakpoints", "expect": {"success": true}}]},
+    {"observe": "plant", "throughout": true, "note": "no gap over 2 intervals: no stop, stall or fault while the table churned", "expect": {"maxGapMs": {"Main": {"~le": 200}}, "scanDelta": {"Main": {"~ge": 100}}}},
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"lastFault": {"~absent": true}}}},
+    {"noEvent": "stopped", "forScans": 20}
+  ]
+}

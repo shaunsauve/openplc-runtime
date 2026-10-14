@@ -1,0 +1,17 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "nested-fb-loop/handshake-major",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A067"],
+  "title": "A protocol major the runtime does not speak is refused PROTOCOL_VERSION with no session; the current major attaches",
+  "notes": "Covers the major-version half of A067 only. 'Advertised implies it works, not advertised implies UNSUPPORTED' needs a step conditional on a captured capability, which the format does not have.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "args": {"protocol": "2.0"}, "expect": {"success": false, "error": "PROTOCOL_VERSION", "body": {"message": {"~ne": ""}}}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~len": 0}}}},
+    {"request": "initialize", "expect": {"success": true, "body": {"protocol": {"~any": true}, "capabilities": {"~any": true}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "nested-fb-loop/version-report",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A070"],
+  "title": "The version report's compiler, debug-info, runtime and protocol versions equal the loaded build's and the runtime's own",
+  "notes": "ASSUMED: the version body carries debugInfo as {major, minor} and compiler in the debug info's `build.compiler` form; the runtime's own version is GET /api/version's `version`; protocol 1.0 is the spec constant.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"inspect": "debugInfo", "expect": {"major": {"~capture": "diMajor"}, "minor": {"~capture": "diMinor"}, "build": {"compiler": {"~capture": "compiler"}}}},
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/version"}, "expect": {"status": 200, "body": {"version": {"~capture": "runtime"}}}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "version", "expect": {"success": true, "body": {"protocol": "1.0", "compiler": {"~ref": "compiler"}, "runtime": {"~ref": "runtime"}, "debugInfo": {"major": {"~ref": "diMajor"}, "minor": {"~ref": "diMinor"}}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}
