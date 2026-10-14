@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "online-change-pair/forces-unregistered",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A221"],
+  "title": "An online change is refused FORCES_UNREGISTERED while an OPC-UA force is active, with the build, the forced value and scanning unchanged; cleared, the same apply succeeds",
+  "notes": "ADR-006 D1.2, D4.3 (N7); ADR-003 D2 change-refusal reasons. ASSUMED: the OPC-UA plugin is driven by `inject plugin` with actions debug_force_value / debug_release_value, and CHANGE_REFUSED's details name the forced leaves as `paths`.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "status", "expect": {"fields": {"image": {"~capture": "img"}}}},
+    {"inject": "plugin", "args": {"name": "opcua_server", "action": "debug_force_value", "path": "PROG0.out_step", "value": 9}, "note": "debug_set, outside the agent's force registry"},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 9}, "witness": {"Main": {"~capture": "w"}}}},
+    {"request": "classifyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true, "body": {"class": "refused", "items": {"~contains": {"code": "FORCES_UNREGISTERED", "path": "PROG0.out_step"}}}}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": false, "error": "CHANGE_REFUSED", "body": {"details": {"reason": "FORCES_UNREGISTERED", "paths": {"~contains": "PROG0.out_step"}}}}},
+    {"observe": "status", "note": "build identity unchanged", "expect": {"fields": {"image": {"~ref": "img"}}}},
+    {"request": "variables", "args": {"path": "PROG0.out_step"}, "expect": {"success": true, "body": {"value": 9}}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "throughout": true, "note": "scanning never stopped; the force held", "expect": {"outputs": {"%QW0": 9}, "maxGapMs": {"Main": {"~le": 250}}}},
+    {"inject": "plugin", "args": {"name": "opcua_server", "action": "debug_release_value", "path": "PROG0.out_step"}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 1}}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true}},
+    {"event": "programReplaced", "withinMs": 3000, "expect": {"body": {"cause": "onlineChange"}}},
+    {"wait": {"scans": 3}},
+    {"observe": "status", "note": "the build identity changed", "expect": {"fields": {"image": {"~notRef": "img"}}}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 2}}}
+  ]
+}

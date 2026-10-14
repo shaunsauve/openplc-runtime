@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "online-change-pair/halted-apply",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A145"],
+  "title": "An in-place change applied while halted finishes the scan on the old code, publishes its outputs, holds at the boundary (re-reported with no location) and resumes into the new code's first statement",
+  "notes": "ADR-006 D7, aligned to A145 as amended 2026-10-14. ASSUMED: the stop carries `cause` at the top level of the stopped body.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COUNTER"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@COUNTER"}}},
+    {"request": "variables", "args": {"path": "PROG0.witness"}, "expect": {"success": true, "body": {"value": {"~capture": "k"}}}},
+    {"request": "variables", "args": {"path": "PROG0.counter"}, "expect": {"success": true, "body": {"value": {"~capture": "c"}}}},
+    {"observe": "plant", "note": "halted mid-scan k: the plant holds k - 1", "expect": {"witness": {"Main": {"~ref": "k", "~add": -1, "~tol": 0}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 3000, "note": "D7.1.4: not re-mapped; moved to the scan boundary", "expect": {"reason": "pause", "location": {"file": null, "line": null, "boundary": true}, "body": {"cause": "onlineChange"}}},
+    {"request": "stackTrace", "args": {"task": "Main"}, "expect": {"success": true, "body": {"stackFrames": {"~len": 0}}}, "note": "an empty stack"},
+    {"noEvent": "stopped", "forMs": 500, "note": "no stop names a line of the new build"},
+    {"observe": "plant", "note": "the rest of scan k ran once on the old code and reached the plant (D7.2)", "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 1, "%QD1": {"~ref": "c", "~add": 1, "~tol": 0}}}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "plant", "throughout": true, "note": "held at the boundary until resume", "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 1}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 1}},
+    {"observe": "plant", "note": "scan k + 1 is the new code's from its first statement", "expect": {"witness": {"Main": {"~ref": "k", "~add": 1, "~tol": 0}}, "outputs": {"%QW0": 2}}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 2, "%QD1": {"~gt": 0}}}}
+  ]
+}

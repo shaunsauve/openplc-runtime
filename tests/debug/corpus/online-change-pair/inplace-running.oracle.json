@@ -15,7 +15,7 @@
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
     {"request": "continue", "expect": {"success": true}},
     {"request": "classifyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true, "body": {"class": "inPlace", "token": {"~capture": "tok"}}}},
-    {"request": "applyChange", "args": {"build": "variant-inplace.st", "token": "captured tok"}, "expect": {"success": true}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st", "token": {"~ref": "tok"}}, "expect": {"success": true}},
     {"event": "programReplaced", "withinMs": 2000, "expect": {"body": {"cause": "onlineChange", "class": "inPlace"}}},
     {"event": "stopped", "withinMs": 2000, "note": "same session; breakpoint re-resolved to the new build", "expect": {"reason": "breakpoint",
       "location": {"file": "variant-inplace.st", "line": "@LAST"}, "variables": {"PROG0.out_step": 2}}},

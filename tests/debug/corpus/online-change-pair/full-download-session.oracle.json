@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "online-change-pair/full-download-session",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A148"],
+  "title": "A full REST download during a session is never silent: programReplaced names the new build, breakpoints re-resolve against it, the session continues stale until it rebinds",
+  "notes": "ADR-006 D8.3-D8.4. ASSUMED: the session is stale after the download, so a probe-dependent request answers STALE_BUILD until `rebind`.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "status", "expect": {"fields": {"image": {"~capture": "img"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COUNTER", "@CHANGED"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@COUNTER"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COUNTER", "@CHANGED"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"inject": "upload", "args": {"build": "variant-layout.st"}, "note": "another tool's upload through the runtime REST API", "expect": {"status": 200}},
+    {"event": "programReplaced", "withinMs": 30000, "expect": {"body": {"cause": "download", "retain": "warm", "image": {"~notRef": "img"}}}},
+    {"event": "breakpoint", "withinMs": 5000, "note": "re-resolved against the new build's debug info (D8.4, D4.1)", "expect": {"body": {"~any": true}}},
+    {"noEvent": "sessionEnded", "forMs": 1000},
+    {"request": "stackTrace", "args": {"task": "Main"}, "expect": {"success": false, "error": "STALE_BUILD"}, "note": "stale until it rebinds (D4.2)"},
+    {"request": "rebind", "args": {"identity": {"~build": "identity:variant-layout.st"}}, "expect": {"success": true}},
+    {"note": "no old breakpoint is kept against the new image", "event": "stopped", "withinMs": 2000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@COUNTER"}}},
+    {"observe": "status", "expect": {"fields": {"image": {"~notRef": "img"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}
