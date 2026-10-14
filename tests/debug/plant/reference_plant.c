@@ -18,7 +18,8 @@
  *   SCHEDULE <ms> <addr> <value>   set the input when the plant clock reaches origin + ms
  *   HOLD <task|all>, RESUME <task|all>   run control through plc_run_control_hold/resume
  *   MARK <text>            a line in the plant log
- * Every sample is also appended to the plant log as one JSON line.
+ * Every sample is also appended to the plant log as one JSON line. The socket stays up across a
+ * PLC stop and start (stop_loop only stops sampling); cleanup closes it.
  *
  * Config (plugin config path, key=value lines): socket, log, clock (virtual|wall), one
  * `witness=<task> <task index> <%Q address>` line per task and one `output=<%Q address>` line per
@@ -125,7 +126,8 @@ static schedule_t      g_schedule[MAX_SCHEDULE];
 static int             g_n_schedule = 0;
 static int64_t         g_origin_ns  = 0;
 
-static atomic_bool     g_running = false;
+static atomic_bool     g_running = false;  /* the socket server runs: from start_loop to cleanup */
+static atomic_bool     g_sampling = false; /* cycle_end samples: from start_loop to stop_loop */
 static pthread_t       g_server;
 static bool            g_server_up = false;
 static int             g_listen_fd = -1;
@@ -327,7 +329,7 @@ void cycle_start(void) {}
 /* Dispatcher thread, every frame: sample and apply the schedule. No allocation, no IO. */
 void cycle_end(void)
 {
-    if (!atomic_load(&g_running)) return;
+    if (!atomic_load(&g_sampling)) return;
     apply_schedule();
 
     const uint64_t head = atomic_load_explicit(&g_head, memory_order_relaxed);
@@ -574,8 +576,12 @@ static void *server(void *unused)
     return NULL;
 }
 
+/* The server outlives a PLC stop (stop_loop): a harness reads the plant after STOP (A033's
+ * "plant count frozen" after stop), and the last samples are what it reads. */
 int start_loop(void)
 {
+    atomic_store(&g_sampling, true);
+    if (g_server_up) return 0;
     g_log = fopen(g_log_path, "a");
     struct sockaddr_un sa = {0};
     sa.sun_family         = AF_UNIX;
@@ -600,6 +606,12 @@ int start_loop(void)
 
 void stop_loop(void)
 {
+    atomic_store(&g_sampling, false);
+}
+
+void cleanup(void)
+{
+    atomic_store(&g_sampling, false);
     atomic_store(&g_running, false);
     if (g_server_up) pthread_join(g_server, NULL);
     g_server_up = false;
@@ -609,5 +621,3 @@ void stop_loop(void)
     if (g_log) fclose(g_log);
     g_log = NULL;
 }
-
-void cleanup(void) {}

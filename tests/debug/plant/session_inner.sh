@@ -59,6 +59,15 @@ s = s.replace(a2, "            if (ctx->resumes.load() == seed_r0)\n" + a2, 1)
 open(p, "w").write(s)
 PY
     ;;
+  stopdetach)  # A033 red-proof: stop also ends the session
+    python3 - <<'PY' || { echo "SEED stopdetach not applied"; exit 1; }
+p = "core/src/plc_app/debug_link.cpp"
+s = open(p).read()
+a = "        /* Stop the program, not the session (F005): the session stays attached. */\n"
+assert a in s
+open(p, "w").write(s.replace(a, a + "        end_session_locked(session, running);\n", 1))
+PY
+    ;;
   *) echo "unknown SEED $SEED"; exit 1 ;;
 esac
 mkdir -p build/plugins /run/runtime core/generated
@@ -105,7 +114,7 @@ echo "### harness over WSS"
 ARCH=$(uname -m)
 "$PY" tests/debug/wire/run_harness.py --endpoint https://127.0.0.1:8443 --insecure \
   --token "$(cat /tmp/token)" --plant /tmp/plant.sock --build-dir /out/build \
-  ${RESULTS:+--results "$RESULTS"} \
+  ${RESULTS:+--results "$RESULTS"} $(for t in $DEPLOYED; do printf -- '--deployed-task %s ' "$t"; done) \
   --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
   "$@" | tee /out/harness.txt
 RC=${PIPESTATUS[0]}

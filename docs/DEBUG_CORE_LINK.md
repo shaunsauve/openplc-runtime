@@ -84,7 +84,7 @@ Error        = {code: str, message: str, details?: obj}
 TaskRef      = str|int
 TaskState    = {task: str, taskId: int, state: str, reason?: str, probe?: int, heldAtBoundary?: bool, since?: num, scan?: int}
 Location     = {task: str, taskId: int, probe?: int}
-RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, location?: Location, since?: num}
+RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, location?: Location, since?: num, sessions?: [str]}
 BpResult     = {id: int|null, probe: int, verified: bool, error?: Error}
 Frame        = {pou: int, at: int, leaf: int|null}
 
@@ -127,13 +127,13 @@ readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]
 | `detach` | Ends the session. Ending the controller's session clears its breakpoints and the trap and resumes every halted task; the last session clears the session byte | `SESSION_ENDED` |
 | `terminate` | As `detach`, then stops the program (DAP `terminate`) | `SESSION_ENDED`, `BUSY` |
 | `beatClient` | The client's heartbeat (ADR-005 D4); recorded, no P2 timer yet | `SESSION_ENDED` |
-| `status` | The `runState` body, answered at once | — |
+| `status` | The `runState` body, answered at once. `sessions` lists the session IDs the core holds | — |
 | `setBreakpoints` | Replaces the breakpoints of file `fileId` with `probes`. An item is a probe ID, or `{probe, condition?, hitCount?}` (`condition`: base64 bytecode ≤ 512 B, see below; `hitCount`: stop from the n-th hit). The result lists one `BpResult` per item, in order; one failing item (`INVALID_LOCATION`, `LIMIT_EXCEEDED`, `BAD_REQUEST`) does not fail the others. A breakpoint keeps its `id` while its probe stays armed | `NO_PROBES` |
 | `clearAllBreakpoints` | Every file's breakpoints; `removed` counts them | `NO_PROBES` |
 | `continue` | All-stop: resumes every halted task, whatever `task` says | `NOT_RUNNING` |
 | `pause` | Halts `task`, or every task when absent; the `stopped` events follow | `NOT_RUNNING`, `BAD_REQUEST` (no such task) |
 | `next`, `stepIn`, `stepOut` | Resumes only `task` (absent: the task of the most recent stop) to its next statement, over / into / out of calls; a `stopped` with reason `step` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
-| `stop` | Stops the program as STOP does; the session stays attached | `NOT_RUNNING`, `BUSY` |
+| `stop` | Stops the program as STOP does; the session stays attached. Answered once the program has stopped (state `STOPPED`, at most 3 s), so a status read after the response sees it | `NOT_RUNNING`, `BUSY` |
 | `stackTrace` | The halted `task`'s frames (absent: the task of the most recent stop), innermost first (ADR-001 D3). `pou` is the frame's POU by its entry probe (`debug-info.json` `pous[].entryProbe`); `at` its location probe: the stop probe for the innermost frame, the calling statement's probe for the others; `leaf` the flat index of the lowest-addressed debug-table leaf at or above the frame's instance, `null` for a function or a program without the table (see "Interim instance binding"). `truncated` is true when the walk stopped at a frame of an earlier attach (N4). A task held at its scan boundary has `frames: []` (D2.5) | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
 | `readLeaves` | Each leaf's value, by flat leaf index (the `DebugMapV2` leaf order: array 0's elements, then array 1's, …, the numbering of `instances.leafBase`), as lowercase hex of the bytes `strucpp_debug_read` writes (little-endian scalars; STRING 1+126 and WSTRING 1+252 byte windows). An index the program does not have reads `null`. At most 1024 per request. Read without stopping the program, as the legacy `0x44` read is | `BAD_REQUEST` |
 | `cycleStep` | Runs only `task` (absent: the task of the most recent stop) for exactly one scan (ADR-001 D4.9). Halted at probe P in scan k: the rest of scan k runs to its boundary, then one released scan runs with a trap on P, so the stop is at P in scan k+1 (reason `step`), or, if that scan never reaches P, a hold at its boundary (reason `step`, `heldAtBoundary`). Held at a boundary: one released scan, then a hold (reason `step`, `heldAtBoundary`). A breakpoint reached first stops there and ends the cycle step. The dispatcher holds the task before its next release (a scan budget), so its virtual time moves exactly one interval (ADR-004 D4). `continued {task, taskId}` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
@@ -220,6 +220,16 @@ pm: please fold them into ADR-003 D1.3.
     paths case-insensitively, and the harness compares `pou`, `instance`, `name` and `path`
     case-insensitively against the oracle's source spelling. Showing the source spelling needs
     STruCpp to record it in `debug-info.json`.
+
+## The status API's debug block
+
+ADR-003 D9's `debug` block of `GET /api/status` is `DebugGateway.status_block()`: the core's
+`status` body, with `sessions` narrowed to the gateway's sessions the core still holds (as
+`[{user, role}]`), so a stop never reads as a detach. The gateway strips the core's session IDs
+from everything it forwards to clients. **Follow-up for the webserver owner:**
+`webserver/app.py` `handle_status` must add `result["debug"] = gateway.status_block()`; until it
+does, only the e2e server (`tests/debug/wire/serve.py`, which registers the status handler the
+same way) serves the block.
 
 ## Not built here
 

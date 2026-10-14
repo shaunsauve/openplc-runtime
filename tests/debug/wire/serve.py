@@ -56,6 +56,12 @@ def main() -> None:
         core_path=real[0] if real else None,
         info_path=Path(real[1]) if real else None,
     )
+    # GET /api/status's `debug` block (ADR-003 D9), as the webserver's status handler adds it
+    # from the gateway (webserver/app.py handle_status: follow-up, see docs/DEBUG_CORE_LINK.md).
+    restapi.register_callback_get(
+        lambda command, _data: {"debug": server.gateway.status_block()}
+        if command == "status" else {"error": "Unknown argument"}
+    )
     token_file.write_text(token)
     print(f"serving {server.url} (bound {host}:{port})", flush=True)
     threading.Event().wait()

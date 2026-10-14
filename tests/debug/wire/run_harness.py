@@ -78,8 +78,9 @@ def run(
     insecure: bool,
     plant: Optional[Plant] = None,
     build: Optional[BuildOutputs] = None,
+    deployed_tasks: Optional[Dict[str, float]] = None,
 ) -> List[runner.RunResult]:
-    endpoint = WssEndpoint(url, token=token, insecure=insecure)
+    endpoint = WssEndpoint(url, token=token, insecure=insecure, deployed_tasks=deployed_tasks)
     return [
         runner.run_scenario(
             p, endpoint, plant or UnavailablePlant(), WallClock(), build or UnavailableBuild()
@@ -98,10 +99,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--build-dir", type=Path, help="<dir>/<corpus>/debug/debug-info.json")
     ap.add_argument("--results", type=Path, help="append status/runs JSON lines here")
     ap.add_argument("--ran-on", default="", help="where the run happened, for --results rows")
+    ap.add_argument("--deployed-task", action="append", default=[], metavar="NAME=MS",
+                    help="a task of the deployed program and its interval (repeatable)")
     opts = ap.parse_args(argv)
     plant = ReferencePlant(opts.plant) if opts.plant else None
     build = build_views.DirectoryBuild(opts.build_dir) if opts.build_dir else None
-    results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build)
+    deployed: Dict[str, float] = {}
+    for item in opts.deployed_task:
+        name, _, ms = item.partition("=")
+        deployed[name] = float(ms)
+    results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed)
     rows = []
     for result in results:
         print(runner.format_trace(result), flush=True)

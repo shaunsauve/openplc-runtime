@@ -36,8 +36,12 @@ class SocketIOEndpoint:
         token: Optional[str],
         insecure: bool,
         user_tokens: Optional[Dict[str, str]] = None,
+        deployed_tasks: Optional[Dict[str, float]] = None,
     ) -> None:
         parsed = urlparse(url)
+        # The task intervals (ms) of the program the caller deployed (T-VER-TASKDEPLOY): a
+        # scenario's setup.tasks is met when it names these intervals, and refused otherwise.
+        self.deployed_tasks = {k.casefold(): v for k, v in (deployed_tasks or {}).items()}
         # Named test users' JWTs (`~token: "user:<name>"`): permission, lock and hand-over
         # scenarios need several identities, and the harness cannot mint them.
         self.user_tokens = dict(user_tokens or {})
@@ -57,10 +61,21 @@ class SocketIOEndpoint:
                 f"no debug endpoint at {self.host}:{self.port} ({exc.strerror or exc})"
             ) from exc
 
+    def _tasks_deployed(self, tasks: Json) -> bool:
+        """True when the deployed program runs every task setup.tasks names at its interval."""
+        if not isinstance(tasks, dict) or not self.deployed_tasks:
+            return False
+        for name, spec in tasks.items():
+            want = spec.get("intervalMs") if isinstance(spec, dict) else None
+            if self.deployed_tasks.get(str(name).casefold()) != want:
+                return False
+        return True
+
     def prepare(self, setup: JsonObj) -> None:
         self._probe()
-        # Nothing deploys a build or rewrites task/halt configuration for a run yet; a scenario
-        # that needs one cannot be judged against whatever happens to be loaded.
+        # Nothing deploys a build or rewrites halt configuration for a run yet; a scenario that
+        # needs one cannot be judged against whatever happens to be loaded. Task intervals are
+        # deployed by the caller (tests/debug/plant/session_e2e.sh) and declared here.
         needs = [
             k
             for k in (
@@ -72,7 +87,7 @@ class SocketIOEndpoint:
                 "haltMode",
                 "startHalted",
             )
-            if k in setup
+            if k in setup and not (k == "tasks" and self._tasks_deployed(setup[k]))
         ]
         if needs:
             raise Blocked(

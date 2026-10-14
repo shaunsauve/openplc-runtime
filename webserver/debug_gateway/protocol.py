@@ -153,7 +153,7 @@ COMMANDS: Mapping[str, Command] = {
         _cmd("detach", Kind.SESSION, local=True),
         _cmd("terminate", Kind.CONTROL, ("control",), local=True),
         _cmd("heartbeat", Kind.SESSION, local=True),
-        _cmd("status", Kind.READ),
+        _cmd("status", Kind.READ, local=True),
         _cmd("version", Kind.READ, local=True),
         _cmd("setLock", Kind.ADMIN, args={"on": Arg("bool", True), "reason": Arg("str")}, local=True),
         _cmd(

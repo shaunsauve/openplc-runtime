@@ -278,6 +278,9 @@ class DebugGateway:
             "detach": lambda s, a, i: self._end_by_request(s, "detach"),
             "terminate": lambda s, a, i: self._end_by_request(s, "terminate"),
             "heartbeat": lambda s, a, i: self._core("beatClient", {"session": s.core_session}),
+            "status": lambda s, a, i: {
+                k: v for k, v in self._core("status", {}).items() if k != "sessions"
+            },
             "version": lambda s, a, i: self._versions(self.link.hello()),
             "setLock": self._set_lock,
             "setBreakpoints": self._set_breakpoints,
@@ -695,6 +698,25 @@ class DebugGateway:
             "children": self._listing(session, info, info.children(node), native=True),
         }
 
+    # ------------------------------------------------------------------ status API
+
+    def status_block(self) -> JsonObj:
+        """The `debug` block of GET /api/status (ADR-003 D9): the core's run state and the
+        attached sessions. The webserver's status handler adds it as `debug`."""
+        try:
+            body = self._core("status", {})
+        except (Refusal, CoreUnavailable) as exc:
+            return {"state": None, "error": str(exc)}
+        held = body.get("sessions")
+        with self.lock:
+            # Only sessions the core still holds: a stop must not read as a detach (A033).
+            sessions = [
+                {"user": s.user, "role": s.role}
+                for s in self.sessions.values()
+                if not isinstance(held, list) or s.core_session in held
+            ]
+        return {**body, "sessions": sessions}
+
     # ------------------------------------------------------------------ session end
 
     def _end_by_request(self, session: ClientSession, command: str) -> JsonObj:
@@ -744,7 +766,8 @@ class DebugGateway:
             for s in lost:
                 self._event(s.sid, "sessionEnded", {"reason": "core_lost"})
             return
-        out = {k: v for k, v in body.items() if k not in ("session", "probe")}
+        # The core's session IDs are the link's, never a client's (status_block uses them).
+        out = {k: v for k, v in body.items() if k not in ("session", "probe", "sessions")}
         probe = body.get("probe")
         if event == "stopped" and isinstance(probe, int):
             info = self._debug_info()

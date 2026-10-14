@@ -331,6 +331,10 @@ cJSON *run_state_locked(void)
         cJSON_AddNumberToObject(b, "since", wall_ms_of(since));
     }
     cJSON_AddBoolToObject(b, "attached", debug_agent_attached());
+    /* The sessions the core holds, so a status read can tell a stop from a detach (A033). */
+    cJSON *ids = cJSON_CreateArray();
+    for (auto &sess : g_sessions) cJSON_AddItemToArray(ids, cJSON_CreateString(sess.first.c_str()));
+    cJSON_AddItemToObject(b, "sessions", ids);
     return b;
 }
 
@@ -517,7 +521,18 @@ struct Reply
     cJSON      *body  = nullptr;
     const char *code  = nullptr; /* error code, or null on success */
     std::string message;
+    /* stop, terminate: answer once the program has stopped (outside g_mu: the unload takes it) */
+    bool        wait_stopped = false;
 };
+
+/* A033: a stop's response means the program is stopped, so the status read right after it says
+ * STOPPED. Bounded: a stop that has not landed in 3 s is answered anyway; the runState event
+ * reports the landing. */
+void wait_stopped(void)
+{
+    for (int i = 0; i < 300 && (plc_get_state() != PLC_STATE_STOPPED || plc_state_is_transitioning()); ++i)
+        usleep(10000);
+}
 
 Reply fail(const char *code, const std::string &msg)
 {
@@ -899,7 +914,9 @@ Reply handle(const char *command, cJSON *args)
         g_pausing = false;
         debug_agent_clear_trap();
         if (!plc_begin_transition(PLC_STATE_STOPPED)) return fail("BUSY", "a state change is in flight");
-        return success();
+        Reply r = success();
+        r.wait_stopped = true;
+        return r;
     }
 
     size_t task;
@@ -1002,6 +1019,7 @@ cJSON *respond(const char *json)
         r = fail("BAD_REQUEST", "not a request envelope");
     else
         r = handle(cmd->valuestring, cJSON_GetObjectItem(req, "arguments"));
+    if (r.wait_stopped) wait_stopped();
 
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "type", "response");
