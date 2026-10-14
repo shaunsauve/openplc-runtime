@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Final, Optional
 
 import flask
+import flask_jwt_extended
 import flask_login
 
 from webserver import project_snapshot
@@ -106,7 +107,10 @@ HOSTNAME: Final[str] = "localhost"
 
 
 def handle_start_plc(data: dict) -> dict:
-    response = runtime_manager.start_plc()
+    # Every login holds the debug `control` right until per-user permissions exist (ADR-005
+    # D3.2 defaults, R7), so the caller may start the PLC out of the safe-stop gate.
+    user = flask_jwt_extended.get_current_user()
+    response = runtime_manager.start_plc(granting_user=getattr(user, "username", None))
     return {"status": response}
 
 

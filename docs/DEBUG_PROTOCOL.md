@@ -419,9 +419,10 @@ additive, so a 1.x client and a 1.y runtime interoperate.
 | Argument | Type | Meaning |
 |---|---|---|
 | `protocol` | string, required | The client's protocol version, `"1.0"` |
-| `token` | string, required | A JWT from `POST /api/login`; verified in full (signature, expiry, revocation, user) |
+| `token` | string | A JWT from `POST /api/login`; verified in full (signature, expiry, revocation, user). Required unless `resumeToken` is given |
 | `role` | `"controller"` or `"observer"` | Default `controller`. One controller; up to 16 observers |
 | `identity` | `{md5, buildId}` | The client's build, compared with the running image |
+| `resumeToken` | string | Resume a session whose transport dropped, within P2 (see "Heartbeat, loss and resume"); `token`, `role` and `identity` are then ignored |
 
 The response body:
 
@@ -434,11 +435,13 @@ The response body:
 | `engineAbi` | The core's engine ABI version |
 | `image` | The running image `{md5, buildId, buildTime, sourceHash}` |
 | `comparison` | `identity` against `image`: `match`, `source` (md5 differs), `build` (buildId differs) or `none` (no identity sent) |
-| `params` | `{P1, P2}`: heartbeat interval and timeout, seconds |
+| `params` | `{P1, P2}`: heartbeat interval, and the heartbeat timeout that is also the reconnect window, in seconds |
 | `capabilities` | The flags below, each true only when this build serves it |
 | `requests` | Every request name this runtime serves; a request not listed is refused `UNSUPPORTED` |
 | `role` | The role granted |
 | `locked` | Whether the production lock is on |
+| `resumeToken` | A 128-bit random token bound to this session; present it to resume. A new one is issued on every resume and the old one is dead |
+| `resumed` | `true` when the request resumed an existing session (absent otherwise) |
 
 Capability flags: `probes`, `maxBreakpoints` (a count), `conditional`, `hitCount`, `logpoints`,
 `functionBreakpoints`, `instanceBreakpoints`, `exceptionBreakpoints`, `nonStop`, `cycleStep`,
@@ -452,6 +455,25 @@ build. `initialize` on an attached connection replaces its session.
 
 `version` returns the same `protocol`, `runtime`, `compiler`, `debugInfo` and `engineAbi`.
 
+### Heartbeat, loss and resume
+
+ADR-005 D2.4 and D4. P1 (default 2 s, 0.5-30 s) and P2 (default 15 s, 5-600 s) are read from
+`<data dir>/debug.conf` as `P1 = <seconds>` and `P2 = <seconds>` lines when the webserver starts.
+A file with a value out of range or with P2 < 3 x P1 is refused (logged) and the defaults apply.
+
+- Any message from a client counts as its heartbeat; an otherwise idle client sends `heartbeat`
+  every P1.
+- A client's own Socket.IO disconnect is a detach. A dropped transport (a closed socket, a network
+  blip) ends nothing: the session, its breakpoints and a halt are kept for P2, and
+  `initialize {protocol, resumeToken}` on a new connection resumes it.
+- When P2 passes with no message, the session ends with `sessionEnded {reason:
+  "heartbeat_timeout"}`. A lost controller with a task halted safe-stops the PLC (outputs held,
+  state `SAFE_STOPPED`, ADR-004 D7.3); with the program running it is a detach (breakpoints
+  cleared, the program keeps running). A resume after that is refused `SESSION_ENDED` with
+  `details.reason: "heartbeat_timeout"`.
+- A resume is refused `UNAUTHORISED` for an unknown token, and ends the session (`revoked`) when the
+  user was deleted or the session's login was revoked since.
+
 ### Requests
 
 The "Needs" column lists the capability flags a request requires; a request is in the
@@ -464,9 +486,9 @@ and the lock off; `admin` requests need an administrator account.
 |---|---|---|---|
 | `initialize` | - | - | See "Handshake" |
 | `attach` | - | - | Body `{role}`; DAP compatibility, the session is attached by `initialize` |
-| `detach` | - | - | Ends the session. A controller's breakpoints are cleared and a halted program resumes. Body `{forces}` |
+| `detach` | - | - | Ends the session. A controller's breakpoints are cleared and a halted program resumes. Body `{forces, safeStopped?}` |
 | `terminate` | `control` | control | Stops the PLC and ends the session |
-| `heartbeat` | - | - | Keeps the session alive (P1/P2) |
+| `heartbeat` | - | - | Keeps the session alive (P1/P2); body `{}` |
 | `status` | - | - | Body `{state, tasks}` |
 | `version` | - | - | See "Handshake" |
 | `setLock` | - | admin | `{on, reason?}`; body `{on}` |
@@ -523,7 +545,7 @@ Pushed, never polled. The controller receives every event; observers receive `st
 | `runState` | `{state, tasks:[{task, taskId, state, reason?, probe?, since?}], attached, by?, location?, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING` |
 | `output` | `{category: logpoint\|print\|runtime\|plugin, task, scan, text}` |
 | `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
-| `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `core_lost` (the core link dropped) or a reason from the core |
+| `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `heartbeat_timeout` (no message for P2), `core_lost` (the core link dropped) or a reason from the core |
 
 ### Error codes
 
@@ -532,7 +554,7 @@ Every failure carries one of these codes. The message names the problem in a sen
 | Code | When |
 |---|---|
 | `PROTOCOL_VERSION` | `initialize` with an incompatible major; `details: {client, server}` |
-| `UNAUTHORISED` | `initialize` with no token, or a token that is invalid, expired or revoked |
+| `UNAUTHORISED` | `initialize` with no token, or a token that is invalid, expired or revoked, or an unknown `resumeToken` |
 | `FORBIDDEN` | The user lacks the permission (an `admin` request from a non-administrator) |
 | `NOT_CONTROLLER` | A control or modify request from an observer, or a second controller; `details.controller` names the holder |
 | `LOCKED` | A control or modify request while the production lock is on |
@@ -553,7 +575,7 @@ Every failure carries one of these codes. The message names the problem in a sen
 | `EXPR_SYNTAX` | An expression that does not parse |
 | `NO_SOURCE` | The runtime cannot supply a file's source |
 | `BUSY` | A PLC state transition is in flight; or a 17th observer (`details.reason: "observer_limit"`) |
-| `SESSION_ENDED` | A request on a session that ended; `details.reason` (`detached`, `terminated`, `revoked`, `core_lost`) |
+| `SESSION_ENDED` | A request on a session that ended, or a resume of one; `details.reason` (`detached`, `terminated`, `revoked`, `heartbeat_timeout`, `core_lost`) |
 | `INTERNAL` | A runtime bug, or the core unreachable over its debug link; logged |
 | `SAFE_STOPPED` | A write, force or online change while the runtime is safe-stopped |
 | `CHANGE_REFUSED` | An online change the classifier refuses; `details.reason` |

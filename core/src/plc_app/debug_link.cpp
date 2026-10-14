@@ -654,9 +654,29 @@ Reply handle(const char *command, cJSON *args)
     if (!std::strcmp(command, "beatClient")) return success();
     if (!std::strcmp(command, "detach"))
     {
-        end_session_locked(session, running);
+        /* ADR-005 D4.6: the gateway's P2 expiry. A lost controller with a task halted safe-stops
+         * (outputs held) instead of resuming; otherwise it is a plain detach. */
+        cJSON     *why  = arg(args, "reason");
+        const bool lost = cJSON_IsString(why) && !std::strcmp(why->valuestring, "heartbeat_timeout");
+        bool halted = g_pausing;
+        for (const auto &v : g_view) halted = halted || v.halted;
+        const bool safe_stop = lost && running && halted && g_sessions[session].controller;
+        if (safe_stop)
+        {
+            g_sessions.erase(session);
+            if (g_sessions.empty()) debug_agent_set_attached(false);
+            clear_breakpoints_locked();
+            g_pausing = false;
+            debug_agent_clear_trap();
+        }
+        else
+            end_session_locked(session, running);
+        const bool safe_stopped = safe_stop && plc_request_safe_stop("heartbeat_timeout");
+        if (safe_stop) log_warn("Debug controller lost past P2 while halted: safe-stop %s",
+                                safe_stopped ? "requested" : "refused (no dispatcher)");
         cJSON *b = cJSON_CreateObject();
         cJSON_AddItemToObject(b, "forces", cJSON_CreateArray());
+        cJSON_AddBoolToObject(b, "safeStopped", safe_stopped);
         return success(b);
     }
     if (!std::strcmp(command, "terminate"))

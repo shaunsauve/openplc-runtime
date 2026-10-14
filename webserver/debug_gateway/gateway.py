@@ -10,6 +10,7 @@ See also:
   webserver/debug_gateway/core_link.py - the core link and its CoreLink interface.
   docs/DEBUG_CORE_LINK.md - the core link's messages, and the pm rulings applied here.
   webserver/debug_gateway/debug_info.py - line/probe resolution from debug-info.json.
+  webserver/debug_gateway/session_guard.py - P1/P2 from debug.conf and resume tokens.
   webserver/debug_websocket.py - the legacy /api/debug namespace on the same Socket.IO instance.
   docs/DEBUG_PROTOCOL.md - "Session protocol v1", the spec.
 """
@@ -18,7 +19,8 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -33,7 +35,6 @@ from webserver.debug_gateway.debug_info import DebugInfo
 from webserver.debug_gateway.protocol import (
     COMMANDS,
     DEFAULT_MESSAGES,
-    DEFAULT_PARAMS,
     EVENT_NAME,
     MAX_MESSAGE_BYTES,
     MAX_OBSERVERS,
@@ -50,6 +51,14 @@ from webserver.debug_gateway.protocol import (
     check_args,
     parse_version,
 )
+from webserver.debug_gateway.session_guard import (
+    CONF_NAME,
+    ConfigError,
+    HeartbeatParams,
+    load_params,
+    mint_resume_token,
+    resume_hash,
+)
 from webserver.logger import get_logger
 from webserver.restapi import User, check_if_token_revoked, user_lookup_callback
 from webserver.version import RUNTIME_VERSION
@@ -61,6 +70,8 @@ OBSERVER_EVENTS = frozenset(
      "programReplaced"}
 )
 _CODES = {c.value: c for c in ErrorCode}
+WATCH_TICK_S = 0.1  # P2 expiry granularity (ADR-005 D4.6: within P2 + 1 s)
+ENDED_TOKENS_KEPT = 256
 
 
 def _obj(v: Json) -> JsonObj:
@@ -87,6 +98,9 @@ class ClientSession:
     token: str
     comparison: str
     core_session: Json = None
+    resume_hash: str = ""
+    # Any message from the session's client is a heartbeat (ADR-005 D4.3).
+    last_seen: float = field(default_factory=time.monotonic)
 
 
 class DebugGateway:
@@ -96,6 +110,7 @@ class DebugGateway:
         link: CoreLink,
         debug_info_path: Path,
         runtime_version: str = RUNTIME_VERSION,
+        params: HeartbeatParams = HeartbeatParams(),
     ) -> None:
         self.socketio = socketio
         self.link = link
@@ -103,6 +118,9 @@ class DebugGateway:
         self.runtime_version = runtime_version
         self.sessions: Dict[str, ClientSession] = {}
         self.ended: Dict[str, str] = {}
+        self.ended_tokens: Dict[str, str] = {}  # resume hash -> why its session ended
+        self.params = params
+        self._closed = threading.Event()
         self.locked = False
         self.lock = threading.Lock()
         self._seq = 0
@@ -120,6 +138,10 @@ class DebugGateway:
         self.socketio.on_event("connect", self._on_connect, namespace=NAMESPACE)
         self.socketio.on_event("disconnect", self._on_disconnect, namespace=NAMESPACE)
         self.socketio.on_event(EVENT_NAME, self._on_msg, namespace=NAMESPACE)
+        threading.Thread(target=self._watch, name="debug-session-p2", daemon=True).start()
+
+    def close(self) -> None:
+        self._closed.set()
 
     def _on_connect(self, auth: Json = None) -> bool:
         del auth  # the JWT travels in initialize (ADR-005 D1.1)
@@ -130,15 +152,30 @@ class DebugGateway:
         return True
 
     def _on_disconnect(self, reason: Json = None) -> None:
-        del reason
         sid = str(request.sid)
         with self.lock:
-            session = self.sessions.pop(sid, None)
             self.ended.pop(sid, None)
-        if session is not None:
-            # TODO: T-SEC-3/4 keep the session for P2 and resume it; until then loss detaches.
+            session = self.sessions.get(sid)
+        if session is None:
+            return
+        # A client's own Socket.IO disconnect is a leave. A dropped transport is not loss
+        # (ADR-005 D4.5): the session stays for P2, resumable by its token, then _watch ends it.
+        if reason == self.socketio.server.reason.CLIENT_DISCONNECT:
+            self._retire(session, "detached")
             self._core_detach(session, "disconnect")
             self._broadcast_control()
+        else:
+            logger.info("Debug session of %s lost its transport (%s); kept for P2", session.user, reason)
+
+    def _watch(self) -> None:
+        while not self._closed.wait(WATCH_TICK_S):
+            now = time.monotonic()
+            with self.lock:
+                lost = [s for s in self.sessions.values() if now - s.last_seen > self.params.p2_s]
+            for session in lost:
+                logger.warning("Debug session of %s timed out after P2 = %g s", session.user,
+                               self.params.p2_s)
+                self._end(session, "heartbeat_timeout")
 
     def _on_msg(self, data: Json) -> None:
         sid = str(request.sid)
@@ -160,6 +197,10 @@ class DebugGateway:
     def handle(self, sid: str, raw: Json) -> JsonObj:
         request_seq: Json = None
         command: Json = None
+        with self.lock:
+            live = self.sessions.get(sid)
+            if live is not None:
+                live.last_seen = time.monotonic()
         try:
             msg, size = self._parse(raw)
             request_seq = msg.get("seq") if isinstance(msg.get("seq"), int) else None
@@ -308,14 +349,17 @@ class DebugGateway:
                 f"{PROTOCOL_VERSION}.",
                 {"client": client_version, "server": PROTOCOL_VERSION},
             )
-        user, is_admin, token = self._authenticate(args.get("token"))
         if hello is None:
             raise CoreUnavailable("no hello from the core")
+        if "resumeToken" in args:
+            return self._resume(sid, str(args["resumeToken"]), hello, caps)
+        user, is_admin, token = self._authenticate(args.get("token"))
         role = str(args.get("role") or "controller")
         image = _obj(hello.get("image"))
         session = ClientSession(
             sid, user, is_admin, role, token, _compare(_obj(args.get("identity")), image)
         )
+        resume_token, session.resume_hash = mint_resume_token()
         with self.lock:
             old = self.sessions.pop(sid, None)
         if old is not None:
@@ -344,16 +388,58 @@ class DebugGateway:
                 self.sessions.pop(sid, None)
             raise
         self._broadcast_control()
+        return self._handshake(hello, caps, session, resume_token)
+
+    def _handshake(
+        self, hello: JsonObj, caps: JsonObj, session: ClientSession, resume_token: str
+    ) -> JsonObj:
         return {
             **self._versions(hello),
-            "image": image,
+            "image": _obj(hello.get("image")),
             "comparison": session.comparison,
-            "params": {**DEFAULT_PARAMS, **_obj(hello.get("params"))},
+            # The gateway runs the P2 timer, so it reports its own P1/P2, not the core's.
+            "params": self.params.as_json(),
             "capabilities": caps,
             "requests": advertised_requests(caps),
-            "role": role,
+            "role": session.role,
             "locked": self.locked,
+            "resumeToken": resume_token,
         }
+
+    def _resume(self, sid: str, token: str, hello: JsonObj, caps: JsonObj) -> JsonObj:
+        """ADR-005 D2.4: the resume token alone rebinds a session within P2, then rotates."""
+        spent = resume_hash(token)
+        with self.lock:
+            session = next((s for s in self.sessions.values() if s.resume_hash == spent), None)
+            ended = self.ended_tokens.get(spent)
+        if session is None:
+            if ended is not None:
+                raise Refusal(
+                    ErrorCode.SESSION_ENDED,
+                    f"The debug session to resume has ended ({ended}); initialize a new one.",
+                    {"reason": ended},
+                )
+            raise Refusal(ErrorCode.UNAUTHORISED, "The resume token is not valid.")
+        if not self._login_valid(session.token):
+            self._end(session, "revoked")
+            raise Refusal(
+                ErrorCode.SESSION_ENDED,
+                "The debug session ended because its login was revoked or its account removed.",
+                {"reason": "revoked"},
+            )
+        fresh, fresh_hash = mint_resume_token()
+        with self.lock:
+            if self.sessions.get(session.sid) is session:
+                del self.sessions[session.sid]
+            replaced = self.sessions.pop(sid, None)
+            session.sid, session.resume_hash, session.last_seen = sid, fresh_hash, time.monotonic()
+            self.sessions[sid] = session
+            self.ended.pop(sid, None)
+        if replaced is not None and replaced is not session:
+            self._core_detach(replaced, "reinitialize")
+        logger.info("Debug session of %s resumed", session.user)
+        self._broadcast_control()
+        return {**self._handshake(hello, caps, session, fresh), "resumed": True}
 
     def _versions(self, hello: Optional[JsonObj]) -> JsonObj:
         info = self._debug_info()
@@ -381,18 +467,21 @@ class DebugGateway:
             raise Refusal(ErrorCode.UNAUTHORISED, "The login token names no existing user.")
         return user.username, user.is_admin(), token
 
-    def _reverify(self, session: ClientSession) -> None:
+    @staticmethod
+    def _login_valid(token: str) -> bool:
         """ADR-005 D2.1: revocation and account deletion end the session; expiry does not."""
         try:
-            payload = decode_token(session.token, allow_expired=True)
-            valid = (
+            payload = decode_token(token, allow_expired=True)
+            return (
                 payload.get("type") == "access"
                 and not check_if_token_revoked({}, payload)
                 and user_lookup_callback({}, payload) is not None
             )
         except (JWTExtendedException, PyJWTError):
-            valid = False
-        if not valid:
+            return False
+
+    def _reverify(self, session: ClientSession) -> None:
+        if not self._login_valid(session.token):
             self._end(session, "revoked")
             raise Refusal(
                 ErrorCode.SESSION_ENDED,
@@ -505,16 +594,26 @@ class DebugGateway:
 
     def _end_by_request(self, session: ClientSession, command: str) -> JsonObj:
         body = self._core(command, {"session": session.core_session})
-        with self.lock:
-            self.sessions.pop(session.sid, None)
-            self.ended[session.sid] = "detached" if command == "detach" else "terminated"
+        self._retire(session, "detached" if command == "detach" else "terminated")
         self._broadcast_control()
         return body
 
-    def _end(self, session: ClientSession, reason: str) -> None:
+    def _retire(self, session: ClientSession, reason: str) -> bool:
+        """Forget a live session; False if something else already ended it."""
         with self.lock:
-            self.sessions.pop(session.sid, None)
+            if self.sessions.get(session.sid) is not session:
+                return False
+            del self.sessions[session.sid]
             self.ended[session.sid] = reason
+            # A resume after the end is told why (ADR-005 D4.6), so the reason outlives the session.
+            self.ended_tokens[session.resume_hash] = reason
+            while len(self.ended_tokens) > ENDED_TOKENS_KEPT:
+                del self.ended_tokens[next(iter(self.ended_tokens))]
+        return True
+
+    def _end(self, session: ClientSession, reason: str) -> None:
+        if not self._retire(session, reason):
+            return
         self._core_detach(session, reason)
         self._event(session.sid, "sessionEnded", {"reason": reason})
         self._broadcast_control()
@@ -544,11 +643,9 @@ class DebugGateway:
         if event == "_linkLost":
             with self.lock:
                 lost = list(self.sessions.values())
-                self.sessions.clear()
-                for s in lost:
-                    self.ended[s.sid] = "core_lost"
             for s in lost:
-                self._event(s.sid, "sessionEnded", {"reason": "core_lost"})
+                if self._retire(s, "core_lost"):
+                    self._event(s.sid, "sessionEnded", {"reason": "core_lost"})
             return
         out = {k: v for k, v in body.items() if k not in ("session", "probe")}
         probe = body.get("probe")
@@ -563,10 +660,8 @@ class DebugGateway:
         if target is not None:
             recipients = [s for s in recipients if s.core_session == target]
             if event == "sessionEnded":
-                with self.lock:
-                    for s in recipients:
-                        self.sessions.pop(s.sid, None)
-                        self.ended[s.sid] = str(out.get("reason", "ended"))
+                for s in recipients:
+                    self._retire(s, str(out.get("reason", "ended")))
         for s in recipients:
             if s.role == "controller" or event in OBSERVER_EVENTS:
                 self._event(s.sid, event, out)
@@ -586,8 +681,26 @@ def _compare(identity: JsonObj, image: JsonObj) -> str:
     return "match"
 
 
-def init_debug_gateway(socketio: SocketIO, link: CoreLink, debug_info_path: Path) -> DebugGateway:
-    gateway = DebugGateway(socketio, link, debug_info_path)
+def init_debug_gateway(
+    socketio: SocketIO,
+    link: CoreLink,
+    debug_info_path: Path,
+    params: Optional[HeartbeatParams] = None,
+    conf_path: Optional[Path] = None,
+) -> DebugGateway:
+    """`params` None reads P1/P2 from `conf_path` (default `<data dir>/debug.conf`)."""
+    if params is None:
+        if conf_path is None:
+            from webserver.config import PERSISTENT_DATA_DIR  # noqa: PLC0415 - import side effects
+
+            conf_path = PERSISTENT_DATA_DIR / CONF_NAME
+        try:
+            params = load_params(conf_path)
+        except ConfigError as exc:
+            # ADR-005 D4.2: refused at load; the defaults apply, never the bad values.
+            logger.error("Refusing %s: %s; using P1 = 2 s, P2 = 15 s", conf_path, exc)
+            params = HeartbeatParams()
+    gateway = DebugGateway(socketio, link, debug_info_path, params=params)
     gateway.register()
     logger.info("Debug session gateway initialized at %s", NAMESPACE)
     return gateway

@@ -24,6 +24,7 @@ from werkzeug.serving import BaseWSGIServer, make_server
 from fake_core import FakeCore, Json, JsonObj, debug_info
 from webserver.credentials import CertGen
 from webserver.debug_gateway import UnixCoreLink, init_debug_gateway
+from webserver.debug_gateway.session_guard import HeartbeatParams
 from webserver.debug_websocket import init_debug_websocket
 
 
@@ -56,6 +57,7 @@ class WireServer:
         core_path: Optional[str] = None,
         info_path: Optional[Path] = None,
         tls: bool = True,
+        params: Optional[HeartbeatParams] = None,
     ) -> None:
         """`core_path`/`info_path` serve a real core (plc_main's plc_debug.socket and its
         debug-info.json) instead of the fake; `core` is then None. `tls=False` serves plain HTTP,
@@ -73,7 +75,8 @@ class WireServer:
         self.legacy = LegacyCore()
         self.socketio = init_debug_websocket(app, self.legacy)
         self.link = UnixCoreLink(self.core_path)
-        self.gateway = init_debug_gateway(self.socketio, self.link, self.info_path)
+        # params=None reads <data dir>/debug.conf, as the runtime does.
+        self.gateway = init_debug_gateway(self.socketio, self.link, self.info_path, params=params)
         self.server: BaseWSGIServer = make_server(
             host, port, app, threaded=True, ssl_context=_certificate() if tls else None
         )
@@ -86,6 +89,7 @@ class WireServer:
 
     def close(self) -> None:
         self.server.shutdown()
+        self.gateway.close()
         self.link.close()
         if self.core is not None:
             self.core.close()

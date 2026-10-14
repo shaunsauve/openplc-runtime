@@ -48,6 +48,7 @@ from wss_client import WssSio  # noqa: E402
 
 from webserver import restapi  # noqa: E402
 from webserver.debug_gateway import protocol  # noqa: E402
+from webserver.debug_gateway.session_guard import ConfigError, HeartbeatParams, parse_params  # noqa: E402
 from webserver.version import RUNTIME_VERSION  # noqa: E402
 
 NS = "/api/debug-session"
@@ -120,6 +121,10 @@ class Client:
 
     def close(self) -> None:
         self.sio.disconnect()
+
+    def kill(self) -> None:
+        """Drop the transport with no Socket.IO disconnect, as a SIGKILLed client does."""
+        self.sio.eio.disconnect(abort=True)
 
 
 @pytest.fixture()
@@ -445,6 +450,122 @@ def test_attach_and_detach_leave_the_program_alone(serve, admin_token):
     halted_at = core.witness()
     time.sleep(0.1)
     assert core.state == "RUNNING" and core.breakpoints == {} and core.witness() > halted_at
+
+
+# --------------------------------------------------------------------------- A121, A057, A058,
+# A122 (gateway half): P1/P2, loss past P2, resume within it.
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("", HeartbeatParams(2, 15)),
+        ("# defaults\nlock = off\n", HeartbeatParams(2, 15)),
+        ("P1 = 0.5\nP2 = 5\n", HeartbeatParams(0.5, 5)),
+        ("P1=10\nP2=30", HeartbeatParams(10, 30)),
+        ("P1 = 2\nP2 = 5\n", "below 3 x P1"),
+        ("P1 = 0.4", "outside"),
+        ("P2 = 601", "outside"),
+        ("P2 = soon", "not a number"),
+        ("P2", "key = value"),
+    ],
+)
+def test_debug_conf_sets_p1_p2_and_refuses_bad_values(text, expected):
+    """ADR-005 D4.2: P1 0.5-30 s, P2 5-600 s, P2 >= 3 x P1, else refused at load. NO-FOLD:
+    parser."""
+    if isinstance(expected, HeartbeatParams):
+        assert parse_params(text) == expected
+    else:
+        with pytest.raises(ConfigError, match=expected):
+            parse_params(text)
+
+
+P = HeartbeatParams(0.2, 1.0)
+
+
+def _wait_for(pred: Callable[[], bool], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def _detaches(core: FakeCore) -> List[JsonObj]:
+    return [a for cmd, a in core.received if cmd == "detach"]
+
+
+def test_losing_the_controller_past_p2_safe_stops_a_halt_and_detaches_a_run(serve, admin_token):
+    """ADR-005 D4.5-D4.6, gateway half of A057/A058/A177: a dropped transport ends nothing
+    within P2; past P2 the gateway detaches the session with reason heartbeat_timeout, which the
+    core turns into a safe-stop when a task is halted and a plain detach when running; a client
+    that comes back with the old resume token is told the session ended and why. A heartbeating
+    idle controller outlives P2 several times over (A121)."""
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    body = as_obj(c.initialize()["body"])
+    assert body["params"] == {"P1": 0.2, "P2": 1}
+    token = str(body["resumeToken"])
+    for _ in range(int(3 * P.p2_s / P.p1_s)):
+        assert c.request("heartbeat")["success"] is True
+        time.sleep(P.p1_s)
+    assert _detaches(core) == [] and "sessionEnded" not in c.drain()
+
+    assert c.request("setBreakpoints", {"file": "program.st", "lines": [6]})["success"] is True
+    c.event("stopped")
+    c.kill()
+    killed = time.monotonic()
+    time.sleep(P.p2_s * 0.7)
+    assert core.state == "HALTED" and _detaches(core) == [], "the session ended within P2"
+    assert _wait_for(lambda: core.state == "SAFE_STOPPED", P.p2_s)
+    lost_after = time.monotonic() - killed
+    assert P.p2_s <= lost_after <= P.p2_s + 0.5, lost_after
+    assert _detaches(core)[-1]["reason"] == "heartbeat_timeout"
+    late = Client(server.url).initialize(resumeToken=token)
+    assert _refusal(late)[0] == "SESSION_ENDED"
+    assert as_obj(as_obj(late["error"])["details"])["reason"] == "heartbeat_timeout"
+
+    running = serve(params=P)
+    assert running.core is not None
+    r = Client(running.url, admin_token)
+    assert r.initialize()["success"] is True
+    r.kill()
+    assert _wait_for(lambda: len(_detaches(running.core)) == 1, P.p2_s + 0.5)  # type: ignore[arg-type]
+    assert _detaches(running.core)[0]["reason"] == "heartbeat_timeout"
+    before = running.core.witness()
+    time.sleep(0.05)
+    assert running.core.state == "RUNNING" and running.core.witness() > before
+
+
+def test_a_resume_token_within_p2_keeps_the_session(serve, admin_token):
+    """ADR-005 D2.4/D4.5: the resume token alone, within P2, rebinds the same core session (no
+    second attach, still halted), rotates, and the spent token is dead. A clean Socket.IO
+    disconnect is a leave, not a loss: it detaches at once."""
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    token = str(as_obj(c.initialize()["body"])["resumeToken"])
+    assert c.request("pause")["success"] is True
+    c.event("stopped")
+    c.kill()
+    time.sleep(P.p2_s / 2)
+    back = Client(server.url)
+    body = as_obj(back.initialize(resumeToken=token)["body"])
+    assert body["resumed"] is True and body["role"] == "controller"
+    assert body["resumeToken"] != token
+    assert [cmd for cmd, _ in core.received].count("attach") == 1 and core.state == "HALTED"
+    for _ in range(int(P.p2_s / P.p1_s) + 2):  # past the old transport's P2, beating
+        assert back.request("heartbeat")["success"] is True
+        time.sleep(P.p1_s)
+    assert back.request("continue")["success"] is True
+    assert _refusal(Client(server.url).initialize(resumeToken=token))[0] == "UNAUTHORISED"
+    back.close()
+    assert _wait_for(lambda: len(_detaches(core)) == 1, 0.3)
+    assert _detaches(core)[0].get("reason") == "disconnect"
 
 
 # --------------------------------------------------------------------------- A067 handshake

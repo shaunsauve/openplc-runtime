@@ -133,7 +133,7 @@ class WssSio:
         self.close()
 
     def close(self, abort: bool = False) -> None:
-        del abort
+        """`abort` drops the connection without a close frame, as a killed process does."""
         ws, self.ws = self.ws, None
         if ws is None:
             return
@@ -142,10 +142,11 @@ class WssSio:
         # process reuses that number, the old reader consumes the new connection's bytes (bad
         # record MAC / wrong version number on the second session). Shut the socket down first so
         # the reader returns, and join it, before the fd is released.
-        try:
-            simple_websocket.ws.Base.close(ws)  # the close frame, as Client.close() sends it
-        except simple_websocket.ConnectionClosed:
-            pass
+        if not abort:
+            try:
+                simple_websocket.ws.Base.close(ws)  # the close frame, as Client.close() sends it
+            except simple_websocket.ConnectionClosed:
+                pass
         try:
             ws.sock.shutdown(socket.SHUT_RDWR)
         except OSError:

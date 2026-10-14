@@ -207,11 +207,13 @@ def _show(value: object) -> str:
     return text if len(text) <= 60 else text[:57] + "..."
 
 
-def load(path: Path = SPEC) -> Spec:
+def load(path: Path = SPEC, block: str = "linkspec") -> Spec:
+    """`block` names the fenced block: `linkspec` (the core link) or `sessionspec` (the public
+    session protocol in docs/DEBUG_PROTOCOL.md), both in this grammar."""
     text = path.read_text(encoding="utf-8")
-    m = re.search(r"```linkspec\n(.*?)```", text, re.S)
+    m = re.search(rf"```{block}\n(.*?)```", text, re.S)
     if m is None:
-        raise ValueError(f"{path}: no linkspec block")
+        raise ValueError(f"{path}: no {block} block")
     types: Dict[str, Shape] = {}
     requests: Dict[str, Tuple[Shape, Shape]] = {}
     events: Dict[str, Shape] = {}

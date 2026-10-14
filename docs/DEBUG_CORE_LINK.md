@@ -96,7 +96,7 @@ output                  evt {category: str, kind?: str, count?: int, task?: str,
 sessionEnded            evt {session: str, reason: str}
 
 attach                  req {user: str, role: str} -> {session: str}
-detach                  req {session: str, reason?: str} -> {forces: list}
+detach                  req {session: str, reason?: str} -> {forces: list, safeStopped?: bool}
 terminate               req {session: str} -> {}
 beatClient              req {session: str} -> {}
 status                  req {session?: str} -> RunState
@@ -121,9 +121,9 @@ setHaltMode             req {session: str, mode: str} -> {mode: str}
 | Command | Semantics | Errors |
 |---|---|---|
 | `attach` | Opens a core session for a gateway client; `role` is `controller` or `observer`. The first session sets the program's session byte, so probed clones run; `by` in halted states is the controller's `user` | `BAD_REQUEST` |
-| `detach` | Ends the session. Ending the controller's session clears its breakpoints and the trap and resumes every halted task; the last session clears the session byte | `SESSION_ENDED` |
+| `detach` | Ends the session. Ending the controller's session clears its breakpoints and the trap and resumes every halted task; the last session clears the session byte. With `reason: "heartbeat_timeout"` (the gateway's P2 expiry, ADR-005 D4.6) the controller's session ends the same way except that, if any task is halted, the core safe-stops (`plc_request_safe_stop`, outputs held) instead of resuming, and answers `safeStopped: true` | `SESSION_ENDED` |
 | `terminate` | As `detach`, then stops the program (DAP `terminate`) | `SESSION_ENDED`, `BUSY` |
-| `beatClient` | The client's heartbeat (ADR-005 D4); recorded, no P2 timer yet | `SESSION_ENDED` |
+| `beatClient` | The client's heartbeat (ADR-005 D4), forwarded by the gateway; the core keeps no P2 timer yet (see "Not built here") | `SESSION_ENDED` |
 | `status` | The `runState` body, answered at once | — |
 | `setBreakpoints` | Replaces the breakpoints of file `fileId` with `probes`. An item is a probe ID, or `{probe, condition?, hitCount?}` (`condition`: base64 bytecode ≤ 512 B, see below; `hitCount`: stop from the n-th hit). The result lists one `BpResult` per item, in order; one failing item (`INVALID_LOCATION`, `LIMIT_EXCEEDED`, `BAD_REQUEST`) does not fail the others. A breakpoint keeps its `id` while its probe stays armed | `NO_PROBES` |
 | `clearAllBreakpoints` | Every file's breakpoints; `removed` counts them | `NO_PROBES` |
@@ -198,6 +198,8 @@ pm: please fold them into ADR-003 D1.3.
 
 ## Not built here
 
-The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), the P2 timer
-(ADR-005), forces, variables and stack frames over the link, exception breakpoints, `cycleStep`,
+The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), the core's own P2
+timer (ADR-005 D4.4: the P2 timer runs in the gateway for now and ends a lost session with
+`detach {reason: "heartbeat_timeout"}`, so a gateway that dies while a task is halted leaves the
+halt in place until the core timer exists), forces, variables and stack frames over the link, exception breakpoints, `cycleStep`,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).

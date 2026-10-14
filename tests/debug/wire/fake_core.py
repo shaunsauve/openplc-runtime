@@ -115,7 +115,7 @@ class FakeCore:
         self.scan_period_s = scan_period_s
         self.received: List[Tuple[str, JsonObj]] = []
         self.cv = threading.Condition()
-        self.state = "RUNNING"  # RUNNING | HALTED | STOPPED | ERROR
+        self.state = "RUNNING"  # RUNNING | HALTED | STOPPED | ERROR | SAFE_STOPPED
         self.pc = 0
         self.scan = 0
         self.pending: Optional[str] = None  # reason to halt at the next probe reached
@@ -356,22 +356,31 @@ class FakeCore:
         if command in ("detach", "terminate"):
             role = self.sessions.pop(session)
             self.users.pop(session, None)
+            lost = command == "detach" and args.get("reason") == "heartbeat_timeout"
+            safe_stopped = False
             if role == "controller":
                 self.breakpoints.clear()
                 self.bp_file.clear()
                 if command == "terminate":
                     self.state = "STOPPED"
                     self.push("runState", self.run_state())
+                elif self.state == "HALTED" and lost:
+                    # ADR-005 D4.6: the controller lost past P2 while halted: safe-stop.
+                    self.state = "SAFE_STOPPED"
+                    safe_stopped = True
+                    self.push("runState", self.run_state())
                 elif self.state == "HALTED":
                     self._resume()
                     self.push("continued", {"allThreadsContinued": True})
-            return {"forces": []} if command == "detach" else {}
+            if command == "terminate":
+                return {}
+            return {"forces": [], "safeStopped": safe_stopped}
         if command == "beatClient":
             return {}
         if "task" in args and _task(args["task"]) is None:
             raise _Refusal("BAD_REQUEST", f"The program has no task {args['task']!r}.")
         if command == "pause":
-            if self.state in ("STOPPED", "ERROR"):
+            if self.state in ("STOPPED", "ERROR", "SAFE_STOPPED"):
                 raise _Refusal("NOT_RUNNING", "The program is not running.")
             self.pending = "pause"
             return {}
