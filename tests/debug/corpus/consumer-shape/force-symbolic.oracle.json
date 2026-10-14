@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "consumer-shape/force-symbolic",
+  "corpus": "consumer-shape",
+  "kind": "runtime",
+  "criteria": ["A109"],
+  "title": "Force a struct member, a global through VAR_EXTERNAL and a located output by symbolic path; views mark them forced; unforce returns control",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 100}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false, "%QW0": 50}}},
+    {"request": "force", "args": {"path": "G_PLANT.line.m1.run", "value": true, "reason": "struct member"}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG_LOGIC.G_PLANT.alarm_code", "value": 9, "reason": "global via VAR_EXTERNAL"}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG_OUT.ao_1", "value": 4321, "reason": "located output"}, "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "the forced member drives status bit 0 -> do_00; the forced output reaches the plant", "expect": {"outputs": {"%QX0.0": true, "%QW1": 4321}}},
+    {"observe": "session", "expect": {"variables": {"G_PLANT.alarm_code": 9, "G_PLANT.line.m1.run": true}}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 3}}}},
+    {"request": "variables", "args": {"path": "PROG_OUT.ao_1"}, "expect": {"success": true, "body": {"value": 4321, "forced": true}}},
+    {"request": "unforceAll", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "logic's values again", "expect": {"outputs": {"%QX0.0": false, "%QW1": 0}}}
+  ]
+}

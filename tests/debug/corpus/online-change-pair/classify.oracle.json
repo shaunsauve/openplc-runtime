@@ -1,0 +1,18 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "online-change-pair/classify",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A144"],
+  "title": "Each variant is classified before applying: in place, re-initialise the changed instances, refused with a reason",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "classifyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true, "body": {"class": "inPlace"}}},
+    {"request": "classifyChange", "args": {"build": "variant-layout.st"}, "expect": {"success": true, "body": {"class": "reinit", "items": [{"path": "PROG0.cell.peak", "action": "init"}]}}},
+    {"request": "classifyChange", "args": {"build": "variant-incompatible.st"}, "expect": {"success": true, "body": {"class": "refused", "items": [{"code": "CONFIG_CHANGED"}]}}},
+    {"observe": "status", "note": "classification has no side effect", "expect": {"fields": {"image": {"~capture": "img"}}}},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": {"~ge": 0}}}}
+  ]
+}

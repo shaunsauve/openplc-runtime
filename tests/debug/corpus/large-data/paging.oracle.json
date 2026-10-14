@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "large-data/paging",
+  "corpus": "large-data",
+  "kind": "runtime",
+  "criteria": ["A092"],
+  "title": "The 10,000-element array is fetched in pages of <= 100: first, middle and last page",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@GROUP"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "variables", "args": {"path": "PROG0.big"}, "expect": {"success": true, "body": {"indexedCount": 10000, "children": {"~maxLen": 100}}}},
+    {"request": "variables", "args": {"path": "PROG0.big", "start": 0, "count": 100}, "expect": {"success": true, "body": {"children": {"~len": 100}, "first": 0, "last": 297}}},
+    {"request": "variables", "args": {"path": "PROG0.big", "start": 5000, "count": 100}, "expect": {"success": true, "body": {"first": 15000, "last": 15297}}},
+    {"request": "variables", "args": {"path": "PROG0.big", "start": 9900, "count": 100}, "expect": {"success": true, "body": {"first": 29700, "last": 29997}}},
+    {"observe": "plant", "expect": {"witness": {"Main": 0}}}
+  ]
+}

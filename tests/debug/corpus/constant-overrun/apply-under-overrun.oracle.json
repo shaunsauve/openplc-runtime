@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "constant-overrun/apply-under-overrun",
+  "corpus": "constant-overrun",
+  "kind": "runtime",
+  "criteria": ["A217"],
+  "title": "An online apply while every tick overruns fails within T_window with CHANGE_FAILED (phase window) and changes nothing",
+  "notes": "CHANGE_FAILED is ADR-006's code (Proposed), outside ADR-003 D2's catalogue, so it is matched in body.code, not as error.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 25, "inputs": {"%IX0.0": true}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "status", "expect": {"fields": {"image": {"buildId": {"~capture": "id0"}}, "tasks": {"Main": {"overruns": {"~gt": 0}}}}}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": {"~capture": "c0"}}}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st"},
+     "expect": {"success": false, "body": {"code": "CHANGE_FAILED", "phase": "window", "detail": {"~any": true}}}},
+    {"observe": "status", "expect": {"fields": {"image": {"buildId": {"~ref": "id0"}}}}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "plant", "throughout": true, "note": "scanning never stopped; the counter still steps by 1 (old build)", "expect": {"scanDelta": {"Main": {"~ge": 4}}}},
+    {"observe": "session", "expect": {"variables": {"PROG0.counter": {"~ge": 1}}}}
+  ]
+}

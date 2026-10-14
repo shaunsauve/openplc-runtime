@@ -1,6 +1,7 @@
 (* corpus: retain-vars
-   criteria: A044 A201
+   criteria: A044 A201 A215 A216
    fc: FC-TST-1 FC-ED-2 FC-RC-3 FC-RC-4 FC-RC-5 FC-RC-7 FC-RC-9 FC-RC-10 FC-ST-4
+     FC-FUT-3
    witness: Main PROG0.witness %QD0
 
    RETAIN and non-RETAIN variables a scenario changes, mirrored to outputs so

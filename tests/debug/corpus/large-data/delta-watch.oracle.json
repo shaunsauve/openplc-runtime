@@ -1,0 +1,18 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "large-data/delta-watch",
+  "corpus": "large-data",
+  "kind": "runtime",
+  "criteria": ["A069"],
+  "title": "A 1,000-variable subscription where 10 change per scan carries at most 10 values per update, equal to the scan's",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "subscribe", "args": {"paths": "PROG0.v0000..PROG0.v0999", "rateHz": 10}, "expect": {"success": true, "body": {"ids": {"~len": 1000}}}},
+    {"event": "values", "withinMs": 1000, "note": "the keyframe", "expect": {"body": {"changes": {"~len": 1000}}}},
+    {"event": "values", "repeat": 20, "withinMs": 200, "note": "each delta: <= 10 values, all equal to the update's scan number",
+     "expect": {"body": {"changes": {"~maxLen": 10}, "valuesEqualScan": true}}},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": {"~ge": 18}}}}
+  ]
+}

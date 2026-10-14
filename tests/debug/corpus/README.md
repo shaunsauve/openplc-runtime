@@ -14,8 +14,18 @@ tests/debug/corpus/
   build_all.sh            compiles every program with STruCpp, then runs validate.py
   <name>/program.st       the program (main source; more .st files allowed)
   <name>/<id>.oracle.json one scenario each
+  <name>/variant-*.st     a whole alternative build the scenarios apply (online change, downloads); must compile
+  <name>/reject-*.st      a construct the compiler must refuse (shared-globals S8); must fail to compile
+  <name>/lib/*.st         a user library, compiled with --no-source and linked (library-pou)
+  <name>/gen.py           generator of program.st when it is too big to hand-write (large-data); `--check` in build_all.sh
+  <name>/*.origin.json    the LD/FBD transpiler's source map (ADR-002 D6) for ld-sample and fbd-sample
+  <name>/plugins.json     runtime plugin configuration the scenarios assume (consumer-shape)
   bench/family.txt        corpus:bench is a family: its members are bench_hot, bench_call, bench_mix
 ```
+
+`build_all.sh` compiles with the STruCpp CLI (`node $STRUCPP/dist/node/cli.js`, building
+`dist/` first if missing), adds `--debug-artifacts` once the CLI offers it (ADR-002 D7), and
+ends by running `validate.py`.
 
 Run `python3 tests/debug/corpus/validate.py` (add `--acceptance <root>/docs/ACCEPTANCE.md
 --catalog <root>/docs/drafts/feature-catalog.md` to cross-check criteria and FC tags), and

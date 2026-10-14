@@ -1,0 +1,19 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "consumer-shape/live-watch-one-scan",
+  "corpus": "consumer-shape",
+  "kind": "runtime",
+  "criteria": ["A097"],
+  "title": "200 watched paths (struct members and VAR_EXTERNAL globals) update at >= 10 Hz, each update from one scan, with no halt",
+  "notes": "Paths: G_PLANT.mirror[0..191], G_SCAN, PROG_IN.witness and six G_PLANT.line members; the logic writes the scan counter into the mirror every scan, so one update holds one value.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "subscribe", "args": {"paths": "G_PLANT.mirror[0..191] + G_SCAN + PROG_IN.witness + G_PLANT.line.*", "rateHz": 10},
+     "expect": {"success": true, "body": {"ids": {"~len": 200}}}},
+    {"event": "values", "repeat": 20, "withinMs": 150, "note": "keyframe then deltas; within each update every mirror value is equal",
+     "expect": {"body": {"scan": {"~any": true}, "sameScan": true}}},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": {"~ge": 18}}}}
+  ]
+}

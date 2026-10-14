@@ -1,0 +1,29 @@
+{
+  "plugins": [
+    {
+      "name": "host_io",
+      "kind": "host-io",
+      "note": "host-style I/O plugin exchanging every located scalar",
+      "periodMs": 100
+    },
+    {
+      "name": "modbus_slave",
+      "kind": "modbus-tcp-slave",
+      "port": 5020,
+      "holdingRegisters": {
+        "0-7": "%QW0-%QW7",
+        "100-101": "%MW0-%MW1"
+      }
+    },
+    {
+      "name": "opcua_server",
+      "kind": "opcua-server",
+      "port": 4840,
+      "nodes": [
+        "G_PLANT.line.status",
+        "G_PLANT.alarm_code",
+        "PROG_LOGIC.hb"
+      ]
+    }
+  ]
+}

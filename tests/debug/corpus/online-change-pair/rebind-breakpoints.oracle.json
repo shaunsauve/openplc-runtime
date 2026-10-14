@@ -1,0 +1,24 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "online-change-pair/rebind-breakpoints",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A146"],
+  "title": "After an online change, breakpoints on unchanged lines re-verify and hit; those on edited lines are unverified with a reason",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COUNTER", "@CALL_CELL", "@LAST", "@CHANGED", "@CELL_Y"]},
+     "expect": {"success": true, "body": {"breakpoints": {"~len": 5}}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@COUNTER", "@CALL_CELL", "@LAST", "@CHANGED", "@CELL_Y"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"request": "applyChange", "args": {"build": "variant-layout.st"}, "expect": {"success": true}},
+    {"event": "breakpoint", "withinMs": 2000, "note": "3 verified at the new build's probes, 2 unverified (the edited lines)",
+     "expect": {"body": {"verified": 3, "unverified": 2}}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "breakpoint", "location": {"file": "variant-layout.st", "line": "@COUNTER"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}

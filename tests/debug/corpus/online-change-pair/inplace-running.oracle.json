@@ -1,0 +1,30 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "online-change-pair/inplace-running",
+  "corpus": "online-change-pair",
+  "kind": "runtime",
+  "criteria": ["A143", "A183"],
+  "title": "J10: an in-place change applied while running keeps scanning, keeps state and the session; the next hit shows the new behaviour",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 50}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"capabilities": {"onlineChange": true}, "session": {"~capture": "sid"}}}},
+    {"wait": {"scans": 10}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 1, "%QD1": {"~capture": "c0"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LAST"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "continue", "expect": {"success": true}},
+    {"request": "classifyChange", "args": {"build": "variant-inplace.st"}, "expect": {"success": true, "body": {"class": "inPlace", "token": {"~capture": "tok"}}}},
+    {"request": "applyChange", "args": {"build": "variant-inplace.st", "token": "captured tok"}, "expect": {"success": true}},
+    {"event": "programReplaced", "withinMs": 2000, "expect": {"body": {"cause": "onlineChange", "class": "inPlace"}}},
+    {"event": "stopped", "withinMs": 2000, "note": "same session; breakpoint re-resolved to the new build", "expect": {"reason": "breakpoint",
+      "location": {"file": "variant-inplace.st", "line": "@LAST"}, "variables": {"PROG0.out_step": 2}}},
+    {"noEvent": "sessionEnded", "forMs": 100},
+    {"observe": "plant", "throughout": true, "note": "no gap > 2 intervals; every output sample is the old or the new logic's value, never 0",
+     "expect": {"outputs": {"%QW0": {"~oneOf": [1, 2]}, "%QD1": {"~gt": 0}}}},
+    {"request": "setBreakpoints", "args": {"file": "variant-inplace.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "note": "counter continued from its pre-change value", "expect": {"outputs": {"%QW0": 2, "%QD1": {"~gt": 10}}}}
+  ]
+}

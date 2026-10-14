@@ -261,8 +261,12 @@
         "takeControl",
         "releaseControl",
         "setLock",
-        "auditRead"
-      ]
+        "auditRead",
+        "classifyChange",
+        "applyChange",
+        "rebind"
+      ],
+      "description": "ADR-003 D4 requests, plus classifyChange/applyChange/rebind from ADR-006 (Proposed)"
     },
     "response": {
       "type": "object",

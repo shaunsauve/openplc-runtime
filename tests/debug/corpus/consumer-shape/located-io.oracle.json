@@ -1,0 +1,24 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "consumer-shape/located-io",
+  "corpus": "consumer-shape",
+  "kind": "runtime",
+  "criteria": ["A095"],
+  "title": "Located variables and the I/O image are listed with their addresses and the values the plant wrote and received",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IX0.1": false, "%IW0": 1500, "%IW3": 40}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LOGIC_LAST"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "task": "Main",
+      "stack": [{"pou": "Logic", "kind": "program", "instance": "PROG_LOGIC"}]}},
+    {"request": "variables", "args": {"scope": "located"}, "expect": {"success": true, "body": {"located": {
+      "%IX0.0": {"path": "PROG_IN.di_00", "value": true}, "%IX0.1": {"path": "PROG_IN.di_01", "value": false},
+      "%IW0": {"path": "PROG_IN.ai_0", "value": 1500}, "%IW3": {"path": "PROG_IN.ai_3", "value": 40},
+      "%QX0.0": {"path": "PROG_OUT.do_00", "value": true}, "%QW0": {"path": "PROG_OUT.ao_0", "value": 750},
+      "%MW1": {"path": "PROG_LOGIC.mode_word"}}}}},
+    {"observe": "session", "expect": {"variables": {"G_PLANT.alarm_code": 3, "G_PLANT.line.status": 1, "G_PLANT.ai_scaled[3]": 20}}},
+    {"observe": "plant", "note": "outputs of the last complete scan", "expect": {"outputs": {"%QX0.0": true, "%QW0": 750, "%QW3": 20}}}
+  ]
+}
