@@ -24,6 +24,10 @@ IMAGE=${IMAGE:-ghcr.io/autonomy-logic/openplc-runtime:latest}
 RESULTS=${RESULTS:-}
 if [ "${1:-}" = "--results" ]; then RESULTS=$2; shift 2; fi
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet HEAD -- core webserver tests || echo -dirty)
+# Same traceability gap session_e2e.sh had: the payload's debug info and probes are STruCpp's,
+# so a runtime-only head does not identify what was measured (E13.5c).
+STRUCPP_COMMIT=$(git -C "$STRUCPP" rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMIT="$COMMIT strucpp:$STRUCPP_COMMIT"
 
 rm -rf "$OUT"; mkdir -p "$OUT/payload"
 OUT=$(cd "$OUT" && pwd)
