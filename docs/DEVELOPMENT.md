@@ -315,6 +315,34 @@ make -j$(nproc)
 bash scripts/run-pytest.sh
 ```
 
+#### Which pytest number is the baseline
+
+Two invocations give two different, both reproducible, counts. Quote the command with the number.
+
+- **The gate (CI's `webserver` job): all green.** The three plugin suites are left out:
+
+  ```bash
+  docker run --rm --entrypoint bash -v "$PWD":/src:ro ghcr.io/autonomy-logic/openplc-runtime:latest -c \
+    'cp -r /src /w && cd /w && /workdir/venvs/runtime/bin/python -m pytest tests/pytest -p no:cacheprovider -q \
+       --ignore=tests/pytest/plugins --ignore=tests/pytest/modbus_master --ignore=tests/pytest/modbus_slave'
+  ```
+
+  On `debug-support` at the u4-sec merge: 252 passed, 0 failed.
+
+- **The whole tree: 47 failed and 10 errors, all of them in the plugin suites** (`modbus_master`,
+  `modbus_slave`, `plugins/opcua`). These failures are pre-existing: the merge-base gives the
+  identical set. They need the per-plugin virtualenvs `install.sh` builds (and, for some, a
+  running OPC-UA server or fixtures with an older `opcua.json` format), not the runtime venv.
+  Reproduce with the image's plugin venvs on the path and pytest.ini's `--maxfail=3` lifted:
+
+  ```bash
+  ... -c 'cp -r /src /w && cd /w && export PYTHONPATH=$(ls -d /workdir/venvs/{modbus_master,opcua}/lib/python3*/site-packages | tr "\n" :) && \
+       /workdir/venvs/runtime/bin/python -m pytest tests/pytest -p no:cacheprovider -q --maxfail=10000 --continue-on-collection-errors'
+  ```
+
+  Without those venvs on the path, the whole tree stops at collection (`No module named 'pymodbus'`,
+  `'asyncua'`) after 3 errors, so it reports no test count at all.
+
 ### Development Container
 
 Build and run development container:
