@@ -374,6 +374,233 @@ The WebSocket interface is implemented in the web server:
 2. Re-authenticate after reconnection
 3. Verify program MD5 after reconnection
 
+## Session protocol v1
+
+The source-level debugger's protocol (ADR-003). It runs beside the legacy 0x41-0x45 part above,
+which it does not change.
+
+Protocol version: `1.0`. A client whose major differs is refused `PROTOCOL_VERSION`; minors are
+additive, so a 1.x client and a 1.y runtime interoperate.
+
+### Transport
+
+- Socket.IO namespace `/api/debug-session` on the runtime's HTTPS port 8443, websocket
+  transport only. The local path is the same endpoint at `wss://127.0.0.1:8443`.
+- One Socket.IO event name, `msg`, carries every message in both directions. A message is a
+  JSON object (a JSON string of one is accepted from clients).
+- A message above 1 MiB (1,048,576 bytes, serialized) is refused `LIMIT_EXCEEDED`, with the
+  request's `seq` echoed when it could be read.
+- Connecting needs no credential; the JWT travels in `initialize`. Every request before a
+  successful `initialize` is refused `BAD_REQUEST`.
+
+### Envelope
+
+```jsonc
+{"type":"request",  "seq":12, "command":"pause", "arguments":{"task":"Main"}}
+{"type":"response", "seq":40, "request_seq":12, "command":"pause", "success":true, "body":{}}
+{"type":"response", "seq":41, "request_seq":13, "command":"next", "success":false,
+ "error":{"code":"NOT_HALTED", "message":"The task is running, not halted.", "details":{}}}
+{"type":"event",    "seq":42, "event":"stopped", "body":{"reason":"breakpoint", "task":"Main"}}
+```
+
+- `seq` is per sender and increasing. Every response echoes its request's `seq` as
+  `request_seq`, so a client matches responses by `request_seq`, never by arrival order:
+  responses to concurrent requests can arrive in any order.
+- A failure carries `error.code` from the table under "Error codes", a plain-language
+  `error.message` and, where useful, `error.details`.
+- Undeclared arguments are ignored; a declared argument of the wrong type is `BAD_REQUEST`.
+
+### Handshake
+
+`initialize` must be the first request. Arguments:
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `protocol` | string, required | The client's protocol version, `"1.0"` |
+| `token` | string, required | A JWT from `POST /api/login`; verified in full (signature, expiry, revocation, user) |
+| `role` | `"controller"` or `"observer"` | Default `controller`. One controller; up to 16 observers |
+| `identity` | `{md5, buildId}` | The client's build, compared with the running image |
+
+The response body:
+
+| Field | Meaning |
+|---|---|
+| `protocol` | This runtime's protocol version (`"1.0"`) |
+| `runtime` | The runtime's version string, as `GET /api/version` |
+| `compiler` | `build.compiler` of the loaded `debug-info.json`, or null |
+| `debugInfo` | `{major, minor}` of the loaded `debug-info.json`, or null |
+| `engineAbi` | The core's engine ABI version |
+| `image` | The running image `{md5, buildId, buildTime, sourceHash}` |
+| `comparison` | `identity` against `image`: `match`, `source` (md5 differs), `build` (buildId differs) or `none` (no identity sent) |
+| `params` | `{P1, P2}`: heartbeat interval and timeout, seconds |
+| `capabilities` | The flags below, each true only when this build serves it |
+| `requests` | Every request name this runtime serves; a request not listed is refused `UNSUPPORTED` |
+| `role` | The role granted |
+| `locked` | Whether the production lock is on |
+
+Capability flags: `probes`, `maxBreakpoints` (a count), `conditional`, `hitCount`, `logpoints`,
+`functionBreakpoints`, `instanceBreakpoints`, `exceptionBreakpoints`, `nonStop`, `cycleStep`,
+`runScans`, `startHalted`, `write`, `force`, `trace`, `liveWatch`, `sourceFetch`,
+`onlineChange`, `control`, `modify`. `control:false` and `modify:false` mean a build with debug
+control compiled out.
+
+A stale client (`comparison` `source` or `build`) stays attached; every probe-dependent request
+(marked "probe" below) is refused `STALE_BUILD` until it initializes again with the running
+build. `initialize` on an attached connection replaces its session.
+
+`version` returns the same `protocol`, `runtime`, `compiler`, `debugInfo` and `engineAbi`.
+
+### Requests
+
+The "Needs" column lists the capability flags a request requires; a request is in the
+handshake's `requests` exactly when this runtime implements it and every flag it needs is true.
+Requests marked "planned" are part of protocol 1 but not served yet, so they are never in
+`requests` and are refused `UNSUPPORTED`. "Gate": `control` requests need the controller role
+and the lock off; `admin` requests need an administrator account.
+
+| Request | Needs | Gate | Arguments, body |
+|---|---|---|---|
+| `initialize` | - | - | See "Handshake" |
+| `attach` | - | - | Body `{role}`; DAP compatibility, the session is attached by `initialize` |
+| `detach` | - | - | Ends the session. A controller's breakpoints are cleared and a halted program resumes. Body `{forces}` |
+| `terminate` | `control` | control | Stops the PLC and ends the session |
+| `heartbeat` | - | - | Keeps the session alive (P1/P2) |
+| `status` | - | - | Body `{state, tasks}` |
+| `version` | - | - | See "Handshake" |
+| `setLock` | - | admin | `{on, reason?}`; body `{on}` |
+| `setBreakpoints` | `control` | control, probe | `{file, lines[]}` replaces the file's breakpoints. A line moves to the next line with code. Body `{breakpoints:[{id, verified, line, col, requestedLine}]}` |
+| `breakpointLocations` | - | probe | `{file, line, endLine?}`; body `{breakpoints:[{line}]}` |
+| `clearAllBreakpoints` | `control` | control | Body `{removed}` |
+| `setExceptionBreakpoints` | `control`, `exceptionBreakpoints` | control | `{filters[]}` |
+| `continue` | `control` | control | `{task?}` |
+| `pause` | `control` | control | `{task?}` |
+| `next` | `control` | control | `{task?}` |
+| `stepIn` | `control` | control | `{task?}` |
+| `stepOut` | `control` | control | `{task?}` |
+| `cycleStep` | `control`, `cycleStep` | control | `{task?}` |
+| `runScans` | `control`, `runScans` | control | `{n, task?}` |
+| `runToCursor` | `control` | control, probe | `{file, line, task?}` |
+| `stop` | `control` | control | Stops the PLC |
+| `restart` | `control` | control | `{kind: warm\|cold\|reset, startHalted?}` |
+| `setHaltMode` | `control`, `nonStop` | control | `{mode: allStop\|nonStop}` |
+| `setFunctionBreakpoints` | `control`, `functionBreakpoints` | control | planned |
+| `setInstanceBreakpoints` | `control`, `instanceBreakpoints` | control | planned |
+| `threads` | - | - | planned |
+| `stackTrace` | - | - | planned |
+| `scopes` | - | - | planned |
+| `variables` | - | - | planned |
+| `evaluate` | - | - | planned |
+| `setVariable` | `modify`, `write` | control | planned |
+| `force` | `modify`, `force` | control | planned |
+| `unforce` | `modify`, `force` | control | planned |
+| `unforceAll` | `modify`, `force` | control | planned |
+| `listForces` | `force` | - | planned |
+| `subscribe` | `liveWatch` | - | planned |
+| `unsubscribe` | `liveWatch` | - | planned |
+| `traceStart` | `trace` | - | planned |
+| `traceStop` | `trace` | - | planned |
+| `traceRead` | `trace` | - | planned |
+| `source` | `sourceFetch` | - | planned |
+| `sync` | `sourceFetch` | - | planned |
+| `requestControl` | - | - | planned |
+| `answerControlRequest` | - | - | planned |
+| `takeControl` | - | - | planned |
+| `releaseControl` | - | - | planned |
+| `auditRead` | - | admin | planned |
+
+### Events
+
+Pushed, never polled. The controller receives every event; observers receive `stopped`,
+`continued`, `runState`, `output`, `values`, `time`, `control`, `sessionEnded` and
+`programReplaced`.
+
+| Event | Body |
+|---|---|
+| `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, scan, location:{file, line, col}, breakpointIds?, exception?}`; one per stop |
+| `continued` | `{task}` |
+| `runState` | `{state, tasks, since}`; on every run-state change |
+| `output` | `{category: logpoint\|print\|runtime\|plugin, task, scan, text}` |
+| `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
+| `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `core_lost` (the core link dropped) or a reason from the core |
+
+### Error codes
+
+Every failure carries one of these codes. The message names the problem in a sentence.
+
+| Code | When |
+|---|---|
+| `PROTOCOL_VERSION` | `initialize` with an incompatible major; `details: {client, server}` |
+| `UNAUTHORISED` | `initialize` with no token, or a token that is invalid, expired or revoked |
+| `FORBIDDEN` | The user lacks the permission (an `admin` request from a non-administrator) |
+| `NOT_CONTROLLER` | A control or modify request from an observer, or a second controller; `details.controller` names the holder |
+| `LOCKED` | A control or modify request while the production lock is on |
+| `UNSUPPORTED` | A request this runtime does not serve (not in the handshake's `requests`), including a compiled-out build |
+| `NO_PROBES` | A probe-dependent request on a probe-off build, or with no debug information loaded |
+| `STALE_BUILD` | A probe-dependent request while the client's build or the loaded debug information differs from the running program; `details.comparison` or `details.reason` |
+| `UNSUPPORTED_DEBUG_INFO` | The loaded debug information has an unsupported major; `details: {found, supported}` |
+| `INVALID_LOCATION` | No such source file |
+| `NO_CODE` | No line with code at or after the requested line |
+| `NOT_HALTED` | A step or continue while the task is not halted |
+| `NOT_RUNNING` | A request that needs the program running (a second `stop`, a `pause` while stopped) |
+| `LIMIT_EXCEEDED` | A message above 1 MiB, or more breakpoints than `maxBreakpoints` |
+| `BAD_REQUEST` | A malformed message, a wrong argument type, or a request before `initialize` |
+| `TYPE_ERROR` | A write, force or expression value of the wrong type |
+| `RANGE_ERROR` | A write, force or expression value out of range, naming the constraint |
+| `EXPR_SIDE_EFFECT` | An expression that would change program state |
+| `EXPR_LIMIT` | An expression over the evaluation limits |
+| `EXPR_SYNTAX` | An expression that does not parse |
+| `NO_SOURCE` | The runtime cannot supply a file's source |
+| `BUSY` | A PLC state transition is in flight; or a 17th observer (`details.reason: "observer_limit"`) |
+| `SESSION_ENDED` | A request on a session that ended; `details.reason` (`detached`, `terminated`, `revoked`, `core_lost`) |
+| `INTERNAL` | A runtime bug, or the core unreachable over its debug link; logged |
+| `SAFE_STOPPED` | A write, force or online change while the runtime is safe-stopped |
+| `CHANGE_REFUSED` | An online change the classifier refuses; `details.reason` |
+| `CHANGE_FAILED` | An online change that failed and was rolled back; `details.phase` |
+
+### Core link
+
+Internal, not a client surface: the gateway (webserver) and the core agent (`plc_main`) over
+`/run/runtime/plc_debug.socket`, full duplex. A frame is a big-endian `u32` byte length followed
+by that many bytes of UTF-8 JSON, using the envelope above (`type`, `seq`, `request_seq`,
+`command`, `event`, `body`, `error`). Symbolic resolution stays in the gateway: the core sees
+probe IDs and file IDs from `debug-info.json`, never names.
+
+The core sends, unsolicited:
+
+| Event | Body |
+|---|---|
+| `hello` | First frame on every connection: `{link: "1.0", engineAbi, capabilities: {flag: bool, maxBreakpoints: n}, image: {md5, buildId, buildTime, sourceHash}, params?: {P1, P2}}`. The gateway serves nothing until it arrives and drops a link whose `link` major is not 1 |
+| `beat` | Liveness, every 250 ms; not forwarded |
+| `stopped` | As the public event, with `probe` (the halt probe ID) instead of `location`; the gateway adds `location` |
+| `continued`, `runState`, `output` | As the public events |
+| `sessionEnded` | `{session, reason}`: ends that session only |
+
+An event whose body has `session` goes only to that session; otherwise it is broadcast.
+
+The gateway sends these requests; each carries the core's `session` ID (from `attach`) unless
+noted, and the core answers with the public envelope's response, using the public error codes:
+
+| Request | Arguments | Body |
+|---|---|---|
+| `attach` | `{user, role}` (no session) | `{session}` |
+| `detach` | `{session, reason?}` | `{forces}` |
+| `terminate` | `{session}` | `{}` |
+| `beatClient` | `{session}` | `{}` |
+| `status` | `{session}` | `{state, tasks}` |
+| `setBreakpoints` | `{session, fileId, probes[]}` (replaces that file's breakpoints) | `{breakpoints:[{id, probe, verified}]}` |
+| `clearAllBreakpoints` | `{session}` | `{removed}` |
+| `setExceptionBreakpoints` | `{session, filters[]}` | `{}` |
+| `continue`, `pause`, `next`, `stepIn`, `stepOut`, `cycleStep` | `{session, task?}` | `{}` |
+| `runScans` | `{session, n, task?}` | `{}` |
+| `runToCursor` | `{session, probe, task?}` | `{}` |
+| `stop` | `{session}` | `{}` |
+| `restart` | `{session, kind?, startHalted?}` | `{}` |
+| `setHaltMode` | `{session, mode}` | `{}` |
+
+The core refuses with `NOT_HALTED`, `NOT_RUNNING`, `LIMIT_EXCEEDED`, `BUSY`, `SAFE_STOPPED` or
+`UNSUPPORTED` as the run state requires. A code outside the catalogue reaches the client as
+`INTERNAL` and is logged.
+
 ## Related Documentation
 
 - [Editor Integration](EDITOR_INTEGRATION.md) - How OpenPLC Editor connects to runtime
