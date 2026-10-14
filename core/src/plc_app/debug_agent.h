@@ -20,7 +20,7 @@
  * See also:
  *   core/src/plc_app/debug_link.cpp - the core link: requests, events and the agent thread.
  *   core/src/plc_app/plc_state_manager.cpp - park, resume, abandon and the per-task run state.
- *   docs/DEBUG_PROTOCOL.md - the core-link messages built on this interface.
+ *   docs/DEBUG_CORE_LINK.md - the core-link messages built on this interface.
  */
 #ifndef DEBUG_AGENT_H
 #define DEBUG_AGENT_H

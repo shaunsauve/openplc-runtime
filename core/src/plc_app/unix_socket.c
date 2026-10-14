@@ -368,7 +368,7 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
     }
     else if (strncmp(command, "DEBUG_LINK:", 11) == 0)
     {
-        // One core-link request per line (docs/DEBUG_PROTOCOL.md § Core link); events are
+        // One core-link request per line (docs/DEBUG_CORE_LINK.md); events are
         // pushed only on the framed socket.
         int n = snprintf(response, response_size, "DEBUG_LINK:");
         debug_link_handle_request(&command[11], response + n, response_size - (size_t)n - 1);

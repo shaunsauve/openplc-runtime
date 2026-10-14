@@ -14,7 +14,7 @@
  * See also:
  *   core/src/plc_app/debug_agent.cpp - the table, slow path and trap these requests drive.
  *   core/src/plc_app/plc_state_manager.cpp - pause, resume and the per-task run state.
- *   docs/DEBUG_PROTOCOL.md - the message list (§ Core link).
+ *   docs/DEBUG_CORE_LINK.md - the message list.
  */
 
 #include "debug_link.h"

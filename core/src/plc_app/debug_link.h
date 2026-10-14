@@ -12,7 +12,7 @@
  *
  * See also:
  *   core/src/plc_app/debug_agent.h - the table, slow path and trap the requests drive.
- *   docs/DEBUG_PROTOCOL.md - every core-link message, field and error code.
+ *   docs/DEBUG_CORE_LINK.md - every core-link message, field and error code.
  */
 #ifndef DEBUG_LINK_H
 #define DEBUG_LINK_H

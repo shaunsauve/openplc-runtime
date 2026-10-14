@@ -4,14 +4,21 @@ What the runtime does to the plant while the debugger holds a task, and after a 
 Each statement names the scenario that checks it. A statement whose scenario is `gap` is
 specified but not yet built or not yet checked.
 
-Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
-`tests/host/run.sh`); `corpus:<dir>/<name>` is an oracle under `tests/debug/corpus/`.
+Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp`, `test_virtual_clock.cpp`
+or `test_run_control.cpp` (run by `tests/host/run.sh`); `e2e:runctl` is
+`tests/debug/plant/runctl_e2e.sh` (a real `plc_main`, a probed `corpus:plant-io`, the reference
+plant); `corpus:<dir>/<name>` is an oracle under `tests/debug/corpus/`.
+
+A task is **halted** when it is held at its scan boundary (not released) or **parked** inside a
+probe in the middle of its scan (ADR-001 D2, D11). Both are per-task run states owned by the
+dispatcher; `PLCState` stays RUNNING. Halts come from the debugger's breakpoints, pause and steps
+(`docs/DEBUG_CORE_LINK.md`) and, for boundary holds, from `plc_run_control_hold`.
 
 ## Outputs
 
 | # | Statement | Scenario |
 |---|---|---|
-| O1 | While any task is halted, the output image keeps each task's last complete scan. The halted scan's own writes are published only when it completes. | `host:A049 hold`; `corpus:plant-io/halt-holds-outputs` |
+| O1 | While any task is halted, the output image keeps each task's last complete scan. The halted scan's own writes are published only when it completes, at a cycle_end of its own. | `host:A049 hold`, `host:A034 before statement`, `e2e:runctl`; `corpus:plant-io/halt-holds-outputs` |
 | O2 | The halt policy is per project, in `conf/halt_policy.json` of `program.zip`: `{"policy": "hold" \| "safe", "safe": [{"location": "%QX0.1", "value": 0}]}`. A missing or invalid file means `hold`. It is loaded at every start. | `host:A049 safe` |
 | O3 | Under `safe`, entering a halt saves the image value of each configured output in the halted scope and writes its safe value through the journal; resuming writes the saved value back before the task is released. No safe value outlives the halt. | `host:A049 safe` |
 | O4 | Under a halt of one task, only configured outputs inside that task's located ranges change. Configuration-scope located globals change only when every task is halted. | gap |
@@ -22,7 +29,8 @@ Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
 
 | # | Statement | Scenario |
 |---|---|---|
-| W1 | A held task is not released, and its overruns, stuck ticks and first-scan time are not counted. The dispatcher keeps ticking and feeding the watchdog. There is no maximum halt duration. | `host:A050`; `corpus:watchdog-overrun/long-halt-then-overrun` |
+| W1 | A halted task is not released, and its overruns, stuck ticks and first-scan time are not counted. A parked task gives back its in-flight slot, so the quiescent window keeps running (skipping the config-global copy and the retain save, which would read a half-finished scan). The dispatcher keeps ticking and feeding the watchdog. There is no maximum halt duration. | `host:A050`, `host:A034 before statement` (a park past the stuck limit), `e2e:runctl`; `corpus:watchdog-overrun/long-halt-then-overrun` |
+| W3 | A STOP or safe-stop while a task is parked abandons its scan: the scan unwinds without copying out, and the stop lands STOPPED (or SAFE_STOPPED), never ERROR. | `host:D7.4 stop while parked`, `e2e:runctl` |
 | W2 | On resume the stuck count is 0 and the release time moves forward by the halt, so the stuck limit measures execution time only. An overrun in the first scan after resume still trips. | `host:A050` |
 
 ## Virtual time and scan statistics
@@ -33,7 +41,7 @@ Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
 | T2 | `TIME()` and the timer FBs (TON, TOF, TP) read the clock through the stamp of their scan, so a halt of any length advances what they read by at most one interval, and a halted TON resumes at the elapsed time it had. | `host:A052 all-stop 1 s`, `host:A052 all-stop 3 s`, `host:A053 TON`; `corpus:ton-timer/halt-mid-timing` |
 | T3 | Holding one task stops only its clock; the other tasks' clocks keep the wall schedule. Holding every task stops every clock. | `host:R4xR8 halt-one`, `host:A052 all-stop 1 s` |
 | T4 | Plugins read the clocks through `get_task_virtual_time_ns(task)` and `get_plc_virtual_time_ns()` (the fastest task); both agree with the program within one interval. Tasks are still released on the wall schedule. `CURRENT_DT` stays wall time. | `host:D4.1 no halt`, `host:A052 all-stop 1 s` |
-| T5 | The first scan after a resume records no cycle-time or latency sample, and its expected start is re-anchored, so a halt never enters STATS and never counts as an overrun. Resume releases at the next due tick with no catch-up burst. | `host:A051 statistics`; `corpus:bench/halt-no-catch-up` |
+| T5 | The first scan after a resume records no cycle-time or latency sample, and its expected start is re-anchored, so a halt never enters STATS and never counts as an overrun. A park's duration is taken out of its scan's time. Resume releases at the next due tick with no catch-up burst. | `host:A051 statistics`; `corpus:bench/halt-no-catch-up` |
 
 ## Safe-stop
 
@@ -59,6 +67,5 @@ Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
 
 ## Not yet specified here
 
-Input buffering, halt-one shared data, the halt offset (ADR-004 D4.4) and the debugger's
-probes arrive with run control; their statements are added with it. A halt inside a scan needs
-probes, so T5 covers halts at the scan boundary only.
+Input buffering, halt-one shared data (pause and breakpoints are all-stop for now) and the halt
+offset (ADR-004 D4.4). T5's mid-scan subtraction is built but not yet checked by a scenario.
