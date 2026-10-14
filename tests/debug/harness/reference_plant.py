@@ -31,6 +31,10 @@ CORE_SOCKET = "/run/runtime/plc_runtime.socket"
 PLANT_NAME = "reference-plant"
 POLL_S = 0.01
 STALE_MS = 2000.0  # no sample for this long: the plant (or the PLC) is not exchanging
+# The plant samples once per dispatcher frame (the tasks' GCD interval), so a read waits this long
+# for the first sample taken at or after it; a plant that has stopped exchanging (the PLC is
+# stopped) is read as its last sample instead.
+FRESH_MS = 1000.0
 
 
 class _LineClient:
@@ -170,14 +174,21 @@ class ReferencePlant:
         raise Blocked("reference plant: failExchanges is not built")
 
     def sample(self) -> PlantSample:
+        """The plant as of now: the first sample taken at or after this call. The latest sample
+        can predate the step just judged by up to a frame (a cycle step's release, a resume), and
+        judging it would read the plant before the event. The plant's `t` is CLOCK_MONOTONIC on
+        this host (the socket is local), as time.monotonic() is."""
         self._ensure_polling()
+        asked_ms = time.monotonic() * 1000.0
+        fresh_by = time.monotonic() + FRESH_MS / 1000.0
         deadline = time.monotonic() + STALE_MS / 1000.0
         while True:
             with self.lock:
                 last = self.samples[-1] if self.samples else None
-            if last is not None:
+            now = time.monotonic()
+            if last is not None and (last.t_ms >= asked_ms or now >= fresh_by):
                 return last
-            if time.monotonic() >= deadline:
+            if now >= deadline:
                 raise Blocked(f"reference plant sent no sample ({self.error or 'no exchange'})")
             time.sleep(POLL_S)
 
