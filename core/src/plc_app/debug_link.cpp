@@ -773,6 +773,43 @@ Reply stack_trace_locked(size_t task)
  * strucpp_debug_read writes; null for an index the program does not have. The gateway decodes
  * them by the leaf's IEC type. Read without stopping the program, as the legacy 0x44 read is: a
  * halted task's values are stable, a running task's are a snapshot. */
+/* ADR-004 D5.2: a located input's image slot, the value its next copy-in takes. While a task is
+ * halted the program member stays at what its scan copied in (frozen); plugin writes land in the
+ * image, latest wins, so the session shows both. False for anything but a located %I leaf: an
+ * output or memory slot is not "pending" (the scan's copy-out decides what it becomes). */
+bool read_pending_input(uint8_t arr, uint16_t elem, uint16_t width, std::string *hex)
+{
+    uint8_t  area = 0, size = 0, bit = 0;
+    uint16_t idx  = 0;
+    if (!ext_strucpp_debug_locate || !ext_strucpp_debug_locate(arr, elem, &area, &size, &idx, &bit) ||
+        area != (uint8_t)strucpp::LocatedArea::Input || idx >= BUFFER_SIZE || bit > 7)
+        return false;
+    uint64_t v  = 0;
+    bool     ok = true;
+    image_lock();
+    switch ((strucpp::LocatedSize)size)
+    {
+    case strucpp::LocatedSize::Bit: ok = bool_input[idx][bit]; if (ok) v = *bool_input[idx][bit] ? 1 : 0; break;
+    case strucpp::LocatedSize::Byte: ok = byte_input[idx]; if (ok) v = *byte_input[idx]; break;
+    case strucpp::LocatedSize::Word: ok = int_input[idx]; if (ok) v = *int_input[idx]; break;
+    case strucpp::LocatedSize::DWord: ok = dint_input[idx]; if (ok) v = *dint_input[idx]; break;
+    case strucpp::LocatedSize::LWord: ok = lint_input[idx]; if (ok) v = *lint_input[idx]; break;
+    default: ok = false; break;
+    }
+    image_unlock();
+    if (!ok) return false;
+    /* The leaf's own width, little-endian, so the gateway decodes it with the leaf's type. */
+    static const char kHex[] = "0123456789abcdef";
+    hex->assign(width * 2u, '0');
+    for (uint16_t i = 0; i < width && i < 8; ++i)
+    {
+        const uint8_t b = (uint8_t)(v >> (8 * i));
+        (*hex)[2 * i]     = kHex[b >> 4];
+        (*hex)[2 * i + 1] = kHex[b & 0xF];
+    }
+    return true;
+}
+
 Reply read_leaves(cJSON *list)
 {
     if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > kMaxLeaves)
@@ -788,7 +825,8 @@ Reply read_leaves(cJSON *list)
         ext_strucpp_debug_size)
         for (uint8_t a = 0, n = ext_strucpp_debug_array_count(); a < n; ++a)
             counts.push_back(ext_strucpp_debug_elem_count(a));
-    cJSON *values = cJSON_CreateArray();
+    cJSON *values  = cJSON_CreateArray();
+    cJSON *pending = cJSON_CreateArray();
     cJSON_ArrayForEach(item, list)
     {
         uint64_t idx = (uint64_t)item->valuedouble;
@@ -810,8 +848,13 @@ Reply read_leaves(cJSON *list)
         if (got == 0)
         {
             cJSON_AddItemToArray(values, cJSON_CreateNull());
+            cJSON_AddItemToArray(pending, cJSON_CreateNull());
             continue;
         }
+        std::string in_hex;
+        cJSON_AddItemToArray(pending, read_pending_input((uint8_t)arr, (uint16_t)idx, got, &in_hex)
+                                          ? cJSON_CreateString(in_hex.c_str())
+                                          : cJSON_CreateNull());
         std::string hex(got * 2u, '0');
         static const char kHex[] = "0123456789abcdef";
         for (uint16_t i = 0; i < got; ++i)
@@ -823,6 +866,7 @@ Reply read_leaves(cJSON *list)
     }
     cJSON *b = cJSON_CreateObject();
     cJSON_AddItemToObject(b, "values", values);
+    cJSON_AddItemToObject(b, "pending", pending);
     return success(b);
 }
 
