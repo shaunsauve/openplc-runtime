@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Autonomy®
 
 """The debug session gateway (/api/debug-session) over a real WSS port, with the fake core on the
-internal link behind it. Criteria A064-A068, A070, A080 (docs/ACCEPTANCE.md of the orchestration
-root); what the fake core cannot stand in for is named in each test.
+internal link behind it. Criteria A064-A068, A070, A080 and A117-A120 (docs/ACCEPTANCE.md of the
+orchestration root); what the fake core cannot stand in for is named in each test.
 
 JOURNEY: wire-control (tests/debug/wire/wire-control.oracle.json) is the end-to-end beat; the
 tests below cover what one oracle run cannot: concurrency, the refusal catalogue against the
@@ -46,6 +46,7 @@ from fake_core import FULL_CAPS, FakeCore, Json, JsonObj, debug_info  # noqa: E4
 from wire_server import WireServer, as_obj  # noqa: E402
 from wss_client import WssSio  # noqa: E402
 
+from webserver import restapi  # noqa: E402
 from webserver.debug_gateway import protocol  # noqa: E402
 from webserver.version import RUNTIME_VERSION  # noqa: E402
 
@@ -371,6 +372,79 @@ def test_a_revoked_token_ends_the_session(serve, client, admin_token):
     assert code == "SESSION_ENDED"
     assert c.event("sessionEnded")["reason"] == "revoked"
     assert not [cmd for cmd, _ in server.core.received if cmd == "pause"]
+
+
+# --------------------------------------------------------------------------- A117-A120 session
+
+
+def _expired_token(app, username: str) -> str:
+    from datetime import timedelta  # noqa: PLC0415
+
+    from flask_jwt_extended import create_access_token  # noqa: PLC0415
+
+    with app.app_context():
+        user = restapi.User.query.filter_by(username=username).one()
+        return create_access_token(identity=user, expires_delta=timedelta(seconds=-1))
+
+
+def test_only_a_logged_in_user_over_tls_attaches(serve, app, tokens):
+    """A119: no token, an expired JWT and a forged one are refused UNAUTHORISED and open no core
+    session; a plain `user` account controls (MVP rights, R7). A120: the gateway refuses a
+    plaintext connection outright, and a plaintext client cannot speak to the TLS port."""
+    server = serve()
+    head, _, _ = tokens["user"].rpartition(".")
+    for bad in (None, _expired_token(app, "tech"), f"{head}.Zm9yZ2Vk"):
+        resp = Client(server.url).initialize(**({"token": bad} if bad else {}))
+        assert _refusal(resp)[0] == "UNAUTHORISED", (bad, resp)
+    assert not [cmd for cmd, _ in server.core.received if cmd == "attach"]
+    tech = Client(server.url, tokens["user"])
+    assert tech.initialize()["success"] is True
+    for command, args, then in (
+        ("setBreakpoints", {"file": "program.st", "lines": [6]}, "stopped"),
+        ("setBreakpoints", {"file": "program.st", "lines": []}, None),
+        ("continue", {}, "continued"),
+        ("pause", {}, "stopped"),
+        ("continue", {}, "continued"),
+        ("status", {}, None),
+    ):
+        assert tech.request(command, args)["success"] is True, command
+        if then is not None:
+            tech.event(then)
+    assert [a["user"] for cmd, a in server.core.received if cmd == "attach"] == ["tech"]
+
+    plain = serve(tls=False)
+    with pytest.raises(ConnectionError):
+        Client(plain.url, tokens["admin"])
+    with pytest.raises(Exception):  # noqa: B017 - a TLS port answers ws:// with a TLS alert
+        Client(server.url.replace("https://", "http://"), tokens["admin"])
+    assert plain.core is not None and plain.core.received == []
+
+
+def test_attach_and_detach_leave_the_program_alone(serve, admin_token):
+    """A117: 20 attach/detach cycles while running neither stop nor restart the program. A118:
+    detach while halted with another breakpoint armed resumes the program and clears every
+    breakpoint, so no stop follows."""
+    server = serve()
+    core = server.core
+    assert core is not None
+    before = core.witness()
+    for _ in range(20):
+        c = Client(server.url, admin_token)
+        assert c.initialize(role="observer")["success"] is True
+        assert c.request("detach")["success"] is True
+        c.close()
+    assert core.state == "RUNNING" and core.witness() > before
+    assert not [cmd for cmd, _ in core.received if cmd in ("stop", "restart", "pause", "terminate")]
+
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    assert c.request("setBreakpoints", {"file": "program.st", "lines": [4, 7]})["success"] is True
+    c.event("stopped", {"reason": "breakpoint"})
+    assert as_obj(c.request("detach")["body"])["forces"] == []
+    time.sleep(0.05)
+    halted_at = core.witness()
+    time.sleep(0.1)
+    assert core.state == "RUNNING" and core.breakpoints == {} and core.witness() > halted_at
 
 
 # --------------------------------------------------------------------------- A067 handshake

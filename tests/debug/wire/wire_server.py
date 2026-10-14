@@ -55,9 +55,11 @@ class WireServer:
         info: Optional[JsonObj] = None,
         core_path: Optional[str] = None,
         info_path: Optional[Path] = None,
+        tls: bool = True,
     ) -> None:
         """`core_path`/`info_path` serve a real core (plc_main's plc_debug.socket and its
-        debug-info.json) instead of the fake; `core` is then None."""
+        debug-info.json) instead of the fake; `core` is then None. `tls=False` serves plain HTTP,
+        which the runtime never does, so a test can show the gateway refusing it (A120)."""
         self.workdir = workdir
         self.core: Optional[FakeCore] = None
         if core_path is not None and info_path is not None:
@@ -72,11 +74,11 @@ class WireServer:
         self.socketio = init_debug_websocket(app, self.legacy)
         self.link = UnixCoreLink(self.core_path)
         self.gateway = init_debug_gateway(self.socketio, self.link, self.info_path)
-        cert, key = _certificate()
         self.server: BaseWSGIServer = make_server(
-            host, port, app, threaded=True, ssl_context=(cert, key)
+            host, port, app, threaded=True, ssl_context=_certificate() if tls else None
         )
-        self.url = f"https://{'127.0.0.1' if host == '0.0.0.0' else host}:{self.server.port}"
+        scheme = "https" if tls else "http"
+        self.url = f"{scheme}://{'127.0.0.1' if host == '0.0.0.0' else host}:{self.server.port}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         if not self.link.wait_ready(5.0):

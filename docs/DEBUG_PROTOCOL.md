@@ -386,6 +386,8 @@ additive, so a 1.x client and a 1.y runtime interoperate.
 
 - Socket.IO namespace `/api/debug-session` on the runtime's HTTPS port 8443, websocket
   transport only. The local path is the same endpoint at `wss://127.0.0.1:8443`.
+- TLS only, loopback included (ADR-005 D2.2): the gateway refuses the namespace on any connection
+  that did not arrive over TLS, so there is no plaintext fallback.
 - One Socket.IO event name, `msg`, carries every message in both directions. A message is a
   JSON object (a JSON string of one is accepted from clients).
 - A message above 1 MiB (1,048,576 bytes, serialized) is refused `LIMIT_EXCEEDED`, with the

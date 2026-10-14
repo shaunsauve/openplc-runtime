@@ -123,6 +123,10 @@ class DebugGateway:
 
     def _on_connect(self, auth: Json = None) -> bool:
         del auth  # the JWT travels in initialize (ADR-005 D1.1)
+        # ADR-005 D2.2: TLS only, loopback included; a plaintext upgrade never gets a namespace.
+        if not request.is_secure:
+            logger.warning("Debug session refused: plaintext connection from %s", request.remote_addr)
+            return False
         return True
 
     def _on_disconnect(self, reason: Json = None) -> None:
