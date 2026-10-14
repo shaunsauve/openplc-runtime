@@ -73,6 +73,10 @@ def unknown_error_code(doc: Doc) -> None:
     _steps(doc)[0]["expect"] = {"success": False, "error": "STALE"}
 
 
+def marker_absent_in_body_match(doc: Doc) -> None:
+    _steps(doc).append({"inspect": "debugInfo", "expect": {"linesByFile": {"program.st": ["@GONE"]}}})
+
+
 def unknown_arg_symbol(doc: Doc) -> None:
     _steps(doc)[0]["args"] = {"identity": {"~nope": 1}}
 
@@ -102,6 +106,7 @@ ORACLE_DEFECTS: List[Tuple[str, Callable[[Doc], None], str]] = [
     ("runtime scenario with no plant read", no_plant_read, "read the plant"),
     ("column not at a statement start", wrong_column, "not the start of a statement"),
     ("error code outside ADR-003's catalogue", unknown_error_code, "steps[0]"),
+    ("marker absent, outside a line key", marker_absent_in_body_match, "@GONE"),
     ("argument symbol outside the vocabulary", unknown_arg_symbol, "unknown argument symbol"),
     ("identity of a variant that does not exist", missing_variant_identity, "variant-nope.st"),
     ("thenContinue on several streams", then_continue_on_all_clients, "thenContinue"),

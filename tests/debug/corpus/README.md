@@ -87,7 +87,9 @@ A **major** bump is incompatible; a **minor** bump only adds optional fields (as
 1.1 adds `client`, `loop`, argument symbols, the `inspect` views, `inject` results and
 `maxGapMs`, and fixes one meaning 1.0 left open: a request `repeat` is a batch (§ Repetition).
 1.0 runners paired a request `repeat n` with a following event `repeat n`; every corpus file
-that relied on it now says `loop`, and no 1.0 file exists outside this corpus.
+that relied on it now says `loop`, and no 1.0 file exists outside this corpus. 1.1 also pins the `throughout`
+window to "since the previous plant observation": the 1.0 runner started it at the end of the
+step just before, so after a `wait` it held no samples and checked nothing.
 
 ### Steps
 
@@ -102,7 +104,7 @@ Each step has exactly one action key, plus optional `note`, and on `request`, `e
 | `{"noEvent": <name>, "forMs": t \| "forScans": n, "task": …}` | No such event in the window (scans counted by the plant) |
 | `{"plant": {"set": {addr: v}, "sequence": [{…}, …], "failExchanges": n}}` | Drive plant inputs: one write, or successive writes (latest-wins tests, A055) |
 | `{"wait": {"wallMs": t} \| {"vtMs": t} \| {"scans": n}}` | Wait on the harness wall clock, on PLC virtual time, or for n plant-counted scans |
-| `{"observe": "plant\|status\|session\|log", "expect": {…}, "throughout": b}` | Read back through an independent path. `throughout: true` means the expectation held for every sample since the previous step |
+| `{"observe": "plant\|status\|session\|log", "expect": {…}, "throughout": b}` | Read back through an independent path. `throughout: true` (plant) means the expectation held for every plant sample since the previous plant observation, or since the scenario started |
 | `{"inspect": "debugInfo\|debugMap\|generatedCpp\|objectCode", "expect": <match>}` | Read the program's compiler outputs (ADR-002 D1 files), in a build or a runtime scenario; matched against the view of § Inspect views |
 | `{"inject": <kind>, "args": {…}, "expect": <match>}` | Fault injection (F154) and drives from outside the session. `killClient` drops the step's stream with no detach. `dropNetwork`, `restoreNetwork`, `delayNetwork` (`rttMs`), `rawFrame` (`frame`: `truncated`, `invalid`, `oversize`, `garbage`, with `bytes`/`count`), `sigstopRuntime`, `sigcontRuntime`, `killRuntime`, `restartRuntime` act on the transport or the process; `upload` (`build`, `debugInfo` patch, `conf`), `rest` (`method`, `path`, `user`), `socket` (`command`: a legacy core-socket line), `plugin` (`name`, `action`) drive the runtime the way its other clients do. `expect` matches what the injection answered: the response envelope, the HTTP `{status, body}`, or the socket reply line |
 
@@ -136,7 +138,7 @@ An `observe` expectation uses these keys (any subset):
 | `variables` | session | `{path: match}` |
 | `state` | status | the run state (F040: `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `SAFE_STOPPED`, `ERROR`, plus `NOT_RESPONDING`) |
 | `fields` | status / log | other fields, e.g. `{"reason": "heartbeat_timeout"}`, `{"lastFault": {…}}` |
-| `maxGapMs` | plant | `{task: match}`: the longest stretch, in ms, between scan-witness increments over the samples since the previous step (a freeze or a stall shows as a gap) |
+| `maxGapMs` | plant | `{task: match}`: the longest stretch, in ms, between scan-witness increments over the same window as `throughout` (a freeze or a stall shows as a gap) |
 
 **ADR-004 arithmetic the oracles rely on.** Halted mid-scan k: the session reads the witness
 as k; the plant holds k − 1 until the scan completes (D1.1). A cycle step is exactly +1 scan
@@ -198,7 +200,7 @@ runner `--build-dir`) and matches this view; with no build outputs it is BLOCKED
 
 | `inspect` | View |
 |---|---|
-| `debugInfo` | `debug-info.json` as ADR-002 D3, except `pous` keyed by name; plus `probeCount`, `instanceCount`, `generatedLines` (`[{file, line}]` of probes with flags bit 0) and `originOf` (`[{file, line, origin}]` with the `origins[].id`), both sorted by file then line |
+| `debugInfo` | `debug-info.json` as ADR-002 D3, except `pous` keyed by name; plus `linesByFile` (`lines` keyed by file path), `probeCount`, `instanceCount`, `generatedLines` (`[{file, line}]` of probes with flags bit 0) and `originOf` (`[{file, line, origin}]` with the `origins[].id`), both sorted by file then line |
 | `debugMap` | `debug-map.json` plus `leafCount` |
 | `generatedCpp` | `{"text": <generated_debug.cpp>}` |
 | `objectCode` | none yet: BLOCKED until the harness has a disassembly adapter |

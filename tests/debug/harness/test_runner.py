@@ -50,6 +50,7 @@ DEFECTS: List[Tuple[str, str, int, str]] = [
     ("late_stop", "plant-io/pause-resume-stop", 3, "within 600"),
     ("wrong_reason", "plant-io/bp-before-statement", 6, "reason"),
     ("missing_continued", "plant-io/pause-resume-stop", 9, "continued"),
+    ("zero_in_halt_samples", "plant-io/halt-holds-outputs", 8, "plant@"),
 ]
 
 

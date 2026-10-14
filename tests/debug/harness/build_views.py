@@ -88,6 +88,11 @@ def debug_info_view(info: JsonObj) -> JsonObj:
     view["pous"] = {
         str(_obj(p).get("name")): p for p in _list(info.get("pous")) if isinstance(p, dict)
     }
+    view["linesByFile"] = {
+        files[int(fid)]: lines
+        for fid, lines in _obj(info.get("lines")).items()
+        if fid.isdigit() and int(fid) in files
+    }
     view["probeCount"] = len(rows)
     view["instanceCount"] = len(_list(_obj(info.get("instances")).get("path")))
     generated: set[Tuple[str, int]] = set()

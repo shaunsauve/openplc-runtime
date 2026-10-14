@@ -663,7 +663,7 @@
           "additionalProperties": {
             "$ref": "#/$defs/match"
           },
-          "description": "per task: the longest stretch in ms between scan-witness increments over the samples since the previous step"
+          "description": "per task: the longest stretch in ms between scan-witness increments over the plant samples since the previous plant observation"
         }
       }
     },

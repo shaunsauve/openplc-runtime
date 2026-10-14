@@ -200,7 +200,7 @@ class _Run:
         self.streams: Dict[str, _Stream] = {}  # insertion order = opening order
         self.arrivals = 0
         self.last_witness: Optional[Dict[str, int]] = None
-        self.step_end_ms = clock.now_ms()
+        self.last_plant_ms = clock.now_ms()  # `throughout` and `maxGapMs` window start
 
     # -- plumbing
 
@@ -305,7 +305,7 @@ class _Run:
             self.plant.set_inputs(inputs)
         if self._uses_plant():
             self.last_witness = dict(self._sample().witness)
-        self.step_end_ms = self.clock.now_ms()
+        self.last_plant_ms = self.clock.now_ms()
 
     def _uses_plant(self) -> bool:
         return any(
@@ -575,7 +575,9 @@ class _Run:
 
     def _observe_plant(self, expect: JsonObj, throughout: bool) -> None:
         final = self._sample()
-        samples = self.plant.history(self.step_end_ms) if throughout or "maxGapMs" in expect else []
+        samples = (
+            self.plant.history(self.last_plant_ms) if throughout or "maxGapMs" in expect else []
+        )
         prev: Optional[PlantSample] = None
         for s in samples if throughout else []:
             scratch = dict(self.captures)  # history must not bind captures; the final read does
@@ -596,6 +598,7 @@ class _Run:
         for t, m in _obj(expect.get("maxGapMs")).items():
             self._check(m, _max_gap(samples, t), f"plant.maxGapMs.{t}")
         self.last_witness = dict(final.witness)
+        self.last_plant_ms = final.t_ms
 
     def _check_sample(
         self, expect: JsonObj, s: PlantSample, captures: Captures, where: str
@@ -705,8 +708,7 @@ def run_scenario(
                 )
                 result.verdict = Verdict(status, index, f"step {index} ({action}): {exc.reason}")
                 return result
-            run.step_end_ms = clock.now_ms()
-            result.trace.append(StepTrace(index, action, "match", detail, run.step_end_ms - t0))
+            result.trace.append(StepTrace(index, action, "match", detail, clock.now_ms() - t0))
         result.verdict = Verdict("PASS", None, f"all {len(result.trace)} steps matched")
     except Blocked as b:
         where = "setup" if index is None else f"step {index}"

@@ -19,6 +19,7 @@ Seeded defects (FakeWorld(defects={...})):
   skip_identity_check  initialize accepts any client identity
   no_bp_limit        setBreakpoints accepts more than MAX_BREAKPOINTS
   short_debug_info   the debug info omits the last probe
+  zero_in_halt_samples  plant samples taken while halted show %QW0 at 0 (the latest read does not)
 
 See also:
   tests/debug/harness/test_runner.py - the red/green proof that uses this fake.
@@ -46,6 +47,7 @@ DEFECTS = {
     "skip_identity_check",
     "no_bp_limit",
     "short_debug_info",
+    "zero_in_halt_samples",
 }
 MAX_BREAKPOINTS = 4
 IDENTITY = {"md5": "fake-md5", "buildId": "fake-build"}
@@ -220,12 +222,15 @@ class FakeWorld:
         self.t = target
 
     def _sample(self) -> None:
+        outputs = dict(self.published)
+        if self.halted is not None and "zero_in_halt_samples" in self.defects:
+            outputs["%QW0"] = 0
         self.samples.append(
             PlantSample(
                 self.t,
                 {TASK: _i(self.published["%QD0"])},
                 {TASK: self.completed * self.interval},
-                dict(self.published),
+                outputs,
             )
         )
 

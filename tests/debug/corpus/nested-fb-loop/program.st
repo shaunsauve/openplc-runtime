@@ -29,10 +29,10 @@ FUNCTION Clamp : REAL
     r : REAL;
   END_VAR
   r := v;                                                  (*@CLAMP_FIRST*)
-  IF r < lo THEN
-    r := lo;
-  ELSIF r > hi THEN
-    r := hi;
+  IF r < lo THEN                                           (*@CLAMP_IF*)
+    r := lo;                                               (*@CLAMP_LO*)
+  ELSIF r > hi THEN                                        (*@CLAMP_ELSIF*)
+    r := hi;                                               (*@CLAMP_HI*)
   END_IF;
   Clamp := r;                                              (*@CLAMP_RET*)
 END_FUNCTION
@@ -53,7 +53,7 @@ FUNCTION_BLOCK PID
     last : REAL;
   END_VAR
   err := sp - pv;                                          (*@PID_FIRST*)
-  integ := integ + err * ki;
+  integ := integ + err * ki;                               (*@PID_INTEG*)
   out := Clamp(kp * err + integ, 0.0, 100.0);              (*@PID_CALL*)
   last := out;                                             (*@PID_AFTER*)
 END_FUNCTION_BLOCK
@@ -77,7 +77,7 @@ FUNCTION_BLOCK FB_Motor
     pid(sp := target, pv := speed);                        (*@MOTOR_PID*)
     speed := speed + pid.out * 0.1;                        (*@MOTOR_AFTER*)
   ELSE
-    speed := 0.0;
+    speed := 0.0;                                          (*@MOTOR_ELSE*)
   END_IF;
 END_FUNCTION_BLOCK
 

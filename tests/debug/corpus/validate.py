@@ -6,7 +6,7 @@ Checks, in order:
      a schema keyword outside the subset is an error, never silently ignored).
   2. Oracle semantics the schema cannot express: scenario id and corpus match the
      path, criteria are cited by the program header, `@MARKER` lines resolve once
-     in the program sources, files and tasks exist, every `~ref` has an earlier
+     in the program sources (wherever they appear), files and tasks exist, every `~ref` has an earlier
      `~capture`, a runtime scenario reads the plant at least once, argument symbols
      are in the vocabulary (a `~build` variant exists), and `client` is used only
      where it means something. Loop bodies are checked as steps, in order.
@@ -340,6 +340,7 @@ def walk(node: Json, path: str = "$") -> Iterator[Tuple[str, Json]]:
 
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
 TOKENS = {"valid", "none", "forged", "expired"}
+MARKER = re.compile(r"^@[A-Za-z0-9_]+$")  # the runner resolves this form wherever it appears
 
 
 def flat_steps(steps: Json, prefix: str = "steps") -> Iterator[Tuple[str, Json]]:
@@ -434,6 +435,8 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                     if bad:
                         out.append(f"{where}: {bad}")
         for where, node in walk(step, here):
+            if isinstance(node, str) and MARKER.match(node) and not re.search(r"\.(line|endLine)$", where):
+                out.extend(f"{where}: {p}" for p in marker_lines(prog, node, programs)[0])
             if isinstance(node, dict):
                 ref = node.get("~ref")
                 if isinstance(ref, str) and ref not in captured:
@@ -444,10 +447,6 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                 fname = node.get("file")
                 if isinstance(fname, str) and "line" in node and fname not in files:
                     out.append(f"{where}: file {fname!r} is not a source of {prog.name}")
-                listed = node.get("lines")
-                for val in listed if isinstance(listed, list) else []:
-                    if isinstance(val, str) and val.startswith("@"):
-                        out.extend(f"{where}.lines: {p}" for p in marker_lines(prog, val, programs)[0])
                 for key in ("line", "endLine"):
                     val = node.get(key)
                     if not (isinstance(val, str) and val.startswith("@")):
