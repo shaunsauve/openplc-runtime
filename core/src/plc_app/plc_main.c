@@ -176,8 +176,17 @@ int main(int argc, char *argv[])
         }
     }
 
+    // A safe-stop survives the restart: re-assert the held outputs (or keep only the
+    // start gate) before any program runs, instead of the outputs-off or the auto-start.
+    bool held_boot = plc_boot_from_hold_file();
+    if (held_boot)
+    {
+        safe_mode   = true;
+        after_fault = false;
+    }
+
     // Before the socket exists, so no command can claim a transition underneath.
-    if (safe_mode)
+    if (safe_mode && !held_boot)
     {
         log_info("Runtime started in SAFE MODE - PLC program will not be loaded");
         log_info("Upload a corrected program to recover");

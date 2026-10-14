@@ -147,13 +147,8 @@ static bool spawn_transition_worker(PLCState target)
 // refused. Single entry point for every state change;
 // plc_claim_transition arbitrates. A refused switch intent survives
 // via movement reconciliation.
-bool plc_begin_transition(PLCState target)
+static bool run_claimed_transition(PLCState target)
 {
-    if (!plc_claim_transition(target))
-    {
-        return false;
-    }
-
     // Worker could not spawn: run on this thread. Publishing STOPPED
     // here would skip unload_plc_program entirely and leave plc_program
     // non-NULL. Blocking the caller is cheaper.
@@ -163,6 +158,24 @@ bool plc_begin_transition(PLCState target)
         return run_transition(target);
     }
     return true;
+}
+
+bool plc_begin_transition(PLCState target)
+{
+    if (!plc_claim_transition(target))
+    {
+        return false;
+    }
+    return run_claimed_transition(target);
+}
+
+bool plc_begin_granted_start(const char *user)
+{
+    if (!plc_claim_granted_start(user))
+    {
+        return false;
+    }
+    return run_claimed_transition(PLC_STATE_RUNNING);
 }
 
 bool plc_complete_claimed_transition_async(PLCState target)
@@ -213,6 +226,8 @@ static void format_status_response(char *response, size_t response_size)
         strncpy(response, "STATUS:ERROR\n", response_size);
     else if (current_state == PLC_STATE_EMPTY)
         strncpy(response, "STATUS:EMPTY\n", response_size);
+    else if (current_state == PLC_STATE_SAFE_STOPPED)
+        strncpy(response, "STATUS:SAFE_STOPPED\n", response_size);
     else
         strncpy(response, "STATUS:UNKNOWN\n", response_size);
 }
@@ -266,7 +281,9 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
     else if (strcmp(command, "STOP") == 0)
     {
         PLCState current_state = plc_get_state();
-        if (current_state == PLC_STATE_RUNNING)
+        // ERROR is stoppable only while outputs are held: the STOP then drives them to 0.
+        if (current_state == PLC_STATE_RUNNING || current_state == PLC_STATE_SAFE_STOPPED ||
+            (current_state == PLC_STATE_ERROR && plc_output_hold_is_set()))
         {
             if (plc_begin_transition(PLC_STATE_STOPPED))
                 strncpy(response, "STOP:OK\n", response_size);
@@ -282,9 +299,12 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
     {
         format_switch_response(response, response_size);
     }
-    else if (strcmp(command, "START") == 0)
+    else if (strcmp(command, "START") == 0 || strncmp(command, "START_AUTHORISED:", 17) == 0)
     {
         PLCState current_state = plc_get_state();
+        // A grant names the user the webserver checked for control; START carries none.
+        const char *grant_user = strncmp(command, "START_AUTHORISED:", 17) == 0 ? command + 17
+                                                                                 : NULL;
         // Hardware is authoritative: refuse rather than queue, so the editor
         // can tell the user to flip the switch instead of leaving a start
         // pending. Checked before the transition is ever begun.
@@ -295,8 +315,12 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
         }
         else if (current_state != PLC_STATE_RUNNING)
         {
-            if (plc_begin_transition(PLC_STATE_RUNNING))
+            bool started = grant_user ? plc_begin_granted_start(grant_user)
+                                      : plc_begin_transition(PLC_STATE_RUNNING);
+            if (started)
                 strncpy(response, "START:OK\n", response_size);
+            else if (!grant_user && plc_start_gate_is_set())
+                strncpy(response, "START:ERROR_SAFE_STOPPED\n", response_size);
             else
                 strncpy(response, "START:ERROR\n", response_size);
         }

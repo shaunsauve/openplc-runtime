@@ -27,6 +27,13 @@ void unix_socket_set_plugin_driver(void *driver);
 bool plc_begin_transition(PLCState target);
 
 /**
+ * @brief Start the PLC with a one-shot grant, the only start the safe-stop gate lets through.
+ * @param user the user the caller verified holds control; must be non-empty
+ * @return false when refused (a transition in flight, already running, or no user)
+ */
+bool plc_begin_granted_start(const char *user);
+
+/**
  * @brief Run an already claimed transition on a new detached worker thread.
  *
  * For callers that claimed with plc_claim_transition() and must not run the

@@ -129,7 +129,8 @@ void *watchdog_thread(void *arg)
             continue;
         }
 
-        if (state == PLC_STATE_RUNNING)
+        /* SAFE_STOPPED keeps a dispatcher ticking; no first scan is pending there. */
+        if (state == PLC_STATE_RUNNING || state == PLC_STATE_SAFE_STOPPED)
         {
             const int64_t first_since = plc_first_scan_pending_since_ns();
             if (first_since != 0 &&

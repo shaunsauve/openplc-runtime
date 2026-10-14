@@ -18,6 +18,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <functional>
 
 #include <pthread.h>
 #include <sched.h>
@@ -33,6 +34,7 @@ extern "C" {
 #include "debug_write_journal.h"
 #include "image_tables.h"
 #include "journal_buffer.h"
+#include "plc_output_hold.h"
 #include "plc_retain.h"
 #include "plc_state_manager.h"
 #include "plcapp_manager.h"
@@ -130,6 +132,37 @@ static std::atomic<int64_t> g_longest_interval_ns{0};
 /* Oldest in-flight first scan (release ns, 0 = none), and the watchdog's trip request for it. */
 static std::atomic<int64_t> g_first_scan_since_ns{0};
 static std::atomic<bool>    g_first_scan_trip{false};
+
+/* Output hold and start gate: set together under state_mutex before SAFE_STOPPED is stored.
+ * The hold is cleared by an explicit STOP claim or a granted run's first copy-out; the gate
+ * only by the latter. */
+static std::atomic<bool> g_hold_outputs{false};
+static std::atomic<bool> g_start_gate{false};
+
+/* Explicit STOP from ERROR with the hold set: no dispatcher is left to zero the outputs. */
+static std::atomic<bool> g_zero_after_stop{false};
+
+/* Safe-stop request for the dispatcher; the reason is written under state_mutex. */
+static std::atomic<bool> g_safe_stop_requested{false};
+static char              g_safe_stop_reason[PLC_SAFE_STOP_REASON_LEN];
+static std::atomic<bool> g_dispatcher_live{false};
+
+/* The current safe-stop was restored from safe_stop.hold at boot. */
+static std::atomic<bool> g_restarted{false};
+
+/* Programless SAFE_STOPPED (boot with held values): plugins exchange the held image. */
+static pthread_t         g_programless_thread;
+static std::atomic<bool> g_programless_active{false};
+static int64_t           g_programless_period_ns = 0;
+
+enum class ClaimKind
+{
+    Explicit, /* a user, plugin, switch or boot request */
+    Fault,    /* the dispatcher stopping a stuck task */
+    Granted,  /* a start carrying a grant from a user with control */
+};
+
+static bool claim_transition(PLCState target, ClaimKind kind, const char *user);
 
 /* The SIGUSR1 wake handler is installed once at process init in
  * plc_main.c (handle_sigusr1). Every task thread relies on EINTR from
@@ -485,6 +518,149 @@ static void plc_outputs_off(void)
     log_info("Outputs forced to 0");
 }
 
+static bool dispatcher_should_run(PLCState s)
+{
+    return s == PLC_STATE_RUNNING || s == PLC_STATE_SAFE_STOPPED;
+}
+
+/* Journal fed by plugins and copy-out; drained into the image at every image_lock. */
+static void init_image_journal(pthread_mutex_t *itm)
+{
+    journal_buffer_ptrs_t journal_ptrs = {
+        .bool_input   = bool_input,
+        .bool_output  = bool_output,
+        .bool_memory  = bool_memory,
+        .byte_input   = byte_input,
+        .byte_output  = byte_output,
+        .int_input    = int_input,
+        .int_output   = int_output,
+        .int_memory   = int_memory,
+        .dint_input   = dint_input,
+        .dint_output  = dint_output,
+        .dint_memory  = dint_memory,
+        .lint_input   = lint_input,
+        .lint_output  = lint_output,
+        .lint_memory  = lint_memory,
+        .buffer_size  = BUFFER_SIZE,
+        .image_mutex  = itm,
+    };
+    if (journal_init(&journal_ptrs) != 0)
+        log_error("Failed to initialize journal buffer");
+    else
+        log_info("Journal buffer initialized");
+}
+
+/* Dispatcher only. Publishes SAFE_STOPPED with the hold and gate already set, so no zeroing
+ * site can run before the flags are visible. A transition in flight (a user STOP) wins. */
+static bool plc_enter_safe_stop(void)
+{
+    char reason[PLC_SAFE_STOP_REASON_LEN];
+    pthread_mutex_lock(&state_mutex);
+    if (plc_state != PLC_STATE_RUNNING)
+    {
+        pthread_mutex_unlock(&state_mutex);
+        return false;
+    }
+    g_hold_outputs.store(true, std::memory_order_seq_cst);
+    g_start_gate.store(true, std::memory_order_seq_cst);
+    plc_state = PLC_STATE_SAFE_STOPPED;
+    std::memcpy(reason, g_safe_stop_reason, sizeof reason);
+    pthread_mutex_unlock(&state_mutex);
+
+    output_hold_set_reason(reason);
+    watchdog_set_fault_context(PLC_FAULT_CONTEXT_SAFE_STOPPED);
+    log_warn("PLC State: SAFE_STOPPED (%s): outputs held", reason);
+    return true;
+}
+
+/* Safe-stop entry on the dispatcher: end every task, then snapshot the image it left.
+ * Returns the divisor of the fastest task, the cadence plugins keep exchanging at. */
+static uint64_t safe_stop_entry(unsigned long long base_ns, bool *cycle_end_pending)
+{
+    /* The reap may wait out a scan's grace; the stall check must not count that. */
+    watchdog_dispatcher_stopped();
+    uint64_t divisor = 0;
+    for (size_t i = 0; i < plc_task_count; ++i)
+        if (divisor == 0 || plc_tasks[i].divisor < divisor) divisor = plc_tasks[i].divisor;
+    if (divisor == 0) divisor = 1;
+
+    g_first_scan_since_ns.store(0, std::memory_order_release);
+    /* A task still running finishes its scan and copies out: that scan is complete. */
+    reap_task_threads();
+    /* An aborted task is part of the record, not a reason to land ERROR later. */
+    if (g_task_fault.exchange(false, std::memory_order_acq_rel)) output_hold_note_task_fault();
+
+    /* Through the journal, so a forced slot keeps its forced value. */
+    halt_policy_journal_safe_values();
+    image_lock();
+    output_hold_capture();
+    image_unlock();
+    if (*cycle_end_pending && plugin_driver) plugin_driver_cycle_end(plugin_driver);
+    *cycle_end_pending = false;
+
+    output_hold_file_request(OUTPUT_HOLD_FILE_VALUES, (int64_t)(divisor * base_ns));
+    watchdog_dispatcher_started((int64_t)base_ns);
+    return divisor;
+}
+
+/* Applies run-control requests at the top of a tick; the dispatcher owns run_state. */
+static void apply_run_requests(void)
+{
+    const int64_t now = monotonic_ns();
+    for (size_t i = 0; i < plc_task_count; ++i)
+    {
+        PlcTaskCtx *c   = &plc_tasks[i];
+        const long  req = c->run_request.exchange(PLC_TASK_REQ_NONE, std::memory_order_acq_rel);
+        if (req == PLC_TASK_REQ_NONE) continue;
+        const long state = c->run_state.load(std::memory_order_relaxed);
+        if (req == PLC_TASK_REQ_HOLD && state == PLC_TASK_RUN_RUNNING)
+        {
+            c->held_since_ns.store(now, std::memory_order_relaxed);
+            c->run_state.store(PLC_TASK_RUN_HELD, std::memory_order_release);
+        }
+        else if (req == PLC_TASK_REQ_RESUME && state == PLC_TASK_RUN_HELD)
+        {
+            /* Re-arm: the stuck limit measures execution time only, not the hold. */
+            c->stuck_ticks.store(0, std::memory_order_relaxed);
+            c->release_ns.fetch_add(now - c->held_since_ns.load(std::memory_order_relaxed),
+                                    std::memory_order_acq_rel);
+            c->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_release);
+        }
+    }
+}
+
+static bool task_is_running(const PlcTaskCtx *c)
+{
+    return c->run_state.load(std::memory_order_acquire) == PLC_TASK_RUN_RUNNING;
+}
+
+/* True once every live task has completed a scan, so its copy-out has reached the image. */
+static bool every_task_scanned(void)
+{
+    for (size_t i = 0; i < plc_task_count; ++i)
+    {
+        const PlcTaskCtx *c = &plc_tasks[i];
+        if (c->alive.load(std::memory_order_acquire) && !task_first_scan_done(c)) return false;
+    }
+    return true;
+}
+
+/* A granted run's outputs are in the image: the safe-stop is over. */
+static void release_hold_after_first_copy_out(void)
+{
+    /* Queued before the flags clear, so anyone who sees them clear can flush the delete. */
+    output_hold_file_request(OUTPUT_HOLD_FILE_NONE, 0);
+    pthread_mutex_lock(&state_mutex);
+    g_hold_outputs.store(false, std::memory_order_seq_cst);
+    g_start_gate.store(false, std::memory_order_seq_cst);
+    pthread_mutex_unlock(&state_mutex);
+    output_hold_invalidate();
+    output_hold_set_reason("");
+    g_restarted.store(false, std::memory_order_release);
+    watchdog_set_fault_context(NULL);
+    log_info("Safe-stop cleared: the program's own outputs reached the image");
+}
+
 void *plc_cycle_thread(void *arg)
 {
     PluginManager *pm = (PluginManager *)arg;
@@ -495,6 +671,7 @@ void *plc_cycle_thread(void *arg)
     g_task_fault.store(false, std::memory_order_release);
     g_first_scan_since_ns.store(0, std::memory_order_release);
     g_first_scan_trip.store(false, std::memory_order_release);
+    g_safe_stop_requested.store(false, std::memory_order_release);
     watchdog_dispatcher_stopped();
 
     /* Per-task trackers are initialised below, once we know the task list
@@ -517,7 +694,16 @@ void *plc_cycle_thread(void *arg)
     pthread_mutex_lock(itm);
     image_tables_bind_located_vars();
     image_tables_fill_null_pointers();
+    /* A start that ends a safe-stop: the plant keeps the held values until scan 1's copy-out.
+     * Plugins are not started yet, so no frame carries the zeroed buffers. */
+    if (g_hold_outputs.load(std::memory_order_acquire))
+    {
+        output_hold_restore();
+        image_tables_invalidate_output_snapshot();
+    }
     pthread_mutex_unlock(itm);
+
+    halt_policy_load(PLC_HALT_POLICY_PATH);
 
     /* Retained variables. init() decides capability; read() loads values
      * for THIS program and discards a prior program's bytes. Must run
@@ -525,32 +711,7 @@ void *plc_cycle_thread(void *arg)
     plc_retain_init();
     plc_retain_read();
 
-    journal_buffer_ptrs_t journal_ptrs = {
-        .bool_input   = bool_input,
-        .bool_output  = bool_output,
-        .bool_memory  = bool_memory,
-        .byte_input   = byte_input,
-        .byte_output  = byte_output,
-        .int_input    = int_input,
-        .int_output   = int_output,
-        .int_memory   = int_memory,
-        .dint_input   = dint_input,
-        .dint_output  = dint_output,
-        .dint_memory  = dint_memory,
-        .lint_input   = lint_input,
-        .lint_output  = lint_output,
-        .lint_memory  = lint_memory,
-        .buffer_size  = BUFFER_SIZE,
-        .image_mutex  = itm,
-    };
-    if (journal_init(&journal_ptrs) != 0)
-    {
-        log_error("Failed to initialize journal buffer");
-    }
-    else
-    {
-        log_info("Journal buffer initialized");
-    }
+    init_image_journal(itm);
 
     if (plugin_driver)
     {
@@ -602,6 +763,7 @@ void *plc_cycle_thread(void *arg)
 
         signal(SIGFPE,  SIG_DFL);
         signal(SIGSEGV, SIG_DFL);
+        g_dispatcher_live.store(false, std::memory_order_release);
 
         pthread_mutex_lock(&state_mutex);
         plc_state = PLC_STATE_ERROR;
@@ -609,12 +771,14 @@ void *plc_cycle_thread(void *arg)
         log_info("PLC State: ERROR");
 
         /* Workers spawned before a dispatcher crash are still alive: reap them (aborting any
-         * still scanning) so they are not orphaned, then drive outputs off. */
+         * still scanning) so they are not orphaned, then drive outputs off unless held. */
         if (plc_tasks && plc_task_count)
         {
             reap_task_threads();
-            plc_outputs_off();
+            if (!g_hold_outputs.load(std::memory_order_acquire)) plc_outputs_off();
         }
+        if (g_hold_outputs.load(std::memory_order_acquire))
+            log_warn("Outputs held: a start needs a grant, STOP drives them to 0");
         return NULL;
     }
 
@@ -730,6 +894,9 @@ void *plc_cycle_thread(void *arg)
                 ctx->stuck_ticks.store(0,   std::memory_order_relaxed);
                 ctx->exited.store(0,        std::memory_order_relaxed);
                 ctx->release_ns.store(0,    std::memory_order_relaxed);
+                ctx->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_relaxed);
+                ctx->run_request.store(PLC_TASK_REQ_NONE,  std::memory_order_relaxed);
+                ctx->held_since_ns.store(0, std::memory_order_relaxed);
                 ctx->in_body = 0;
 
                 if (scan_cycle_tracker_init(&ctx->tracker, ctx->interval_ns) != 0)
@@ -859,149 +1026,177 @@ void *plc_cycle_thread(void *arg)
     bool     cycle_end_pending = false;   /* a frame's cycle_end not yet fired */
     size_t   stuck_idx         = SIZE_MAX;
     bool     fault_stop_claimed = false;
+    bool     safe_stopped      = false;   /* no tasks left: hold the image for the plugins */
+    uint64_t hold_divisor      = 1;
     timespec next_tick;
     clock_gettime(CLOCK_MONOTONIC, &next_tick);
+    g_dispatcher_live.store(true, std::memory_order_release);
 
-    while (plc_get_state() == PLC_STATE_RUNNING)
+    while (dispatcher_should_run(plc_get_state()))
     {
         /* ---- Phase B: the tick (runs at the absolute deadline) ---- */
         const int64_t master_time = (int64_t)master_tick * (int64_t)base_ns;
 
         watchdog_feed();
 
+        if (!safe_stopped && g_safe_stop_requested.exchange(false, std::memory_order_acq_rel) &&
+            plc_enter_safe_stop())
         {
-            int64_t oldest = 0;
-            for (size_t i = 0; i < plc_task_count; ++i)
-            {
-                PlcTaskCtx *c = &plc_tasks[i];
-                if (c->alive.load(std::memory_order_acquire) && task_in_scan(c) &&
-                    !task_first_scan_done(c))
-                {
-                    const int64_t rel = c->release_ns.load(std::memory_order_acquire);
-                    if (oldest == 0 || rel < oldest) oldest = rel;
-                }
-            }
-            g_first_scan_since_ns.store(oldest, std::memory_order_release);
+            hold_divisor = safe_stop_entry(base_ns, &cycle_end_pending);
+            safe_stopped = true;
         }
 
-        /* Which tasks are due this tick? */
-        bool any_due = false;
-        for (size_t i = 0; i < plc_task_count; ++i)
+        if (safe_stopped)
         {
-            PlcTaskCtx *c = &plc_tasks[i];
-            if (c->alive.load(std::memory_order_acquire) &&
-                (master_tick % c->divisor) == 0)
+            /* No call into the program: only the plugins' exchange of the held image. */
+            if ((master_tick % hold_divisor) == 0)
             {
-                any_due = true;
-                break;
-            }
-        }
-
-        if (any_due)
-        {
-            /* Overrun: previous frame's cycle_end not yet retired. Fire
-             * it before opening the new frame. Only path where cycle_end
-             * lands on the task-wake hot path. */
-            if (cycle_end_pending)
-            {
+                if (plugin_driver) plugin_driver_cycle_start(plugin_driver);
                 image_lock();
                 image_unlock();
                 if (plugin_driver) plugin_driver_cycle_end(plugin_driver);
-                cycle_end_pending = false;
             }
-            if (plugin_driver) plugin_driver_cycle_start(plugin_driver);
+        }
+        else
+        {
+            apply_run_requests();
 
-            /* Prime config-scope shared globals from the input image.
-             * Guarded by quiescence (no overrunning task is in run())
-             * to avoid racing a per-global mutex. */
-            if (g_tasks_running.load(std::memory_order_acquire) == 0)
             {
-                image_lock();
-                image_tables_copy_config_globals_in();
-                image_unlock();
-            }
-
-            bool released_any = false;
-            for (size_t i = 0; i < plc_task_count; ++i)
-            {
-                PlcTaskCtx *c = &plc_tasks[i];
-                if (!c->alive.load(std::memory_order_acquire)) continue;
-                if ((master_tick % c->divisor) != 0) continue;
-
-                long r  = c->released.load(std::memory_order_relaxed);
-                long cc = c->completed.load(std::memory_order_acquire);
-                if (r == cc)
-                {
-                    /* Worker idle (caught up) → stamp time, count it in flight,
-                     * and release. The fetch_add must happen-before sem_post so
-                     * the worker's matching worker_scan_done() can never drive
-                     * g_tasks_running negative. */
-                    c->stuck_ticks.store(0, std::memory_order_relaxed);
-                    c->release_ns.store(monotonic_ns(), std::memory_order_release);
-                    c->time_at_dispatch = master_time;
-                    c->released.store(r + 1, std::memory_order_relaxed);
-                    g_tasks_running.fetch_add(1, std::memory_order_acq_rel);
-                    sem_post(&c->go);
-                    released_any = true;
-                }
-                else
-                {
-                    /* r > cc: worker still in its previous scan → overrun. Do
-                     * NOT re-release (binary), so activations never pile up. The
-                     * task simply runs at a lower effective rate; the others are
-                     * unaffected. Rate-limit the log. */
-                    /* Ticks, not wall time: replayed ticks after a late dispatcher are missed deadlines too. */
-                    if (task_first_scan_done(c))
-                    {
-                        long st = c->stuck_ticks.fetch_add(1, std::memory_order_relaxed) + 1;
-                        if (st >= PLC_TASK_STUCK_PERIODS && stuck_idx == SIZE_MAX)
-                            stuck_idx = i;
-                    }
-                    long oc = c->overrun_count.fetch_add(1, std::memory_order_relaxed) + 1;
-                    if (oc == 1 || (oc % 50) == 0)
-                        log_warn("[task %s] scan overrun #%ld: body exceeds its "
-                                 "%lld ms period — running at reduced rate, "
-                                 "other tasks unaffected",
-                                 c->name, oc,
-                                 (long long)(c->interval_ns / 1000000));
-                }
-            }
-
-            /* This frame owes a cycle_end once its released tasks all finish. */
-            if (released_any) cycle_end_pending = true;
-            ++scan_counter;
-
-            bool first_scan_trip = false;
-            if (stuck_idx == SIZE_MAX && g_first_scan_trip.exchange(false, std::memory_order_acq_rel))
-            {
+                int64_t oldest = 0;
                 for (size_t i = 0; i < plc_task_count; ++i)
                 {
                     PlcTaskCtx *c = &plc_tasks[i];
-                    if (!c->alive.load(std::memory_order_acquire) || !task_in_scan(c) ||
-                        task_first_scan_done(c))
-                        continue;
-                    if (stuck_idx == SIZE_MAX ||
-                        c->release_ns.load(std::memory_order_acquire) <
-                            plc_tasks[stuck_idx].release_ns.load(std::memory_order_acquire))
-                        stuck_idx = i;
+                    if (c->alive.load(std::memory_order_acquire) && task_is_running(c) &&
+                        task_in_scan(c) && !task_first_scan_done(c))
+                    {
+                        const int64_t rel = c->release_ns.load(std::memory_order_acquire);
+                        if (oldest == 0 || rel < oldest) oldest = rel;
+                    }
                 }
-                first_scan_trip = (stuck_idx != SIZE_MAX);
+                g_first_scan_since_ns.store(oldest, std::memory_order_release);
             }
 
-            if (stuck_idx != SIZE_MAX)
+            /* Which tasks are due this tick? */
+            bool any_due = false;
+            for (size_t i = 0; i < plc_task_count; ++i)
             {
-                PlcTaskCtx *c = &plc_tasks[stuck_idx];
-                if (first_scan_trip)
-                    log_error("[task %s] first scan still running after %d ms: stopping the PLC",
-                              c->name, PLC_FIRST_SCAN_TIMEOUT_MS);
-                else
-                    log_error("[task %s] stuck in one scan for %d periods (%lld ms): stopping the PLC",
-                              c->name, PLC_TASK_STUCK_PERIODS,
-                              (long long)(task_stuck_limit_ns(c) / NS_PER_MS));
-                g_task_fault.store(true, std::memory_order_release);
-                /* Claim now so no command lands mid-drain; the teardown runs after the reap. */
-                fault_stop_claimed = plc_claim_transition(PLC_STATE_STOPPED);
-                break;
+                PlcTaskCtx *c = &plc_tasks[i];
+                if (c->alive.load(std::memory_order_acquire) &&
+                    (master_tick % c->divisor) == 0)
+                {
+                    any_due = true;
+                    break;
+                }
+            }
+
+            if (any_due)
+            {
+                /* Overrun: previous frame's cycle_end not yet retired. Fire
+                 * it before opening the new frame. Only path where cycle_end
+                 * lands on the task-wake hot path. */
+                if (cycle_end_pending)
+                {
+                    image_lock();
+                    image_unlock();
+                    if (plugin_driver) plugin_driver_cycle_end(plugin_driver);
+                    cycle_end_pending = false;
+                }
+                if (plugin_driver) plugin_driver_cycle_start(plugin_driver);
+
+                /* Prime config-scope shared globals from the input image.
+                 * Guarded by quiescence (no overrunning task is in run())
+                 * to avoid racing a per-global mutex. */
+                if (g_tasks_running.load(std::memory_order_acquire) == 0)
+                {
+                    image_lock();
+                    image_tables_copy_config_globals_in();
+                    image_unlock();
+                }
+
+                for (size_t i = 0; i < plc_task_count; ++i)
+                {
+                    PlcTaskCtx *c = &plc_tasks[i];
+                    if (!c->alive.load(std::memory_order_acquire)) continue;
+                    if ((master_tick % c->divisor) != 0) continue;
+                    /* Held: no release, and no overrun or stuck tick to count. */
+                    if (!task_is_running(c)) continue;
+
+                    long r  = c->released.load(std::memory_order_relaxed);
+                    long cc = c->completed.load(std::memory_order_acquire);
+                    if (r == cc)
+                    {
+                        /* Worker idle (caught up) → stamp time, count it in flight,
+                         * and release. The fetch_add must happen-before sem_post so
+                         * the worker's matching worker_scan_done() can never drive
+                         * g_tasks_running negative. */
+                        c->stuck_ticks.store(0, std::memory_order_relaxed);
+                        c->release_ns.store(monotonic_ns(), std::memory_order_release);
+                        c->time_at_dispatch = master_time;
+                        c->released.store(r + 1, std::memory_order_relaxed);
+                        g_tasks_running.fetch_add(1, std::memory_order_acq_rel);
+                        sem_post(&c->go);
+                    }
+                    else
+                    {
+                        /* r > cc: worker still in its previous scan → overrun. Do
+                         * NOT re-release (binary), so activations never pile up. The
+                         * task simply runs at a lower effective rate; the others are
+                         * unaffected. Rate-limit the log. */
+                        /* Ticks, not wall time: replayed ticks after a late dispatcher are missed deadlines too. */
+                        if (task_first_scan_done(c))
+                        {
+                            long st = c->stuck_ticks.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (st >= PLC_TASK_STUCK_PERIODS && stuck_idx == SIZE_MAX)
+                                stuck_idx = i;
+                        }
+                        long oc = c->overrun_count.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (oc == 1 || (oc % 50) == 0)
+                            log_warn("[task %s] scan overrun #%ld: body exceeds its "
+                                     "%lld ms period — running at reduced rate, "
+                                     "other tasks unaffected",
+                                     c->name, oc,
+                                     (long long)(c->interval_ns / 1000000));
+                    }
+                }
+
+                /* Every cycle_start owes one cycle_end, released or not, so hooks stay paired
+                 * while tasks are held. */
+                cycle_end_pending = true;
+                ++scan_counter;
+
+                bool first_scan_trip = false;
+                if (stuck_idx == SIZE_MAX && g_first_scan_trip.exchange(false, std::memory_order_acq_rel))
+                {
+                    for (size_t i = 0; i < plc_task_count; ++i)
+                    {
+                        PlcTaskCtx *c = &plc_tasks[i];
+                        if (!c->alive.load(std::memory_order_acquire) || !task_is_running(c) ||
+                            !task_in_scan(c) || task_first_scan_done(c))
+                            continue;
+                        if (stuck_idx == SIZE_MAX ||
+                            c->release_ns.load(std::memory_order_acquire) <
+                                plc_tasks[stuck_idx].release_ns.load(std::memory_order_acquire))
+                            stuck_idx = i;
+                    }
+                    first_scan_trip = (stuck_idx != SIZE_MAX);
+                }
+
+                if (stuck_idx != SIZE_MAX)
+                {
+                    PlcTaskCtx *c = &plc_tasks[stuck_idx];
+                    if (first_scan_trip)
+                        log_error("[task %s] first scan still running after %d ms: stopping the PLC",
+                                  c->name, PLC_FIRST_SCAN_TIMEOUT_MS);
+                    else
+                        log_error("[task %s] stuck in one scan for %d periods (%lld ms): stopping the PLC",
+                                  c->name, PLC_TASK_STUCK_PERIODS,
+                                  (long long)(task_stuck_limit_ns(c) / NS_PER_MS));
+                    g_task_fault.store(true, std::memory_order_release);
+                    /* Claim now so no command lands mid-drain; the teardown runs after the reap. */
+                    fault_stop_claimed =
+                        claim_transition(PLC_STATE_STOPPED, ClaimKind::Fault, nullptr);
+                    break;
+                }
             }
         }
 
@@ -1025,7 +1220,7 @@ void *plc_cycle_thread(void *arg)
             /* Break out promptly on STOP/ERROR instead of waiting for the
              * deadline (a finishing worker's signal, or a spurious wake, gives
              * us the chance; worst case is still one base tick via ETIMEDOUT). */
-            if (plc_get_state() != PLC_STATE_RUNNING) break;
+            if (!dispatcher_should_run(plc_get_state())) break;
 
             if (cycle_end_pending &&
                 g_tasks_running.load(std::memory_order_acquire) == 0)
@@ -1046,6 +1241,10 @@ void *plc_cycle_thread(void *arg)
                 image_unlock();
                 if (plugin_driver) plugin_driver_cycle_end(plugin_driver);
                 cycle_end_pending = false;
+                if ((g_hold_outputs.load(std::memory_order_relaxed) ||
+                     g_start_gate.load(std::memory_order_relaxed)) &&
+                    every_task_scanned())
+                    release_hold_after_first_copy_out();
                 pthread_mutex_lock(&done_mutex);
                 continue;              /* now just wait out the deadline */
             }
@@ -1056,10 +1255,15 @@ void *plc_cycle_thread(void *arg)
         pthread_mutex_unlock(&done_mutex);
     }
 
+    g_dispatcher_live.store(false, std::memory_order_release);
     watchdog_dispatcher_stopped();
     g_first_scan_since_ns.store(0, std::memory_order_release);
     reap_task_threads();
-    plc_outputs_off();
+    /* Read, never exchanged: only a granted run's first copy-out or an explicit STOP clears it. */
+    if (!g_hold_outputs.load(std::memory_order_acquire))
+        plc_outputs_off();
+    else
+        log_info("Outputs held at their last values");
 
     signal(SIGFPE,  SIG_DFL);
     signal(SIGSEGV, SIG_DFL);
@@ -1182,25 +1386,35 @@ __attribute__((constructor)) static void unload_mutex_init_pi(void)
     rt_mutex_upgrade_static(&unload_mutex, "unload_mutex");
 }
 
-static int unload_plc_program_locked(PluginManager *pm);
+static int unload_plc_program_locked(PluginManager *pm, bool restart);
 
 extern "C" int unload_plc_program(PluginManager *pm)
 {
     pthread_mutex_lock(&unload_mutex);
-    int rc = unload_plc_program_locked(pm);
+    int rc = unload_plc_program_locked(pm, false);
     pthread_mutex_unlock(&unload_mutex);
     return rc;
 }
 
-static int unload_plc_program_locked(PluginManager *pm)
+/* Unload for a start that ends a safe-stop: keeps TRANSITIONING_TO_RUN and publishes nothing. */
+static int restart_unload_plc_program(PluginManager *pm)
+{
+    pthread_mutex_lock(&unload_mutex);
+    int rc = unload_plc_program_locked(pm, true);
+    pthread_mutex_unlock(&unload_mutex);
+    return rc;
+}
+
+static int unload_plc_program_locked(PluginManager *pm, bool restart)
 {
     if (pm && pm == plc_program)
     {
         /* Publish TRANSITIONING_TO_STOP to break the dispatcher and
          * workers out of their RUNNING loops. Overwrite anything but
-         * ERROR, which must survive teardown. */
+         * ERROR, which must survive teardown. A restart's claim already
+         * published TRANSITIONING_TO_RUN, which the loops also leave on. */
         pthread_mutex_lock(&state_mutex);
-        if (plc_state != PLC_STATE_ERROR)
+        if (!restart && plc_state != PLC_STATE_ERROR)
         {
             plc_state = PLC_STATE_TRANSITIONING_TO_STOP;
         }
@@ -1221,6 +1435,9 @@ static int unload_plc_program_locked(PluginManager *pm)
 
         pthread_mutex_t *itm = image_tables_mutex();
         pthread_mutex_lock(itm);
+        /* The dispatcher died before it could snapshot the held image: take it now. */
+        if (g_hold_outputs.load(std::memory_order_acquire) && !output_hold_valid())
+            output_hold_capture();
         image_tables_clear_null_pointers();
         pthread_mutex_unlock(itm);
 
@@ -1232,6 +1449,13 @@ static int unload_plc_program_locked(PluginManager *pm)
         plc_program = NULL;
 
         log_info("PLC program unloaded successfully");
+
+        if (restart)
+        {
+            if (g_task_fault.exchange(false, std::memory_order_acq_rel))
+                output_hold_note_task_fault();
+            return 0;
+        }
 
         /* An aborted task makes the stop a fault: land ERROR. ERROR also survives STOPPED. */
         if (g_task_fault.exchange(false, std::memory_order_acq_rel))
@@ -1312,7 +1536,7 @@ extern "C" bool plc_state_is_transitioning(void)
     return s == PLC_STATE_TRANSITIONING_TO_RUN || s == PLC_STATE_TRANSITIONING_TO_STOP;
 }
 
-extern "C" bool plc_claim_transition(PLCState target)
+static bool claim_transition(PLCState target, ClaimKind kind, const char *user)
 {
     if (target != PLC_STATE_RUNNING && target != PLC_STATE_STOPPED)
     {
@@ -1338,13 +1562,42 @@ extern "C" bool plc_claim_transition(PLCState target)
         return false;
     }
 
+    /* The one enforcement point of the start gate: every start path claims here. */
+    if (target == PLC_STATE_RUNNING && kind != ClaimKind::Granted &&
+        g_start_gate.load(std::memory_order_acquire))
+    {
+        pthread_mutex_unlock(&state_mutex);
+        log_warn("Start refused: the PLC was safe-stopped; only a user with control can start it");
+        return false;
+    }
+
+    /* An explicit stop drops the hold, not the gate, so the dispatcher's tail zeroes. */
+    if (target == PLC_STATE_STOPPED && kind == ClaimKind::Explicit &&
+        g_hold_outputs.load(std::memory_order_acquire))
+    {
+        g_hold_outputs.store(false, std::memory_order_seq_cst);
+        if (plc_state == PLC_STATE_ERROR) g_zero_after_stop.store(true, std::memory_order_release);
+    }
+
     plc_state = (target == PLC_STATE_RUNNING) ? PLC_STATE_TRANSITIONING_TO_RUN
                                               : PLC_STATE_TRANSITIONING_TO_STOP;
     pthread_mutex_unlock(&state_mutex);
 
+    if (kind == ClaimKind::Granted) log_warn("Start granted by %s", user);
     log_info("PLC State: %s", target == PLC_STATE_RUNNING ? "TRANSITIONING_TO_RUN"
                                                           : "TRANSITIONING_TO_STOP");
     return true;
+}
+
+extern "C" bool plc_claim_transition(PLCState target)
+{
+    return claim_transition(target, ClaimKind::Explicit, nullptr);
+}
+
+extern "C" bool plc_claim_granted_start(const char *user)
+{
+    if (!user || !user[0]) return false;
+    return claim_transition(PLC_STATE_RUNNING, ClaimKind::Granted, user);
 }
 
 extern "C" void plc_publish_final_state(PLCState final_state)
@@ -1356,6 +1609,7 @@ extern "C" void plc_publish_final_state(PLCState final_state)
     case PLC_STATE_STOPPED: name = "STOPPED"; break;
     case PLC_STATE_ERROR:   name = "ERROR";   break;
     case PLC_STATE_EMPTY:   name = "EMPTY";   break;
+    case PLC_STATE_SAFE_STOPPED: name = "SAFE_STOPPED"; break;
     default: break;
     }
 
@@ -1391,6 +1645,59 @@ extern "C" bool plc_publish_running_if_claimed(void)
     return true;
 }
 
+/* Programless SAFE_STOPPED: the dispatcher without tasks, after a restart. Plugins keep
+ * exchanging the held image until a STOP (which zeroes) or a granted start. */
+static void *programless_hold_thread(void *)
+{
+    pthread_setname_np(pthread_self(), "plc_hold");
+    sched_param dsp{};
+    dsp.sched_priority = PLC_FIFO_DISPATCHER;
+    int rc             = pthread_setschedparam(pthread_self(), SCHED_FIFO, &dsp);
+    if (rc != 0)
+        log_warn("hold dispatcher SCHED_FIFO(%d) failed: %s", PLC_FIFO_DISPATCHER, strerror(rc));
+
+    const int64_t period = g_programless_period_ns;
+    watchdog_dispatcher_started(period);
+    timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    while (plc_get_state() == PLC_STATE_SAFE_STOPPED)
+    {
+        watchdog_feed();
+        if (plugin_driver) plugin_driver_cycle_start(plugin_driver);
+        image_lock();
+        image_unlock();
+        if (plugin_driver) plugin_driver_cycle_end(plugin_driver);
+
+        next.tv_nsec += (long)(period % 1000000000LL);
+        next.tv_sec += (time_t)(period / 1000000000LL);
+        if (next.tv_nsec >= 1000000000L)
+        {
+            next.tv_nsec -= 1000000000L;
+            next.tv_sec += 1;
+        }
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr) == EINTR)
+        {
+        }
+    }
+    watchdog_dispatcher_stopped();
+
+    if (!g_hold_outputs.load(std::memory_order_acquire)) plc_outputs_off();
+    if (plugin_driver) plugin_driver_stop(plugin_driver);
+    journal_cleanup();
+    pthread_mutex_t *itm = image_tables_mutex();
+    pthread_mutex_lock(itm);
+    image_tables_clear_null_pointers();
+    pthread_mutex_unlock(itm);
+    return nullptr;
+}
+
+/* Called by the transition that ends programless SAFE_STOPPED, which already left the state. */
+static void stop_programless_hold(void)
+{
+    pthread_join(g_programless_thread, nullptr);
+    g_programless_active.store(false, std::memory_order_release);
+}
+
 extern "C" bool plc_set_state(PLCState new_state)
 {
     // Executes a transition already claimed via plc_claim_transition.
@@ -1400,6 +1707,11 @@ extern "C" bool plc_set_state(PLCState new_state)
 
     if (new_state == PLC_STATE_RUNNING)
     {
+        /* Ending a safe-stop: tear down without zeroing; the load restores the held values. */
+        if (g_programless_active.load(std::memory_order_acquire)) stop_programless_hold();
+        if (plc_program && g_hold_outputs.load(std::memory_order_acquire))
+            restart_unload_plc_program(plc_program);
+
         if (plc_program == NULL)
         {
             char *libplc_path = find_libplc_file(libplc_build_dir);
@@ -1432,7 +1744,12 @@ extern "C" bool plc_set_state(PLCState new_state)
     }
     else if (new_state == PLC_STATE_STOPPED)
     {
-        if (plc_program)
+        if (g_programless_active.load(std::memory_order_acquire))
+        {
+            stop_programless_hold();
+            plc_publish_final_state(PLC_STATE_STOPPED);
+        }
+        else if (plc_program)
         {
             if (unload_plc_program(plc_program) < 0)
             {
@@ -1449,6 +1766,19 @@ extern "C" bool plc_set_state(PLCState new_state)
              * published: the transition was claimed, and only a final state
              * ends it. */
             plc_publish_final_state(PLC_STATE_STOPPED);
+        }
+
+        /* From ERROR with the hold set no dispatcher was left to zero the outputs. */
+        if (g_zero_after_stop.exchange(false, std::memory_order_acq_rel) &&
+            !plc_outputs_off_without_program())
+            log_error("Outputs could not be driven off after the STOP");
+        /* The values are gone, the gate is not: a restart must still refuse to auto-start. */
+        if (g_start_gate.load(std::memory_order_acquire) &&
+            !g_hold_outputs.load(std::memory_order_acquire))
+        {
+            output_hold_invalidate();
+            output_hold_file_request(OUTPUT_HOLD_FILE_GATE_ONLY, 0);
+            output_hold_file_flush();
         }
     }
 
@@ -1478,6 +1808,14 @@ extern "C" void plc_state_manager_cleanup(void)
                  waited);
     }
 
+    if (g_programless_active.load(std::memory_order_acquire))
+    {
+        /* Leave the hold and its file in place: the next boot re-asserts them. */
+        pthread_mutex_lock(&state_mutex);
+        plc_state = PLC_STATE_TRANSITIONING_TO_STOP;
+        pthread_mutex_unlock(&state_mutex);
+        stop_programless_hold();
+    }
     if (plc_program) unload_plc_program(plc_program);
 }
 
@@ -1494,55 +1832,207 @@ extern "C" int plc_get_crash_signal(void)
     return (int)plc_crash_signal;
 }
 
-/* ---- Safe-stop and run control: interface only, behaviour not implemented yet ---- */
-
-extern "C" bool plc_claim_granted_start(const char *user)
-{
-    (void)user;
-    return plc_claim_transition(PLC_STATE_RUNNING);
-}
-
 extern "C" bool plc_output_hold_is_set(void)
 {
-    return false;
+    return g_hold_outputs.load(std::memory_order_acquire);
 }
 
 extern "C" bool plc_start_gate_is_set(void)
 {
-    return false;
-}
-
-/* Publishes the state only, which is what any new state does to today's dispatcher. */
-extern "C" bool plc_request_safe_stop(const char *reason)
-{
-    (void)reason;
-    pthread_mutex_lock(&state_mutex);
-    const bool running = (plc_state == PLC_STATE_RUNNING);
-    if (running) plc_state = PLC_STATE_SAFE_STOPPED;
-    pthread_mutex_unlock(&state_mutex);
-    return running;
-}
-
-extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
-{
-    (void)task_idx;
-    (void)timeout_ms;
-    return false;
-}
-
-extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
-{
-    (void)task_idx;
-    (void)timeout_ms;
-    return false;
-}
-
-extern "C" bool plc_boot_from_hold_file(void)
-{
-    return false;
+    return g_start_gate.load(std::memory_order_acquire);
 }
 
 extern "C" bool plc_safe_stop_runtime_restarted(void)
 {
+    return g_restarted.load(std::memory_order_acquire);
+}
+
+extern "C" bool plc_request_safe_stop(const char *reason)
+{
+    if (!g_dispatcher_live.load(std::memory_order_acquire)) return false;
+    pthread_mutex_lock(&state_mutex);
+    std::snprintf(g_safe_stop_reason, sizeof g_safe_stop_reason, "%s", reason ? reason : "");
+    pthread_mutex_unlock(&state_mutex);
+    g_safe_stop_requested.store(true, std::memory_order_release);
+    return true;
+}
+
+/* ---- Run control: the hold the debugger's halt will drive ---- */
+
+namespace {
+
+struct LocatedRanges
+{
+    size_t   n = 0;
+    uint32_t off[16];
+    uint32_t cnt[16];
+    bool     all = false;
+};
+
+/* Under plc_tasks_lock. False when the index names no task. */
+bool for_targets(size_t task_idx, const std::function<void(PlcTaskCtx *)> &fn)
+{
+    if (task_idx == PLC_ALL_TASKS)
+    {
+        for (size_t i = 0; i < plc_task_count; ++i) fn(&plc_tasks[i]);
+        return plc_task_count > 0;
+    }
+    if (task_idx >= plc_task_count) return false;
+    fn(&plc_tasks[task_idx]);
+    return true;
+}
+
+bool post_run_request(size_t task_idx, long req)
+{
+    pthread_mutex_lock(&plc_tasks_lock);
+    bool ok = for_targets(task_idx, [&](PlcTaskCtx *c) {
+        c->run_request.store(req, std::memory_order_release);
+    });
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return ok;
+}
+
+/* Polls until every target has the run state and, with idle, has finished its scan. */
+bool wait_run_state(size_t task_idx, long state, bool idle, int timeout_ms)
+{
+    const timespec poll = {0, 1000000L};
+    for (int waited = 0;; ++waited)
+    {
+        bool done = true;
+        pthread_mutex_lock(&plc_tasks_lock);
+        bool any = for_targets(task_idx, [&](PlcTaskCtx *c) {
+            if (c->run_state.load(std::memory_order_acquire) != state ||
+                (idle && c->alive.load(std::memory_order_acquire) && task_in_scan(c)))
+                done = false;
+        });
+        pthread_mutex_unlock(&plc_tasks_lock);
+        if (!any) return false;
+        if (done) return true;
+        if (waited >= timeout_ms) return false;
+        nanosleep(&poll, nullptr);
+    }
+}
+
+LocatedRanges ranges_of(size_t task_idx)
+{
+    LocatedRanges r;
+    r.all = (task_idx == PLC_ALL_TASKS);
+    if (r.all) return r;
+    pthread_mutex_lock(&plc_tasks_lock);
+    if (task_idx < plc_task_count)
+    {
+        auto *task = static_cast<strucpp::TaskInstance *>(plc_tasks[task_idx].task_handle);
+        for (size_t p = 0; p < task->program_count && r.n < 16; ++p)
+        {
+            task->programs[p]->located_range(&r.off[r.n], &r.cnt[r.n]);
+            ++r.n;
+        }
+    }
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return r;
+}
+
+/* Halt-one touches only the held task's outputs; config-scope globals only under all-stop. */
+bool output_in_scope(const halt_policy_output_t *o, void *ctx)
+{
+    const LocatedRanges *r = static_cast<const LocatedRanges *>(ctx);
+    if (r->all) return true;
+    for (size_t i = 0; i < r->n; ++i)
+        if (image_tables_located_output_at(r->off[i], r->cnt[i], (uint8_t)o->size, o->byte_index,
+                                           o->bit_index, false))
+            return true;
     return false;
+}
+
+}  // namespace
+
+extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
+{
+    if (plc_get_state() != PLC_STATE_RUNNING) return false;
+    if (!post_run_request(task_idx, PLC_TASK_REQ_HOLD)) return false;
+    if (!wait_run_state(task_idx, PLC_TASK_RUN_HELD, false, timeout_ms)) return false;
+    if (halt_policy_get()->kind == HALT_POLICY_SAFE)
+    {
+        /* After the held tasks' last copy-out, so the scan cannot overwrite a safe value. */
+        if (!wait_run_state(task_idx, PLC_TASK_RUN_HELD, true, timeout_ms)) return false;
+        LocatedRanges r = ranges_of(task_idx);
+        halt_policy_apply_safe(output_in_scope, &r);
+    }
+    return true;
+}
+
+extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
+{
+    if (plc_get_state() != PLC_STATE_RUNNING) return false;
+    /* Journaled before the release, so the resumed scan's copy-in reads the saved values. */
+    LocatedRanges r = ranges_of(task_idx);
+    halt_policy_restore_saved(output_in_scope, &r);
+    if (!post_run_request(task_idx, PLC_TASK_REQ_RESUME)) return false;
+    return wait_run_state(task_idx, PLC_TASK_RUN_RUNNING, false, timeout_ms);
+}
+
+/* ---- Boot with a hold file ---- */
+
+extern "C" bool plc_boot_from_hold_file(void)
+{
+    int64_t                       period = 0;
+    const output_hold_file_kind_t kind   = output_hold_file_read(&period);
+    if (kind == OUTPUT_HOLD_FILE_NONE) return false;
+
+    pthread_mutex_lock(&state_mutex);
+    g_start_gate.store(true, std::memory_order_seq_cst);
+    pthread_mutex_unlock(&state_mutex);
+    if (kind == OUTPUT_HOLD_FILE_GATE_ONLY)
+    {
+        log_warn("Safe-stop start gate restored: a start needs a user with control");
+        return false;
+    }
+
+    if (!plugin_driver)
+    {
+        log_error("Held outputs found but no plugin driver: they cannot be re-asserted");
+        return false;
+    }
+    if (plugin_driver_update_config(plugin_driver, "./plugins.conf") != 0 ||
+        plugin_driver_append_config(plugin_driver, "./vpp_plugins.conf") != 0 ||
+        plugin_driver_init(plugin_driver) != 0)
+    {
+        plugin_driver_cleanup_init(plugin_driver);
+        log_error("[PLUGIN]: plugins could not be brought up to re-assert the held outputs");
+        return false;
+    }
+
+    pthread_mutex_t *itm = image_tables_mutex();
+    pthread_mutex_lock(itm);
+    image_tables_fill_null_pointers();
+    output_hold_restore();
+    pthread_mutex_unlock(itm);
+    init_image_journal(itm);
+
+    pthread_mutex_lock(&state_mutex);
+    g_hold_outputs.store(true, std::memory_order_seq_cst);
+    plc_state = PLC_STATE_SAFE_STOPPED;
+    pthread_mutex_unlock(&state_mutex);
+    g_restarted.store(true, std::memory_order_release);
+    watchdog_set_fault_context(PLC_FAULT_CONTEXT_SAFE_STOPPED);
+
+    plugin_driver_start(plugin_driver);
+
+    g_programless_period_ns = period > 0 ? period : 20000000LL;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    if (pthread_create(&g_programless_thread, &attr, programless_hold_thread, nullptr) != 0)
+    {
+        /* Plugin threads still exchange the held image; only native cycle hooks are lost. */
+        log_error("Could not start the hold dispatcher: native cycle hooks will not run");
+    }
+    else
+    {
+        g_programless_active.store(true, std::memory_order_release);
+    }
+    pthread_attr_destroy(&attr);
+    char reason[PLC_SAFE_STOP_REASON_LEN];
+    output_hold_reason(reason, sizeof reason);
+    log_warn("PLC State: SAFE_STOPPED after a restart (%s): held outputs re-asserted", reason);
+    return true;
 }

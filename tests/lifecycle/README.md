@@ -35,7 +35,7 @@ sources, since `Makefile.strucpp` lists it as an explicit prerequisite:
 #define PROGRAM_MD5 "<md5 of program.st>"
 ```
 
-Run one group at a time with `SUITE_ONLY=crash|shutdown|phantom|switch|misc`, and
+Run one group at a time with `SUITE_ONLY=crash|shutdown|phantom|switch|misc|safestop`, and
 get a backtrace out of a crash with `SUITE_GDB=1` (needs `gdb` in the image).
 
 ## What the pieces are for

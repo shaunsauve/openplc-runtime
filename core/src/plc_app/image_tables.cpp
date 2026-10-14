@@ -101,6 +101,9 @@ namespace {
     // commit only changed outputs (dirty-diff). Sized to locatedVarsCount.
     uint64_t       *g_located_snapshot = nullptr;
     uint32_t        g_located_count    = 0;
+    // Output entries whose snapshot does not describe program storage: skipped by
+    // copy-in, committed unconditionally by the next copy-out. Set after a held restart.
+    uint8_t        *g_located_snapshot_invalid = nullptr;
 
     // Indices of VAR_GLOBAL ... AT entries in locatedVars[], built at
     // load by joining against the .so's locatedGlobals[] on POINTER
@@ -311,6 +314,8 @@ void image_tables_bind_located_vars(void)
     free(g_located_snapshot);
     g_located_snapshot =
         (uint64_t *)calloc(lv_count ? lv_count : 1, sizeof(uint64_t));
+    free(g_located_snapshot_invalid);
+    g_located_snapshot_invalid = (uint8_t *)calloc(lv_count ? lv_count : 1, 1);
 
     // Build the config-scope index list by pointer identity between
     // locatedVars[].pointer and locatedGlobals[]. No layout assumption.
@@ -484,6 +489,8 @@ uint64_t threaded_image_read(const strucpp::LocatedVar &v)
 // entry is actually moved.
 void copy_in_one(const strucpp::LocatedVar *lv, uint32_t k)
 {
+    // Held output: the program keeps its own initial value instead of the held one.
+    if (g_located_snapshot_invalid && g_located_snapshot_invalid[k]) return;
     uint64_t v = threaded_image_read(lv[k]);
     threaded_member_write(lv[k], v);
     if (g_located_snapshot) g_located_snapshot[k] = v;
@@ -494,7 +501,9 @@ void copy_out_one(const strucpp::LocatedVar *lv, uint32_t k)
     const strucpp::LocatedVar &v = lv[k];
     if (v.area == strucpp::LocatedArea::Input) return;  // %I is never committed
     uint64_t cur = threaded_member_read(v);
-    if (g_located_snapshot && cur == g_located_snapshot[k]) return;  // unchanged
+    const bool invalid = g_located_snapshot_invalid && g_located_snapshot_invalid[k];
+    if (invalid) g_located_snapshot_invalid[k] = 0;
+    else if (g_located_snapshot && cur == g_located_snapshot[k]) return;  // unchanged
     if (g_located_snapshot) g_located_snapshot[k] = cur;
     uint16_t idx = v.byte_index;
     bool out = (v.area == strucpp::LocatedArea::Output);
@@ -540,6 +549,40 @@ extern "C" void image_tables_threaded_copy_out(uint32_t offset, uint32_t count)
     uint32_t end = offset + count;
     if (end > g_located_count) end = g_located_count;
     for (uint32_t k = offset; k < end; ++k) copy_out_one(lv, k);
+}
+
+extern "C" void image_tables_invalidate_output_snapshot(void)
+{
+    if (!g_located_snapshot_invalid || !ext_strucpp_get_located_vars) return;
+    const strucpp::LocatedVar *lv = ext_strucpp_get_located_vars();
+    for (uint32_t k = 0; k < g_located_count; ++k)
+        if (lv[k].area == strucpp::LocatedArea::Output) g_located_snapshot_invalid[k] = 1;
+}
+
+extern "C" bool image_tables_located_output_at(uint32_t offset, uint32_t count, uint8_t size,
+                                               uint16_t byte_index, uint8_t bit_index,
+                                               bool config_globals)
+{
+    if (!ext_strucpp_get_located_vars) return false;
+    const strucpp::LocatedVar *lv = ext_strucpp_get_located_vars();
+    auto match = [&](uint32_t k) {
+        const strucpp::LocatedVar &v = lv[k];
+        return v.area == strucpp::LocatedArea::Output && (uint8_t)v.size == size &&
+               v.byte_index == byte_index &&
+               (v.size != strucpp::LocatedSize::Bit || v.bit_index == bit_index);
+    };
+    if (config_globals)
+    {
+        for (uint32_t j = 0; j < g_located_globals_n; ++j)
+            if (g_located_globals_idx[j] < g_located_count && match(g_located_globals_idx[j]))
+                return true;
+        return false;
+    }
+    uint32_t end = offset + count;
+    if (end > g_located_count) end = g_located_count;
+    for (uint32_t k = offset; k < end; ++k)
+        if (match(k)) return true;
+    return false;
 }
 
 // Config-scope VAR_GLOBAL AT. Not covered by any program's
@@ -635,6 +678,8 @@ void image_tables_clear_null_pointers(void)
     free(g_located_snapshot);
     g_located_snapshot = nullptr;
     g_located_count    = 0;
+    free(g_located_snapshot_invalid);
+    g_located_snapshot_invalid = nullptr;
     free(g_located_globals_idx);
     g_located_globals_idx = nullptr;
     g_located_globals_n   = 0;

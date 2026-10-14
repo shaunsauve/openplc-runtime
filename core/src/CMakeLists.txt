@@ -46,6 +46,8 @@ add_executable(plc_main
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/plc_retain.cpp
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/plc_retain_file_store.cpp
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/plc_state_manager.cpp
+    ${CMAKE_SOURCE_DIR}/core/src/plc_app/plc_output_hold.cpp
+    ${CMAKE_SOURCE_DIR}/core/src/drivers/plugins/native/cjson/cJSON.c
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/plc_switch.c
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/plcapp_manager.c
     ${CMAKE_SOURCE_DIR}/core/src/plc_app/scan_cycle_manager.c
@@ -62,6 +64,7 @@ add_executable(plc_main
 target_link_libraries(plc_main
     dl
     pthread
+    m
     ${PYTHON_LIBRARIES}
 )
 

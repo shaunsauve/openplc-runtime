@@ -121,8 +121,8 @@ void output_hold_file_flush(void);
 /** @brief Record why the safe-stop happened. Kept until the hold is cleared. */
 void output_hold_set_reason(const char *reason);
 
-/** @brief The safe-stop reason, or "" when none. */
-const char *output_hold_reason(void);
+/** @brief Copy the safe-stop reason ("" when none) into out. */
+void output_hold_reason(char *out, size_t len);
 
 /** @brief Note that a task had to be aborted during the safe-stop entry. */
 void output_hold_note_task_fault(void);
@@ -203,9 +203,11 @@ typedef bool (*halt_policy_scope_fn)(const halt_policy_output_t *out, void *ctx)
 void halt_policy_apply_safe(halt_policy_scope_fn in_scope, void *ctx);
 
 /**
- * @brief Journal the saved values of every applied output back, so no safe value outlives the halt.
+ * @brief Journal the saved value of each applied, in-scope output back.
+ *
+ * No safe value outlives the halt.
  */
-void halt_policy_restore_saved(void);
+void halt_policy_restore_saved(halt_policy_scope_fn in_scope, void *ctx);
 
 /**
  * @brief Journal the safe value of every configured output (safe-stop entry, all-stop scope).

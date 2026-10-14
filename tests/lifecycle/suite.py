@@ -13,6 +13,7 @@ scores the pristine branch and the fixed one.
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -410,6 +411,53 @@ def test_switch_readable_and_interlock():
     rt.kill()
 
 
+# ------------------------------------- safe-stop start gate across a restart
+HOLD = "/var/lib/openplc-runtime/safe_stop.hold"
+
+
+def write_gate_only_hold():
+    """The file an explicit STOP from SAFE_STOPPED leaves (plc_output_hold.cpp layout)."""
+    hdr = struct.pack("<8sIIqI64s36s", b"OPLCHOLD", 1, 1, 0, 0, b"e2e", b"")
+    h = 14695981039346656037
+    for byte in hdr:
+        h = ((h ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    os.makedirs(os.path.dirname(HOLD), exist_ok=True)
+    with open(HOLD, "wb") as f:
+        f.write(hdr + struct.pack("<Q", h))
+
+
+def test_safe_stop_gate():
+    """A059/A208: after a safe-stop the gate survives a restart; only a grant starts the PLC."""
+    banner("safe-stop start gate (A059, A208)")
+    set_switch("RUN")
+    write_gate_only_hold()
+    rt = Runtime("safestop", init_ms=200)
+    time.sleep(3.0)
+    st, _ = wait_final()
+    record("hold", "boot with the gate set does not auto-start", st == "STATUS:STOPPED", st)
+    r = cmd("START")
+    record("hold", "bare START refused", r == "START:ERROR_SAFE_STOPPED", r)
+    st, _ = wait_final()
+    record("hold", "refused START leaves STOPPED", st == "STATUS:STOPPED", st)
+    r = cmd("START_AUTHORISED:e2e")
+    st, _ = wait_final()
+    record("hold", "granted START runs the program", r == "START:OK" and st == "STATUS:RUNNING",
+           f"{r} -> {st}")
+    time.sleep(1.0)
+    record("hold", "first scan clears the gate and its file", not os.path.exists(HOLD))
+    cmd("STOP")
+    wait_final()
+    r = cmd("START")
+    st, _ = wait_final()
+    record("hold", "plain START works once the gate is cleared",
+           r == "START:OK" and st == "STATUS:RUNNING", f"{r} -> {st}")
+    if "granted by e2e" not in rt.journal():
+        record("hold", "the grant is logged with its user", False)
+    cmd("STOP")
+    wait_final()
+    rt.kill()
+
+
 ONLY = os.environ.get("SUITE_ONLY", "")
 
 
@@ -424,6 +472,7 @@ run("shutdown", test_shutdown_midstart, signal.SIGTERM, "SIGTERM")
 run("phantom", test_phantom_stop)
 run("switch", test_switch_intent)
 run("misc", test_switch_readable_and_interlock)
+run("safestop", test_safe_stop_gate)
 
 print("\n=== summary")
 by_finding = {}

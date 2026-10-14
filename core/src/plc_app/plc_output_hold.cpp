@@ -23,6 +23,7 @@ extern "C" {
 #include "journal_buffer.h"
 #include "plc_output_hold.h"
 #include "utils/log.h"
+#include "utils/rt_mutex.h"
 #include "utils/utils.h"
 
 namespace {
@@ -38,10 +39,19 @@ struct HeldOutputs
 
 HeldOutputs       g_held;
 std::atomic<bool> g_held_valid{false};
+/* Copied at capture: the file thread must not read the .so's pointer while an unload clears it. */
+char              g_held_md5[36];
 
 const char *g_hold_path = PLC_SAFE_STOP_HOLD_PATH;
 
-char              g_reason[PLC_SAFE_STOP_REASON_LEN];
+/* The dispatcher writes the reason, the file thread reads it: PI mutex, held for a copy only. */
+char            g_reason[PLC_SAFE_STOP_REASON_LEN];
+pthread_mutex_t g_reason_mu = PTHREAD_MUTEX_INITIALIZER;
+
+__attribute__((constructor)) void reason_mutex_init_pi(void)
+{
+    rt_mutex_upgrade_static(&g_reason_mu, "hold_reason_mutex");
+}
 std::atomic<bool> g_task_faulted{false};
 
 halt_policy_t g_policy;
@@ -207,6 +217,8 @@ extern "C" void output_hold_capture(void)
         g_held.dint_q[i] = dint_output[i] ? *dint_output[i] : 0;
         g_held.lint_q[i] = lint_output[i] ? *lint_output[i] : 0;
     }
+    std::snprintf(g_held_md5, sizeof g_held_md5, "%s",
+                  ext_strucpp_program_md5 ? ext_strucpp_program_md5 : "");
     g_held_valid.store(true, std::memory_order_release);
 }
 
@@ -246,12 +258,17 @@ extern "C" const char *output_hold_file_path(void)
 
 extern "C" void output_hold_set_reason(const char *reason)
 {
+    pthread_mutex_lock(&g_reason_mu);
     std::snprintf(g_reason, sizeof g_reason, "%s", reason ? reason : "");
+    pthread_mutex_unlock(&g_reason_mu);
 }
 
-extern "C" const char *output_hold_reason(void)
+extern "C" void output_hold_reason(char *out, size_t len)
 {
-    return g_reason;
+    if (!out || len == 0) return;
+    pthread_mutex_lock(&g_reason_mu);
+    std::snprintf(out, len, "%s", g_reason);
+    pthread_mutex_unlock(&g_reason_mu);
 }
 
 extern "C" void output_hold_note_task_fault(void)
@@ -274,9 +291,8 @@ extern "C" int output_hold_file_write(output_hold_file_kind_t kind, int64_t peri
     hdr.kind         = with_values ? OUTPUT_HOLD_FILE_VALUES : OUTPUT_HOLD_FILE_GATE_ONLY;
     hdr.period_ns    = period_ns;
     hdr.task_faulted = output_hold_task_faulted() ? 1 : 0;
-    std::snprintf(hdr.reason, sizeof hdr.reason, "%s", g_reason);
-    std::snprintf(hdr.program_md5, sizeof hdr.program_md5, "%s",
-                  ext_strucpp_program_md5 ? ext_strucpp_program_md5 : "");
+    output_hold_reason(hdr.reason, sizeof hdr.reason);
+    std::memcpy(hdr.program_md5, g_held_md5, sizeof hdr.program_md5);
 
     uint64_t sum = fnv1a(kFnvBasis, &hdr, sizeof hdr);
     if (with_values) sum = fnv1a(sum, &g_held, sizeof g_held);
@@ -346,7 +362,9 @@ extern "C" output_hold_file_kind_t output_hold_file_read(int64_t *period_ns)
     }
 
     hdr.reason[sizeof hdr.reason - 1] = '\0';
+    hdr.program_md5[sizeof hdr.program_md5 - 1] = '\0';
     output_hold_set_reason(hdr.reason);
+    std::memcpy(g_held_md5, hdr.program_md5, sizeof g_held_md5);
     if (hdr.task_faulted) output_hold_note_task_fault();
     if (period_ns) *period_ns = hdr.period_ns;
     if (!values) return OUTPUT_HOLD_FILE_GATE_ONLY;
@@ -435,17 +453,17 @@ extern "C" int halt_policy_load(const char *path)
         if (!root) break;
         const cJSON *pol = cJSON_GetObjectItemCaseSensitive(root, "policy");
         if (!cJSON_IsString(pol)) break;
-        if (std::strcmp(pol->valuestring, "hold") == 0)
-        {
-            rc = 0;
-            break;
-        }
-        if (std::strcmp(pol->valuestring, "safe") != 0) break;
-        const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "safe");
-        if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > PLC_HALT_POLICY_MAX_OUTPUTS) break;
         halt_policy_t p{};
-        p.kind     = HALT_POLICY_SAFE;
-        bool valid = true;
+        if (std::strcmp(pol->valuestring, "safe") == 0)
+            p.kind = HALT_POLICY_SAFE;
+        else if (std::strcmp(pol->valuestring, "hold") != 0)
+            break;
+        /* The list is kept under hold too, for the read-back; only safe applies it. */
+        const cJSON *list = cJSON_GetObjectItemCaseSensitive(root, "safe");
+        if (list &&
+            (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > PLC_HALT_POLICY_MAX_OUTPUTS))
+            break;
+        bool         valid = true;
         const cJSON *e;
         cJSON_ArrayForEach(e, list)
         {
@@ -497,12 +515,12 @@ extern "C" void halt_policy_apply_safe(halt_policy_scope_fn in_scope, void *ctx)
         if (g_policy.outputs[i].applied) journal_value(g_policy.outputs[i], g_policy.outputs[i].safe_value);
 }
 
-extern "C" void halt_policy_restore_saved(void)
+extern "C" void halt_policy_restore_saved(halt_policy_scope_fn in_scope, void *ctx)
 {
     for (size_t i = 0; i < g_policy.count; ++i)
     {
         halt_policy_output_t &o = g_policy.outputs[i];
-        if (!o.applied) continue;
+        if (!o.applied || (in_scope && !in_scope(&o, ctx))) continue;
         journal_value(o, o.saved_value);
         o.applied = false;
     }

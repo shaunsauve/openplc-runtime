@@ -165,6 +165,13 @@ typedef void (*plugin_set_switch_position_func_t)(int position);
  * driven from there would freeze showing RUNNING exactly when it needs to show
  * STOPPED.
  *
+ * SAFE_STOPPED reports 0 (STOPPED): no program executes, but the outputs are held
+ * at their last values and cycle_start/cycle_end keep firing in pairs. A plugin
+ * must keep exchanging the image in that state; one that gates its I/O on
+ * RUNNING would stop sending the held outputs. In SAFE_STOPPED and while tasks
+ * are halted, hooks may read the image under image_lock and write inputs through
+ * the journal, never output slots directly.
+ *
  * IMPORTANT (applies to every field of plugin_runtime_args_t): the runtime
  * frees the args pointer as soon as init() returns. Copy the struct BY VALUE
  * during init -- `memcpy(&my_args, args, sizeof(plugin_runtime_args_t))` --

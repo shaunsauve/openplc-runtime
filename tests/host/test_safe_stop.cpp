@@ -489,8 +489,12 @@ static bool safe_stop(void)
 static void case_halt_holds_outputs(void)
 {
     g_case = "A049 hold";
-    write_policy("{\"policy\":\"hold\"}");
+    /* A configured list under hold is read back but never applied. */
+    write_policy("{\"policy\":\"hold\",\"safe\":[{\"location\":\"%QW1\",\"value\":7}]}");
     CHECK(start_plain(), "plain START from STOPPED did not run");
+    CHECK(halt_policy_get()->kind == HALT_POLICY_HOLD && halt_policy_get()->count == 1,
+          "policy read-back: kind %d count %zu, want hold with 1 listed output",
+          (int)halt_policy_get()->kind, halt_policy_get()->count);
     Out held = run_with_input(1234);
 
     CHECK(plc_run_control_hold(PLC_ALL_TASKS, 1000), "hold was not applied");

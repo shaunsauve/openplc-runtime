@@ -100,6 +100,25 @@ extern "C"
      */
     void image_tables_zero_outputs(void);
 
+    /**
+     * @brief Mark every located output's copy-in snapshot invalid.
+     *
+     * Until a task's next copy-out, its copy-in leaves those program members at the
+     * program's own values, and that copy-out commits every output even if equal to
+     * the snapshot. Used after restoring held outputs on a restart. Caller holds the
+     * image-tables mutex.
+     */
+    void image_tables_invalidate_output_snapshot(void);
+
+    /**
+     * @brief True when a located %Q entry of the given size (HALT_OUT_* order) and address
+     *        lies in locatedVars[offset, offset+count), or, with config_globals, is a
+     *        configuration-scope located global.
+     */
+    bool image_tables_located_output_at(uint32_t offset, uint32_t count, uint8_t size,
+                                        uint16_t byte_index, uint8_t bit_index,
+                                        bool config_globals);
+
     pthread_mutex_t *image_tables_mutex(void);
 
     void image_lock(void);

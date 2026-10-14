@@ -281,24 +281,31 @@ def _wait_for_plc_idle(runtime_manager: RuntimeManager, timeout_s: float) -> boo
 
 
 def ensure_plc_stopped(runtime_manager: RuntimeManager, timeout_s: float) -> tuple[bool, bool]:
-    """Stop the PLC if it is running and wait until it has stopped.
+    """Stop the PLC if a program is loaded and wait until it has stopped.
+
+    RUNNING, SAFE_STOPPED and ERROR may all have a program loaded, so each is sent STOP. From
+    ERROR the runtime answers STOP:ERROR when nothing is held, which counts as stopped.
 
     Returns (stopped, was_running). stopped is False when the PLC still runs or is still in a
-    transition after timeout_s. A runtime that cannot be reached counts as stopped: no
-    program runs.
+    transition after timeout_s. was_running is True only for RUNNING. A runtime that cannot
+    be reached counts as stopped: no program runs.
     """
     if not _wait_for_plc_idle(runtime_manager, timeout_s):
         return False, False
-    if "RUNNING" not in (runtime_manager.status_plc() or "").upper():
+    status = (runtime_manager.status_plc() or "").upper()
+    was_running = "STATUS:RUNNING" in status
+    if not any(state in status for state in ("RUNNING", "SAFE_STOPPED", "ERROR")):
         return True, False
-    runtime_manager.stop_plc()
+    reply = (runtime_manager.stop_plc() or "").upper()
+    if "ERROR" in status and "STOP:OK" not in reply:
+        return True, False
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         resp = (runtime_manager.status_plc() or "").upper()
-        if "RUNNING" not in resp and "TRANSITIONING" not in resp:
-            return True, True
+        if not any(state in resp for state in ("RUNNING", "SAFE_STOPPED", "TRANSITIONING")):
+            return True, was_running
         time.sleep(0.1)
-    return False, True
+    return False, was_running
 
 
 def validate_vpp_plugins_conf(conf_path: str, runtime_root: str, vpp_build_dir: str) -> tuple[bool, str]:
