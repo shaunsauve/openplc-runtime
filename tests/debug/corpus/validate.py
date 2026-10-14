@@ -7,7 +7,9 @@ Checks, in order:
   2. Oracle semantics the schema cannot express: scenario id and corpus match the
      path, criteria are cited by the program header, `@MARKER` lines resolve once
      in the program sources, files and tasks exist, every `~ref` has an earlier
-     `~capture`, and a runtime scenario reads the plant at least once.
+     `~capture`, a runtime scenario reads the plant at least once, argument symbols
+     are in the vocabulary (a `~build` variant exists), and `client` is used only
+     where it means something. Loop bodies are checked as steps, in order.
   3. Program headers: corpus name, criteria, FC tags, and the scan witness
      contract (one per task, first statement of the task's first program).
   4. Optional cross-checks: --acceptance (header criteria equal the criteria that
@@ -337,6 +339,48 @@ def walk(node: Json, path: str = "$") -> Iterator[Tuple[str, Json]]:
 
 
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
+TOKENS = {"valid", "none", "forged", "expired"}
+
+
+def flat_steps(steps: Json, prefix: str = "steps") -> Iterator[Tuple[str, Json]]:
+    """Every step with its path; a loop contributes its body, in order, not itself."""
+    for i, step in enumerate(steps if isinstance(steps, list) else []):
+        where = f"{prefix}[{i}]"
+        if isinstance(step, dict) and "loop" in step:
+            yield from flat_steps(step.get("steps"), f"{where}.steps")
+        else:
+            yield where, step
+
+
+def symbol_problem(node: Dict[str, Json], prog: "Program") -> Optional[str]:
+    """README § Argument symbols: None when `node` is a well-formed symbol."""
+    keys = set(node)
+    if "~ref" in keys and keys <= {"~ref", "~add"}:
+        return None
+    if keys == {"~build"}:
+        what, _, variant = str(node["~build"]).partition(":")
+        if what != "identity":
+            return f"unknown ~build symbol {what!r}"
+        if variant and not (SECONDARY.match(variant) and variant in prog.sources):
+            return f"~build identity names {variant!r}, which is not a variant-*.st of {prog.name}"
+        return None
+    if keys == {"~lines"} or keys == {"~leaves", "~count"}:
+        return None
+    if keys == {"~token"}:
+        return None if node["~token"] in TOKENS else f"~token must be one of {sorted(TOKENS)}"
+    return f"unknown argument symbol {sorted(keys)}"
+
+
+def client_problem(step: Dict[str, Json]) -> Optional[str]:
+    if "client" not in step:
+        return None
+    if "observe" in step and step["observe"] != "session":
+        return f"client applies to session reads, not observe {step['observe']!r}"
+    if "inject" in step and step["inject"] != "killClient":
+        return f"client applies to killClient, not inject {step['inject']!r}"
+    if step.get("thenContinue") is True and not (isinstance(step["client"], str) and step["client"] != "*"):
+        return "thenContinue needs exactly one client stream"
+    return None
 
 
 def marker_lines(prog: Program, marker: str, programs: Dict[str, Program],
@@ -377,11 +421,19 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
     tasks = set().union(*(m.tasks for m in members))
     captured: Set[str] = set()
     plant_reads = 0
-    steps = doc.get("steps")
-    for i, step in enumerate(steps if isinstance(steps, list) else []):
+    for here, step in flat_steps(doc.get("steps")):
         if isinstance(step, dict) and step.get("observe") == "plant":
             plant_reads += 1
-        for where, node in walk(step, f"steps[{i}]"):
+        if isinstance(step, dict):
+            bad = client_problem(step)
+            if bad:
+                out.append(f"{here}: {bad}")
+            for where, node in walk(step.get("args"), f"{here}.args"):
+                if isinstance(node, dict) and node and all(k.startswith("~") for k in node):
+                    bad = symbol_problem(node, prog)
+                    if bad:
+                        out.append(f"{where}: {bad}")
+        for where, node in walk(step, here):
             if isinstance(node, dict):
                 ref = node.get("~ref")
                 if isinstance(ref, str) and ref not in captured:
@@ -411,10 +463,10 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                 if isinstance(task, str) and tasks and task not in tasks:
                     out.append(f"{where}: task {task!r} is not a task of {prog.name}")
         expect = step.get("expect") if isinstance(step, dict) and "observe" in step else None
-        for key in ("witness", "scanDelta", "vtMs"):
+        for key in ("witness", "scanDelta", "vtMs", "maxGapMs"):
             per_task = expect.get(key) if isinstance(expect, dict) else None
             if isinstance(per_task, dict) and tasks:
-                out.extend(f"steps[{i}].expect.{key}: task {t!r} is not a task of {prog.name}" for t in per_task if t not in tasks)
+                out.extend(f"{here}.expect.{key}: task {t!r} is not a task of {prog.name}" for t in per_task if t not in tasks)
     if doc.get("kind") == "runtime" and plant_reads == 0:
         out.append("a runtime scenario must read the plant at least once (observe: plant)")
     return out

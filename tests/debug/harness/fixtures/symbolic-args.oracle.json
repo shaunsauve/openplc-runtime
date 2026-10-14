@@ -1,0 +1,24 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/symbolic-args",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A014"],
+  "title": "Runner fixture: build identities, captured values and generated line lists as request arguments",
+  "notes": "Runs against fake_endpoint.py only (test_runner.py).",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "args": {"identity": {"~build": "identity:variant-stale.st"}},
+     "expect": {"success": false, "error": "STALE_BUILD", "body": {"reason": "source"}}},
+    {"request": "initialize", "args": {"identity": {"~build": "identity"}},
+     "expect": {"success": true, "body": {"capabilities": {"maxBreakpoints": {"~capture": "max"}}, "resumeToken": {"~capture": "tok"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": {"~lines": {"~ref": "max", "~add": 1}}},
+     "expect": {"success": false, "error": "LIMIT_EXCEEDED"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": {"~lines": {"~ref": "max"}}}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WITNESS"}}},
+    {"client": "c2", "request": "initialize", "args": {"role": "observer", "resumeToken": {"~ref": "tok"}},
+     "expect": {"success": true, "body": {"resumed": true}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}}
+  ]
+}

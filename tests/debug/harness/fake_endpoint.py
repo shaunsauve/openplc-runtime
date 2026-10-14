@@ -1,16 +1,24 @@
 """Tests only: a simulated runtime running corpus:plant-io at statement granularity, with the
-endpoint, plant and clock seams of interfaces.py. Time is simulated, so a 30 s halt costs
+endpoint, plant, clock and build-output seams of interfaces.py. Time is simulated, so a 30 s halt costs
 milliseconds; nothing here sleeps.
 
 Just enough of ADR-003 for the plant-io run-control scenarios: initialize, setBreakpoints,
 continue, pause, next, cycleStep, stop, stackTrace, variables/evaluate by path; events stopped,
-continued, runState. Anything else answers UNSUPPORTED. ADR-004 arithmetic: the plant sees the
+continued, runState. Anything else answers UNSUPPORTED. Several client streams: one controller,
+observers refused control with NOT_CONTROLLER; at most MAX_BREAKPOINTS line breakpoints; an
+`identity` other than the build's is refused STALE_BUILD. The build outputs are a debug info
+generated from the program's markers (one probe per marked line). ADR-004 arithmetic: the plant sees the
 last complete scan (copy-out at scan end); virtual time is completed scans x interval.
 
 Seeded defects (FakeWorld(defects={...})):
   late_stop          pause and cycleStep take effect one scan late
   wrong_reason       a statement step reports reason "breakpoint"
   missing_continued  `continued` is never sent
+  observer_controls  an observer's run-control request is obeyed
+  events_to_first_only  events reach only the first client stream
+  skip_identity_check  initialize accepts any client identity
+  no_bp_limit        setBreakpoints accepts more than MAX_BREAKPOINTS
+  short_debug_info   the debug info omits the last probe
 
 See also:
   tests/debug/harness/test_runner.py - the red/green proof that uses this fake.
@@ -24,11 +32,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Set
 
+from build_views import OBJECT_CODE_BLOCKED
 from interfaces import Blocked, Json, JsonObj, PlantSample
 
 PROGRAM = Path(__file__).resolve().parent.parent / "corpus" / "plant-io" / "program.st"
 TASK = "Main"
-DEFECTS = {"late_stop", "wrong_reason", "missing_continued"}
+DEFECTS = {
+    "late_stop",
+    "wrong_reason",
+    "missing_continued",
+    "observer_controls",
+    "events_to_first_only",
+    "skip_identity_check",
+    "no_bp_limit",
+    "short_debug_info",
+}
+MAX_BREAKPOINTS = 4
+IDENTITY = {"md5": "fake-md5", "buildId": "fake-build"}
+VARIANT_IDENTITY = {"variant-stale.st": {"md5": "fake-md5-stale", "buildId": "fake-build-stale"}}
+CONTROL = {"setBreakpoints", "continue", "pause", "next", "stepIn", "stepOut", "cycleStep", "stop"}
 
 Vars = Dict[str, Json]
 OUTPUTS = {
@@ -172,6 +194,9 @@ class FakeWorld:
     def plant(self) -> "FakePlant":
         return FakePlant(self)
 
+    def build(self) -> "FakeBuild":
+        return FakeBuild(self)
+
     def now_ms(self) -> float:
         return self.t
 
@@ -283,7 +308,8 @@ class FakeWorld:
         self._emit("runState", {"state": state, "tasks": [TASK], "by": self.by, "since": self.t})
 
     def _emit(self, name: str, body: JsonObj) -> None:
-        for s in self.sessions:
+        targets = self.sessions[:1] if "events_to_first_only" in self.defects else self.sessions
+        for s in targets:
             s.inbox.append({"event": name, "body": body})
 
     # -- requests
@@ -292,26 +318,18 @@ class FakeWorld:
         late = 1 if "late_stop" in self.defects else 0
         halted = self.halted is not None
         if command == "initialize":
-            self.by = "fake-user"
-            return _ok(
-                {
-                    "protocol": "1.0",
-                    "comparison": "match",
-                    "haltPolicy": self.halt_policy,
-                    "params": {"P1": 2, "P2": 15},
-                    "resumeToken": "fake-token",
-                    "image": {"md5": "fake", "buildId": "fake"},
-                    "capabilities": {
-                        "probes": True,
-                        "cycleStep": True,
-                        "control": True,
-                        "modify": False,
-                    },
-                }
-            )
+            return self._initialize(session, args)
+        if (
+            command in CONTROL
+            and session.role != "controller"
+            and "observer_controls" not in self.defects
+        ):
+            return _err("NOT_CONTROLLER")
         if command == "setBreakpoints":
             lines = args.get("lines")
             wanted = [_i(x) for x in lines] if isinstance(lines, list) else []
+            if len(wanted) > MAX_BREAKPOINTS and "no_bp_limit" not in self.defects:
+                return _err("LIMIT_EXCEEDED", {"details": {"limit": MAX_BREAKPOINTS}})
             valid = {loc["line"] for loc in self.loc.values()}
             self.breakpoints = {ln for ln in wanted if ln in valid}
             return _ok({"breakpoints": [{"verified": ln in valid, "line": ln} for ln in wanted]})
@@ -363,6 +381,65 @@ class FakeWorld:
             return _ok({"value": self.vars[name]})
         return _err("UNSUPPORTED")
 
+    def _initialize(self, session: "FakeSession", args: JsonObj) -> JsonObj:
+        image = {**IDENTITY, "buildTime": "2026-01-01T00:00:00Z", "sourceHash": "fake-sha"}
+        client = args.get("identity")
+        if (
+            isinstance(client, dict)
+            and client.get("md5") != IDENTITY["md5"]
+            and "skip_identity_check" not in self.defects
+        ):
+            return _err("STALE_BUILD", {"reason": "source", "image": image, "client": client})
+        session.role = str(args.get("role", "controller"))
+        session.initialized = True
+        if session.role == "controller":
+            self.by = "fake-user"
+        return _ok(
+            {
+                "protocol": "1.0",
+                "comparison": "match",
+                "haltPolicy": self.halt_policy,
+                "params": {"P1": 2, "P2": 15},
+                "resumeToken": "fake-token",
+                "resumed": args.get("resumeToken") == "fake-token",
+                "image": image,
+                "capabilities": {
+                    "probes": True,
+                    "maxBreakpoints": MAX_BREAKPOINTS,
+                    "cycleStep": True,
+                    "control": True,
+                    "modify": False,
+                },
+            }
+        )
+
+    def debug_info(self, variant: Optional[str]) -> JsonObj:
+        """ADR-002 D3 debug info, one probe per marked line of the program."""
+        if variant is not None and variant not in VARIANT_IDENTITY:
+            raise Blocked(f"fake build has no variant {variant}")
+        locs = sorted(self.loc.values(), key=lambda loc: _i(loc["line"]))
+        if "short_debug_info" in self.defects:
+            locs = locs[:-1]
+        lines = [loc["line"] for loc in locs]
+        return {
+            "format": "strucpp-debug-info",
+            "major": 1,
+            "minor": 0,
+            "build": {**(VARIANT_IDENTITY[variant] if variant else IDENTITY), "probes": True},
+            "files": [{"id": 0, "path": "program.st", "library": None, "generated": False}],
+            "pous": [{"id": 0, "name": "PlantIO", "kind": "program", "generated": False}],
+            "probes": {
+                "pou": [0 for _ in locs],
+                "file": [0 for _ in locs],
+                "line": lines,
+                "col": [loc["col"] for loc in locs],
+                "flags": [0 for _ in locs],
+                "origin": [-1 for _ in locs],
+            },
+            "lines": {"0": lines},
+            "instances": {"path": ["PROG0"], "typeId": [0]},
+        }
+
     def status(self) -> JsonObj:
         return {
             "state": self.state,
@@ -370,7 +447,9 @@ class FakeWorld:
             "by": self.by,
             "since": self.since,
             "staleness_ms": 0,
-            "sessions": [{"user": "fake-user", "role": "controller"} for _ in self.sessions],
+            "sessions": [
+                {"user": "fake-user", "role": s.role} for s in self.sessions if s.initialized
+            ],
         }
 
 
@@ -378,11 +457,12 @@ def _ok(body: JsonObj) -> JsonObj:
     return {"type": "response", "success": True, "body": body}
 
 
-def _err(code: str) -> JsonObj:
+def _err(code: str, body: Optional[JsonObj] = None) -> JsonObj:
     return {
         "type": "response",
         "success": False,
         "error": {"code": code, "message": f"fake: {code}"},
+        "body": body or {},
     }
 
 
@@ -390,6 +470,8 @@ class FakeSession:
     def __init__(self, world: FakeWorld) -> None:
         self.world = world
         self.inbox: List[JsonObj] = []
+        self.role = "none"
+        self.initialized = False
 
     def request(self, command: str, args: JsonObj) -> JsonObj:
         return self.world.handle(self, command, args)
@@ -401,6 +483,9 @@ class FakeSession:
     def close(self) -> None:
         if self in self.world.sessions:
             self.world.sessions.remove(self)
+
+    def kill(self) -> None:
+        self.close()
 
 
 class FakeEndpoint:
@@ -430,8 +515,11 @@ class FakeEndpoint:
     def log(self) -> JsonObj:
         return {}
 
-    def inject(self, kind: str, args: JsonObj) -> None:
+    def inject(self, kind: str, args: JsonObj) -> Json:
         raise Blocked(f"fake endpoint has no {kind} injection")
+
+    def credential(self, kind: str) -> Json:
+        return None if kind == "none" else f"fake-jwt.{kind}"
 
 
 class FakePlant:
@@ -455,3 +543,15 @@ class FakePlant:
 
     def history(self, since_ms: float) -> List[PlantSample]:
         return [s for s in self.world.samples if s.t_ms > since_ms]
+
+
+class FakeBuild:
+    def __init__(self, world: FakeWorld) -> None:
+        self.world = world
+
+    def read(self, corpus: str, kind: str, variant: Optional[str]) -> Json:
+        if kind == "objectCode":
+            raise Blocked(OBJECT_CODE_BLOCKED)
+        if corpus != "plant-io" or kind != "debugInfo":
+            raise Blocked(f"fake build has no {kind} for {corpus}")
+        return self.world.debug_info(variant)

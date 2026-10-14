@@ -1,6 +1,6 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "large-50k/load-and-footprint",
   "corpus": "large-50k",
   "kind": "build",
@@ -9,7 +9,7 @@
   "notes": "The load time and section sizes are measured by the bench instrument on the reference target; this oracle fixes what is compared.",
   "setup": {"build": {"probes": true, "path": "library"}},
   "steps": [
-    {"inspect": "debugMap", "expect": {"leaves": {"~ge": 50000}}},
+    {"inspect": "debugMap", "expect": {"leafCount": {"~ge": 50000}}},
     {"inspect": "debugInfo", "expect": {"loadMs": {"~le": 2000}, "probeCount": {"~capture": "n"}, "instanceCount": {"~ge": 200}}},
     {"inspect": "objectCode", "note": "bound (a) byte-flag probes: n x 1 B + 64 KiB; (b) A-prime: also + 1.25 x probe-off .text; the result names which",
      "expect": {"debugInfoStringsInBinary": 0, "addedBytes": {"~any": true}, "boundApplied": {"~oneOf": ["byte-flag", "a-prime"]}}}

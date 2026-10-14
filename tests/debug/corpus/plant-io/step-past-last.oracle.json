@@ -1,6 +1,6 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/step-past-last",
   "corpus": "plant-io",
   "kind": "runtime",
@@ -17,8 +17,9 @@
     {"request": "next", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@WITNESS", "col": 3}}},
     {"observe": "plant", "note": "scan k's outputs arrived before this stop", "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 3}}},
-    {"request": "next", "repeat": 7, "expect": {"success": true}},
-    {"event": "stopped", "repeat": 7, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"loop": 7, "steps": [
+      {"request": "next", "expect": {"success": true}},
+      {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}}]},
     {"request": "variables", "args": {"path": "PROG0.out_int"}, "note": "the new scan read the plant's new input", "expect": {"success": true, "body": {"value": 9}}}
   ]
 }

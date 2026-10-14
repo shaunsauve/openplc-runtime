@@ -1,0 +1,20 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/repeat-batch",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A036"],
+  "title": "Runner fixture: a request repeat is a batch, so a second run-control request meets NOT_HALTED",
+  "notes": "Runs against fake_endpoint.py only (test_runner.py). The loop form of the same steps is plant-io/cycle-step.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "repeat": 2, "expect": {"success": true}},
+    {"event": "stopped", "repeat": 2, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 2}}}}
+  ]
+}

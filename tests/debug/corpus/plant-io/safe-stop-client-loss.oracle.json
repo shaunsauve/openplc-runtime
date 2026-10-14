@@ -1,6 +1,6 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/safe-stop-client-loss",
   "corpus": "plant-io",
   "kind": "runtime",
@@ -22,7 +22,7 @@
     {"observe": "plant", "throughout": true, "note": "frozen scan count; nothing zeroed or reset",
      "expect": {"witness": {"Main": {"~ref": "w"}}, "outputs": {
        "%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QW100": 1235, "%QD1": {"~ref": "c"}}}},
-    {"request": "initialize", "note": "a new client, same runtime process",
+    {"client": "next", "request": "initialize", "note": "a new client, same runtime process",
      "expect": {"success": true, "body": {"safeStop": {"reason": "heartbeat_timeout", "user": {"~any": true}, "location": {"~any": true}, "time": {"~any": true}}}}},
     {"observe": "plant", "throughout": true, "expect": {"outputs": {"%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QW100": 1235}}}
   ]

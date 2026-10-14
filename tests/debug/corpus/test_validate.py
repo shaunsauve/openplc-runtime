@@ -73,6 +73,26 @@ def unknown_error_code(doc: Doc) -> None:
     _steps(doc)[0]["expect"] = {"success": False, "error": "STALE"}
 
 
+def unknown_arg_symbol(doc: Doc) -> None:
+    _steps(doc)[0]["args"] = {"identity": {"~nope": 1}}
+
+
+def missing_variant_identity(doc: Doc) -> None:
+    _steps(doc)[0]["args"] = {"identity": {"~build": "identity:variant-nope.st"}}
+
+
+def then_continue_on_all_clients(doc: Doc) -> None:
+    _steps(doc).append({"client": "*", "event": "stopped", "thenContinue": True})
+
+
+def ref_before_capture_in_loop(doc: Doc) -> None:
+    _steps(doc).insert(0, {"loop": 2, "steps": [{"observe": "plant", "expect": {"witness": {"Main": {"~ref": "zz"}}}}]})
+
+
+def client_on_plant_read(doc: Doc) -> None:
+    _steps(doc).append({"client": "c2", "observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}})
+
+
 ORACLE_DEFECTS: List[Tuple[str, Callable[[Doc], None], str]] = [
     ("bad stop reason", bad_reason, "steps[3]"),
     ("marker absent from source", missing_marker, "@NOPE"),
@@ -82,6 +102,11 @@ ORACLE_DEFECTS: List[Tuple[str, Callable[[Doc], None], str]] = [
     ("runtime scenario with no plant read", no_plant_read, "read the plant"),
     ("column not at a statement start", wrong_column, "not the start of a statement"),
     ("error code outside ADR-003's catalogue", unknown_error_code, "steps[0]"),
+    ("argument symbol outside the vocabulary", unknown_arg_symbol, "unknown argument symbol"),
+    ("identity of a variant that does not exist", missing_variant_identity, "variant-nope.st"),
+    ("thenContinue on several streams", then_continue_on_all_clients, "thenContinue"),
+    ("~ref in a loop body before its ~capture", ref_before_capture_in_loop, "no earlier ~capture"),
+    ("client on a plant read", client_on_plant_read, "client"),
 ]
 
 SOURCE_DEFECTS: List[Tuple[str, Tuple[str, str], str]] = [

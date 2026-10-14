@@ -1,6 +1,6 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "nested-fb-loop/step-sequence",
   "corpus": "nested-fb-loop",
   "kind": "runtime",
@@ -17,14 +17,16 @@
     {"request": "stepIn", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@MOTOR_FIRST", "col": 3},
       "stack": [{"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"}, {"pou": "Cell", "kind": "program", "instance": "PROG0"}]}},
-    {"request": "next", "repeat": 2, "expect": {"success": true}},
-    {"event": "stopped", "repeat": 2, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"loop": 2, "steps": [
+      {"request": "next", "expect": {"success": true}},
+      {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}}]},
     {"request": "stepIn", "note": "now at @MOTOR_PID; into the nested FB", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@PID_FIRST", "col": 3},
       "stack": [{"pou": "PID", "kind": "fb", "instance": "PROG0.motor1.pid"}, {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"},
                 {"pou": "Cell", "kind": "program", "instance": "PROG0"}]}},
-    {"request": "next", "repeat": 2, "expect": {"success": true}},
-    {"event": "stopped", "repeat": 2, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"loop": 2, "steps": [
+      {"request": "next", "expect": {"success": true}},
+      {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}}]},
     {"request": "stepIn", "note": "now at @PID_CALL; into the function", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@CLAMP_FIRST", "col": 3},
       "stack": [

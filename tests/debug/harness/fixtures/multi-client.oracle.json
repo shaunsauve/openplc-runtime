@@ -1,0 +1,24 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/multi-client",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A123"],
+  "title": "Runner fixture: named and grouped client streams, per-client requests and event counts",
+  "notes": "Runs against fake_endpoint.py only (test_runner.py); copied beside plant-io/program.st at test time.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"client": {"group": "obs", "count": 3}, "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"client": "*", "event": "stopped", "withinMs": 1000, "count": 4, "expect": {"reason": "breakpoint"}},
+    {"client": {"group": "obs"}, "request": "continue", "expect": {"success": false, "error": "NOT_CONTROLLER"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"client": {"group": "obs"}, "event": "continued", "withinMs": 500},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 3}}}}
+  ]
+}

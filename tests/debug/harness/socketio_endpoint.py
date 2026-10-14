@@ -95,8 +95,21 @@ class SocketIOEndpoint:
     def log(self) -> JsonObj:
         raise Blocked("no log read-back path is defined for the runtime yet")
 
-    def inject(self, kind: str, args: JsonObj) -> None:
+    def inject(self, kind: str, args: JsonObj) -> Json:
         raise Blocked(f"inject {kind}: fault injection (F154) not built")
+
+    def credential(self, kind: str) -> Json:
+        if kind == "none":
+            return None
+        if kind == "expired":
+            raise Blocked("an expired JWT needs the runtime's signing key, which the harness lacks")
+        if not self.token:
+            raise Blocked(f"credential {kind}: no --token given")
+        if kind == "forged":
+            # Same header and claims, signature replaced: verification must refuse it.
+            head, _, _sig = self.token.rpartition(".")
+            return f"{head}.Zm9yZ2Vk"
+        return self.token
 
 
 class SocketIOSession:
@@ -202,3 +215,9 @@ class SocketIOSession:
     def close(self) -> None:
         self.stop.set()
         self.sio.disconnect()
+
+    def kill(self) -> None:
+        # ASSUMED: python-engineio's abort drops the socket with no Socket.IO disconnect packet,
+        # which is what the runtime sees of a SIGKILLed client.
+        self.stop.set()
+        self.sio.eio.disconnect(abort=True)

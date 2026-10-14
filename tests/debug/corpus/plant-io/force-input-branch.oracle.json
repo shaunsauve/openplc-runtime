@@ -1,6 +1,6 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/force-input-branch",
   "corpus": "plant-io",
   "kind": "runtime",
@@ -18,8 +18,9 @@
     {"request": "cycleStep", "args": {"task": "Main"}, "note": "the forced input applies at the next copy-in, before logic (A114)", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@WITNESS"}}},
     {"request": "variables", "args": {"path": "PROG0.in_enable"}, "expect": {"success": true, "body": {"value": true, "forced": true}}},
-    {"request": "next", "repeat": 3, "expect": {"success": true}},
-    {"event": "stopped", "repeat": 3, "withinMs": 1000, "expect": {"reason": "step"}},
+    {"loop": 3, "steps": [
+      {"request": "next", "expect": {"success": true}},
+      {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}}]},
     {"request": "stepIn", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@THEN", "col": 5}}},
     {"request": "continue", "expect": {"success": true}},

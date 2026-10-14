@@ -3,11 +3,12 @@ per-step trace and a verdict, PASS, DIVERGE (first mismatch) or BLOCKED (cannot 
 
 Usage:
   python3 tests/debug/harness/runner.py [--endpoint URL] [--token JWT] [--insecure]
-      [--results PATH] [--trace] ORACLE_OR_DIR...
+      [--build-dir DIR] [--results PATH] [--trace] ORACLE_OR_DIR...
 Without --results nothing is written (dry run): the lines that would be appended are printed.
 
 See also:
-  tests/debug/harness/interfaces.py - Endpoint, Session, Plant and Clock seams, Blocked.
+  tests/debug/harness/interfaces.py - Endpoint, Session, Plant, Clock and BuildOutputs seams, Blocked.
+  tests/debug/harness/build_views.py - build directory reader, `inspect` views, build-derived symbols.
   tests/debug/harness/matchers.py - `~` matchers and captures.
   tests/debug/harness/socketio_endpoint.py - the real endpoint (ADR-003 /api/debug-session).
   tests/debug/harness/fake_endpoint.py - simulated endpoint and plant used by test_runner.py.
@@ -28,13 +29,15 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, cast
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, cast
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import build_views  # noqa: E402
 from interfaces import (  # noqa: E402
     Blocked,
+    BuildOutputs,
     Clock,
     Endpoint,
     Json,
@@ -42,12 +45,14 @@ from interfaces import (  # noqa: E402
     Plant,
     PlantSample,
     Session,
+    UnavailableBuild,
     UnavailablePlant,
     WallClock,
 )
-from matchers import MISSING, Captures, Mismatch, Observed, match  # noqa: E402
+from matchers import MISSING, Captures, Mismatch, Observed, is_matcher, match  # noqa: E402
 
 __all__ = [
+    "UnavailableBuild",
     "UnavailablePlant",
     "WallClock",
     "run_scenario",
@@ -62,7 +67,8 @@ POLL_MS = 5.0
 DEFAULT_WITHIN_MS = 5000.0
 MARKER = re.compile(r"^@[A-Za-z0-9_]+$")
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
-ACTIONS = ("request", "event", "noEvent", "plant", "wait", "observe", "inspect", "inject")
+ACTIONS = ("request", "event", "noEvent", "plant", "wait", "observe", "inspect", "inject", "loop")
+MAIN = "main"  # the stream a step without `client` acts on
 # stopped/event expectation key -> body key (ADR-003 D4 names the virtual time `vt`).
 EVENT_KEYS = {
     "reason": "reason",
@@ -79,7 +85,6 @@ class Diverge(Exception):
         super().__init__(reason)
         self.reason = reason
         self.mismatch = mismatch
-        self.offset = 0  # 1 when raised by the event half of an interleaved pair
 
 
 @dataclass
@@ -156,6 +161,23 @@ def _num(node: Json, default: float) -> float:
     return float(node) if isinstance(node, (int, float)) and not isinstance(node, bool) else default
 
 
+def _flat(steps: Json) -> Iterator[JsonObj]:
+    """Every step, loop bodies included."""
+    for step in steps if isinstance(steps, list) else []:
+        if isinstance(step, dict):
+            yield step
+            if "loop" in step:
+                yield from _flat(step.get("steps"))
+
+
+@dataclass
+class _Stream:
+    """One client stream and the events it received but no step has consumed yet."""
+
+    session: Session
+    inbox: List[Tuple[int, JsonObj]] = field(default_factory=list)
+
+
 class _Run:
     def __init__(
         self,
@@ -164,36 +186,54 @@ class _Run:
         endpoint: Endpoint,
         plant: Plant,
         clock: Clock,
+        build: BuildOutputs,
     ) -> None:
         self.doc = doc
+        self.corpus = str(doc.get("corpus", ""))
         self.table = table
         self.endpoint = endpoint
         self.plant = plant
         self.clock = clock
+        self.build = build
         self.setup = _obj(doc.get("setup"))
         self.captures: Captures = {}
-        self.inbox: List[Tuple[int, JsonObj]] = []
+        self.streams: Dict[str, _Stream] = {}  # insertion order = opening order
         self.arrivals = 0
-        self.session: Optional[Session] = None
         self.last_witness: Optional[Dict[str, int]] = None
         self.step_end_ms = clock.now_ms()
 
     # -- plumbing
 
-    def _session(self) -> Session:
-        if self.session is None:
-            self.session = self.endpoint.open_session()
-        return self.session
+    def _stream(self, name: str) -> _Stream:
+        if name not in self.streams:
+            self.streams[name] = _Stream(self.endpoint.open_session())
+        return self.streams[name]
+
+    def _clients(self, step: JsonObj) -> List[str]:
+        """The stream names a step acts on (README § Clients)."""
+        spec = step.get("client", MAIN)
+        if spec == "*":
+            names = list(self.streams)
+        elif isinstance(spec, str):
+            return [spec]
+        else:
+            group = str(_obj(spec).get("group"))
+            count = _obj(spec).get("count")
+            if isinstance(count, int):
+                return [f"{group}.{i}" for i in range(1, count + 1)]
+            names = [n for n in self.streams if n.startswith(group + ".")]
+        if not names:
+            raise Diverge(f"client {json.dumps(spec)} names no open stream")
+        return names
 
     def _drain(self) -> None:
-        if self.session is None:
-            return
-        for ev in self.session.events():
-            self.arrivals += 1
-            self.inbox.append((self.arrivals, ev))
+        for stream in self.streams.values():
+            for ev in stream.session.events():
+                self.arrivals += 1
+                stream.inbox.append((self.arrivals, ev))
 
-    def _request(self, command: str, args: JsonObj) -> JsonObj:
-        resp = self._session().request(command, args)
+    def _request(self, client: str, command: str, args: JsonObj) -> JsonObj:
+        resp = self._stream(client).session.request(command, args)
         self._drain()
         return resp
 
@@ -205,6 +245,55 @@ class _Run:
     def _sample(self) -> PlantSample:
         return self.plant.sample()
 
+    # -- argument symbols (README § Argument symbols)
+
+    def _args(self, node: Json, args: JsonObj) -> Json:
+        if is_matcher(node):
+            return self._symbol(cast(JsonObj, node), args)
+        if isinstance(node, dict):
+            return {k: self._args(v, args) for k, v in node.items()}
+        if isinstance(node, list):
+            return [self._args(v, args) for v in node]
+        return node
+
+    def _count_arg(self, node: Json, args: JsonObj, what: str) -> int:
+        value = self._args(node, args)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise Diverge(f"{what}: count {json.dumps(value)} is not a non-negative number")
+        return int(value)
+
+    def _symbol(self, sym: JsonObj, args: JsonObj) -> Json:
+        if "~ref" in sym:
+            name = str(sym["~ref"])
+            if name not in self.captures or isinstance(self.captures[name], type(MISSING)):
+                raise Diverge(f"argument ~ref {name!r}: nothing captured")
+            base = self.captures[name]
+            add = sym.get("~add", 0)
+            if not add:
+                return base
+            if isinstance(base, bool) or not isinstance(base, (int, float)):
+                raise Diverge(
+                    f"argument ~ref {name!r} ~add: captured {json.dumps(base)} is not a number"
+                )
+            return base + add if isinstance(add, (int, float)) else base
+        if "~build" in sym:
+            what, _, variant = str(sym["~build"]).partition(":")
+            if what != "identity":
+                raise Blocked(f"unknown ~build symbol {what!r}")
+            return build_views.identity(self.build, self.corpus, variant or None)
+        if "~lines" in sym:
+            file = args.get("file")
+            if not isinstance(file, str):
+                raise Diverge("~lines needs the request's `file` argument")
+            n = self._count_arg(sym["~lines"], args, "~lines")
+            return build_views.breakpoint_lines(self.build, self.corpus, file, n)
+        if "~leaves" in sym:
+            n = self._count_arg(sym.get("~count", 0), args, "~leaves")
+            return build_views.leaf_paths(self.build, self.corpus, str(sym["~leaves"]), n)
+        if "~token" in sym:
+            return self.endpoint.credential(str(sym["~token"]))
+        raise Blocked(f"unknown argument symbol {sorted(sym)}")
+
     # -- setup
 
     def start(self) -> None:
@@ -214,20 +303,15 @@ class _Run:
         inputs = _obj(_obj(self.setup.get("plant")).get("inputs"))
         if inputs:
             self.plant.set_inputs(inputs)
-        if self.doc.get("kind") == "runtime" and self._uses_plant():
+        if self._uses_plant():
             self.last_witness = dict(self._sample().witness)
         self.step_end_ms = self.clock.now_ms()
 
     def _uses_plant(self) -> bool:
-        for step in cast(List[JsonObj], self.doc.get("steps", [])):
-            if (
-                "plant" in step
-                or step.get("observe") == "plant"
-                or "wait" in step
-                or "noEvent" in step
-            ):
-                return True
-        return False
+        return any(
+            "plant" in s or s.get("observe") == "plant" or "wait" in s or "noEvent" in s
+            for s in _flat(self.doc.get("steps"))
+        )
 
     # -- steps
 
@@ -243,6 +327,7 @@ class _Run:
             "observe": self._step_observe,
             "inspect": self._step_inspect,
             "inject": self._step_inject,
+            "loop": self._step_loop,
         }.get(action)
         if handler is None:
             raise Blocked(f"step has no known action ({sorted(step)})")
@@ -250,86 +335,63 @@ class _Run:
         self._drain()
         return detail
 
-    def pair(self, raw_req: JsonObj, raw_ev: JsonObj) -> Tuple[str, str]:
-        """`request` repeat n then `event` repeat n: n x (request, event).
-
-        Sending n run-control requests back to back would meet NOT_HALTED from a real runtime after
-        the first, since each resumes the program until its stop event; the oracle means n steps.
-        """
-        req = cast(JsonObj, _resolve(raw_req, self.table))
-        ev = cast(JsonObj, _resolve(raw_ev, self.table))
-        n = int(_num(req.get("repeat"), 1))
-        one_req = {k: v for k, v in req.items() if k != "repeat"}
-        one_ev = {k: v for k, v in ev.items() if k != "repeat"}
-        for _ in range(n):
-            self._step_request(one_req)
-            try:
-                self._step_event(one_ev)
-            except (Diverge, Blocked) as exc:
-                exc.offset = 1
-                raise
-        self._drain()
-        return (
-            f"{req['request']} x{n} (interleaved with next step)",
-            f"{ev['event']} x{n} (interleaved)",
-        )
-
-    @staticmethod
-    def pairs(raw_req: JsonObj, raw_ev: Optional[JsonObj]) -> bool:
-        n = raw_req.get("repeat")
-        return (
-            raw_ev is not None
-            and "request" in raw_req
-            and "event" in raw_ev
-            and isinstance(n, int)
-            and n > 1
-            and raw_ev.get("repeat") == n
-            and raw_ev.get("thenContinue") is not True
-        )
+    def _step_loop(self, step: JsonObj) -> str:
+        n = int(_num(step["loop"], 1))
+        body = [s for s in cast(List[Json], step.get("steps", [])) if isinstance(s, dict)]
+        for i in range(n):
+            for j, sub in enumerate(body):
+                try:
+                    self.step(sub)
+                except (Diverge, Blocked) as exc:
+                    exc.reason = f"iteration {i + 1}/{n}, body step {j}: {exc.reason}"
+                    raise
+        return f"loop x{n} ({len(body)} steps)"
 
     def _step_request(self, step: JsonObj) -> str:
         command = str(step["request"])
-        args = dict(_obj(step.get("args")))
-        if "client" in args:
-            raise Blocked(
-                f"{command}: multi-client streams (args.client={args['client']!r}) not supported by the runner"
-            )
-        if command == "initialize":
-            args.setdefault("protocol", "1.0")
-            role = self.setup.get("session")
-            if role in ("controller", "observer"):
-                args.setdefault("role", role)
+        raw_args = _obj(step.get("args"))
+        args = cast(JsonObj, self._args(raw_args, raw_args))
+        clients = self._clients(step)
         expect = _obj(step.get("expect"))
         repeat = int(_num(step.get("repeat"), 1))
         for _ in range(repeat):
-            resp = self._request(command, args)
-            success = resp.get("success") is True
-            error = _obj(resp.get("error"))
-            code = error.get("code")
-            if code == "UNSUPPORTED" and expect.get("error") != "UNSUPPORTED":
-                raise Blocked(
-                    f"{command} refused UNSUPPORTED (capability absent): {error.get('message', '')}"
-                )
-            if not expect:
-                continue
-            self._check(expect.get("success"), success, f"{command}.success")
-            if "error" in expect:
-                self._check(
-                    expect["error"], code if code is not None else MISSING, f"{command}.error"
-                )
-            if "body" in expect:
-                body = _obj(resp.get("body"))
-                observed: JsonObj = body if success else {**error, **body}
-                self._check(expect["body"], observed, f"{command}.body")
-        return f"{command} x{repeat}" if repeat > 1 else command
+            for client in clients:
+                sent = dict(args)
+                if command == "initialize":
+                    sent.setdefault("protocol", "1.0")
+                    role = self.setup.get("session")
+                    if client == MAIN and role in ("controller", "observer"):
+                        sent.setdefault("role", role)
+                self._check_response(command, expect, self._request(client, command, sent), client)
+        who = "" if clients == [MAIN] else f" on {len(clients)} clients"
+        return (f"{command} x{repeat}" if repeat > 1 else command) + who
 
-    def _wait_event(self, name: str, within_ms: float) -> Optional[JsonObj]:
-        deadline = self.clock.now_ms() + within_ms
+    def _check_response(self, command: str, expect: JsonObj, resp: JsonObj, client: str) -> None:
+        success = resp.get("success") is True
+        error = _obj(resp.get("error"))
+        code = error.get("code")
+        if code == "UNSUPPORTED" and expect.get("error") != "UNSUPPORTED":
+            raise Blocked(
+                f"{command} refused UNSUPPORTED (capability absent): {error.get('message', '')}"
+            )
+        if not expect:
+            return
+        where = command if client == MAIN else f"{client}:{command}"
+        self._check(expect.get("success"), success, f"{where}.success")
+        if "error" in expect:
+            self._check(expect["error"], code if code is not None else MISSING, f"{where}.error")
+        if "body" in expect:
+            body = _obj(resp.get("body"))
+            observed: JsonObj = body if success else {**error, **body}
+            self._check(expect["body"], observed, f"{where}.body")
+
+    def _wait_event(self, client: str, name: str, deadline: float) -> Optional[JsonObj]:
+        stream = self._stream(client)
         while True:
             self._drain()
-            for i, (_, ev) in enumerate(self.inbox):
+            for i, (_, ev) in enumerate(stream.inbox):
                 if ev.get("event") == name:
-                    del self.inbox[i]
+                    del stream.inbox[i]
                     return ev
             if self.clock.now_ms() >= deadline:
                 return None
@@ -338,43 +400,51 @@ class _Run:
     def _step_event(self, step: JsonObj) -> str:
         name = str(step["event"])
         within = _num(step.get("withinMs"), DEFAULT_WITHIN_MS)
+        clients = self._clients(step)
         count = step.get("count")
-        if count is not None and count != 1:
-            raise Blocked(
-                f"event {name}: count={json.dumps(count)} needs several client streams; the runner has one"
-            )
         expect = _obj(step.get("expect"))
         repeat = int(_num(step.get("repeat"), 1))
         for r in range(repeat):
-            self._session()
-            ev = self._wait_event(name, within)
-            if ev is None:
-                raise Diverge(
-                    f"no '{name}' event within {within:g} ms"
-                    + (f" (repetition {r + 1})" if repeat > 1 else "")
-                )
-            self._check_event(name, expect, _obj(ev.get("body")))
+            rep = f" (repetition {r + 1})" if repeat > 1 else ""
+            deadline = self.clock.now_ms() + within
+            received = 0
+            for client in clients:
+                on = "" if client == MAIN else f" on {client}"
+                ev = self._wait_event(client, name, deadline)
+                try:
+                    if ev is None:
+                        raise Diverge(f"no '{name}' event{on} within {within:g} ms{rep}")
+                    self._check_event(client, name, expect, _obj(ev.get("body")))
+                except Diverge:
+                    if count is None:
+                        raise
+                    continue  # with `count`, a stream without a matching event is not counted
+                received += 1
+            if count is not None:
+                self._check(count, received, f"{name}.count{rep}")
             if step.get("thenContinue") is True:
-                self._request("continue", {})
-        return f"{name} x{repeat}" if repeat > 1 else name
+                self._request(clients[0], "continue", {})
+        who = "" if clients == [MAIN] else f" on {len(clients)} clients"
+        return (f"{name} x{repeat}" if repeat > 1 else name) + who
 
-    def _check_event(self, name: str, expect: JsonObj, body: JsonObj) -> None:
+    def _check_event(self, client: str, name: str, expect: JsonObj, body: JsonObj) -> None:
+        where = name if client == MAIN else f"{client}:{name}"
         for key, body_key in EVENT_KEYS.items():
             if key in expect:
                 self._check(
-                    expect[key], body[body_key] if body_key in body else MISSING, f"{name}.{key}"
+                    expect[key], body[body_key] if body_key in body else MISSING, f"{where}.{key}"
                 )
         if "body" in expect:
-            self._check(expect["body"], body, f"{name}.body")
+            self._check(expect["body"], body, f"{where}.body")
         if "stack" in expect:
-            self._check_stack(expect["stack"], expect.get("task"))
+            self._check_stack(client, expect["stack"], expect.get("task"))
         for path, m in _obj(expect.get("variables")).items():
-            self._check(m, self._read_variable(path), f"{name}.variables.{path}")
+            self._check(m, self._read_variable(client, path), f"{where}.variables.{path}")
 
-    def _check_stack(self, expected: Json, task: Json) -> None:
+    def _check_stack(self, client: str, expected: Json, task: Json) -> None:
         # ASSUMED: stackTrace's body lists frames, innermost first, as DAP's `stackFrames`; the
         # oracle's frames must match the innermost ones in order (a prefix).
-        resp = self._request("stackTrace", {"task": task} if isinstance(task, str) else {})
+        resp = self._request(client, "stackTrace", {"task": task} if isinstance(task, str) else {})
         if resp.get("success") is not True:
             raise Diverge(f"stackTrace refused: {json.dumps(resp.get('error'))}")
         frames = _obj(resp.get("body")).get("stackFrames")
@@ -388,10 +458,12 @@ class _Run:
             self._check(want_obj, got, f"stack[{i}]")
             for scope, paths in scopes.items():
                 for path, m in _obj(paths).items():
-                    self._check(m, self._read_variable(path), f"stack[{i}].scopes.{scope}.{path}")
+                    self._check(
+                        m, self._read_variable(client, path), f"stack[{i}].scopes.{scope}.{path}"
+                    )
 
-    def _read_variable(self, path: str) -> Observed:
-        resp = self._request("variables", {"path": path})
+    def _read_variable(self, client: str, path: str) -> Observed:
+        resp = self._request(client, "variables", {"path": path})
         if resp.get("success") is not True:
             error = _obj(resp.get("error"))
             if error.get("code") == "UNSUPPORTED":
@@ -402,16 +474,19 @@ class _Run:
 
     def _step_no_event(self, step: JsonObj) -> str:
         name = str(step["noEvent"])
+        clients = self._clients(step)
         self._drain()
         start = self.arrivals
 
         def forbid() -> None:
             self._drain()
-            for seq, ev in self.inbox:
-                if seq > start and ev.get("event") == name:
-                    raise Diverge(
-                        f"forbidden '{name}' event arrived: {json.dumps(ev.get('body'))[:160]}"
-                    )
+            for client in clients:
+                for seq, ev in self._stream(client).inbox:
+                    if seq > start and ev.get("event") == name:
+                        raise Diverge(
+                            f"forbidden '{name}' event arrived on {client}: "
+                            f"{json.dumps(ev.get('body'))[:160]}"
+                        )
 
         if "forScans" in step:
             task = step.get("task")
@@ -493,15 +568,16 @@ class _Run:
         elif kind == "log":
             self._check(expect.get("fields", {}), self.endpoint.log(), "log.fields")
         elif kind == "session":
-            for path, m in _obj(expect.get("variables")).items():
-                self._check(m, self._read_variable(path), f"session.variables.{path}")
+            for client in self._clients(step):
+                for path, m in _obj(expect.get("variables")).items():
+                    self._check(m, self._read_variable(client, path), f"session.variables.{path}")
         return f"observe {kind}" + (" throughout" if throughout else "")
 
     def _observe_plant(self, expect: JsonObj, throughout: bool) -> None:
         final = self._sample()
-        samples = self.plant.history(self.step_end_ms) if throughout else []
+        samples = self.plant.history(self.step_end_ms) if throughout or "maxGapMs" in expect else []
         prev: Optional[PlantSample] = None
-        for s in samples:
+        for s in samples if throughout else []:
             scratch = dict(self.captures)  # history must not bind captures; the final read does
             self._check_sample(expect, s, scratch, f"plant@{s.t_ms:g}ms")
             if prev is not None:
@@ -517,6 +593,8 @@ class _Run:
             for t, m in _obj(expect["scanDelta"]).items():
                 delta = final.witness[t] - base.get(t, 0) if t in final.witness else MISSING
                 self._check(m, delta, f"plant.scanDelta.{t}")
+        for t, m in _obj(expect.get("maxGapMs")).items():
+            self._check(m, _max_gap(samples, t), f"plant.maxGapMs.{t}")
         self.last_witness = dict(final.witness)
 
     def _check_sample(
@@ -536,20 +614,53 @@ class _Run:
                     raise Diverge(found.describe(), found)
 
     def _step_inspect(self, step: JsonObj) -> str:
-        raise Blocked(
-            f"inspect {step['inspect']}: build inspection (ADR-002 D1 outputs) not implemented in the runner"
-        )
+        kind = str(step["inspect"])
+        expect = _obj(step.get("expect"))
+        unavailable = build_views.UNAVAILABLE_KEYS.get(kind, {})
+        for key in expect:
+            if key in unavailable:
+                raise Blocked(f"inspect {kind}.{key}: {unavailable[key]}")
+        view = build_views.view(self.build, self.corpus, kind)
+        if expect:
+            self._check(expect, view, f"inspect.{kind}")
+        return f"inspect {kind}"
 
     def _step_inject(self, step: JsonObj) -> str:
-        self.endpoint.inject(str(step["inject"]), _obj(step.get("args")))
-        return f"inject {step['inject']}"
+        kind = str(step["inject"])
+        raw_args = _obj(step.get("args"))
+        args = cast(JsonObj, self._args(raw_args, raw_args))
+        if kind == "killClient":
+            # The client is the harness's own stream: dropping its transport with no detach is
+            # what the runtime sees of a SIGKILLed client process.
+            for client in self._clients(step):
+                stream = self.streams.pop(client, None)
+                if stream is None:
+                    raise Diverge(f"killClient: no open stream {client!r}")
+                stream.session.kill()
+            return f"inject {kind}"
+        result = self.endpoint.inject(kind, args)
+        if "expect" in step:
+            self._check(step["expect"], result, f"inject.{kind}")
+        return f"inject {kind}"
 
     def close(self) -> None:
-        if self.session is not None:
+        for stream in self.streams.values():
             try:
-                self.session.close()
+                stream.session.close()
             except Exception:  # noqa: BLE001 - closing must not replace the verdict
                 pass
+
+
+def _max_gap(samples: List[PlantSample], task: str) -> Observed:
+    """Longest stretch, in ms, between scan-witness increments over the samples."""
+    seen = [s for s in samples if task in s.witness]
+    if len(seen) < 2:
+        return MISSING
+    gap, since, last = 0.0, seen[0].t_ms, seen[0].witness[task]
+    for s in seen[1:]:
+        if s.witness[task] != last:
+            gap, since, last = max(gap, s.t_ms - since), s.t_ms, s.witness[task]
+    return max(gap, seen[-1].t_ms - since)
 
 
 def _load(path: Path) -> JsonObj:
@@ -563,7 +674,9 @@ def _load(path: Path) -> JsonObj:
     return cast(JsonObj, doc)
 
 
-def run_scenario(path: Path, endpoint: Endpoint, plant: Plant, clock: Clock) -> RunResult:
+def run_scenario(
+    path: Path, endpoint: Endpoint, plant: Plant, clock: Clock, build: BuildOutputs
+) -> RunResult:
     """Run one oracle. Never raises: every outcome is a verdict."""
     scenario = path.stem.replace(".oracle", "")
     result = RunResult(
@@ -573,43 +686,24 @@ def run_scenario(path: Path, endpoint: Endpoint, plant: Plant, clock: Clock) -> 
         doc = _load(path)
         result.scenario = str(doc.get("scenario", result.scenario))
         result.criteria = [str(c) for c in cast(List[Json], doc.get("criteria", []))]
-        run = _Run(doc, _marker_table(path.parent), endpoint, plant, clock)
+        run = _Run(doc, _marker_table(path.parent), endpoint, plant, clock, build)
     except Exception as exc:  # noqa: BLE001 - a broken oracle is a verdict, not a crash
         result.verdict = Verdict("BLOCKED", None, f"cannot load oracle: {exc}")
         return result
     index: Optional[int] = None
     try:
         run.start()
-        steps = cast(List[JsonObj], doc["steps"])
-        skip = False
-        for index, raw in enumerate(steps):
-            if skip:
-                skip = False
-                continue
+        for index, raw in enumerate(cast(List[JsonObj], doc["steps"])):
             action = next((a for a in ACTIONS if a in raw), "?")
-            following = steps[index + 1] if index + 1 < len(steps) else None
             t0 = clock.now_ms()
             try:
-                if following is not None and _Run.pairs(raw, following):
-                    first, second = run.pair(raw, following)
-                    skip = True
-                    run.step_end_ms = clock.now_ms()
-                    result.trace.append(
-                        StepTrace(index, action, "match", first, run.step_end_ms - t0)
-                    )
-                    result.trace.append(StepTrace(index + 1, "event", "match", second, 0.0))
-                    continue
                 detail = run.step(raw)
             except (Diverge, Blocked) as exc:
-                at = index + exc.offset
                 status = "DIVERGE" if isinstance(exc, Diverge) else "BLOCKED"
-                if exc.offset:
-                    result.trace.append(
-                        StepTrace(index, action, "match", "interleaved with next step", 0.0)
-                    )
-                    action = "event"
-                result.trace.append(StepTrace(at, action, status, exc.reason, clock.now_ms() - t0))
-                result.verdict = Verdict(status, at, f"step {at} ({action}): {exc.reason}")
+                result.trace.append(
+                    StepTrace(index, action, status, exc.reason, clock.now_ms() - t0)
+                )
+                result.verdict = Verdict(status, index, f"step {index} ({action}): {exc.reason}")
                 return result
             run.step_end_ms = clock.now_ms()
             result.trace.append(StepTrace(index, action, "match", detail, run.step_end_ms - t0))
@@ -699,6 +793,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--insecure", action="store_true", help="accept the runtime's self-signed certificate"
     )
     ap.add_argument(
+        "--build-dir",
+        type=Path,
+        default=HERE.parents[2] / "build" / "debug-corpus",
+        help="build_all.sh's output directory (ADR-002 D1 files per corpus program)",
+    )
+    ap.add_argument(
         "--results", type=Path, help="append status/runs JSON lines here (default: dry run)"
     )
     ap.add_argument(
@@ -707,13 +807,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     opts = ap.parse_args(argv)
 
     endpoint = SocketIOEndpoint(opts.endpoint, token=opts.token, insecure=opts.insecure)
+    build: BuildOutputs = (
+        build_views.DirectoryBuild(opts.build_dir)
+        if opts.build_dir.is_dir()
+        else UnavailableBuild()
+    )
     ran_on = f"{endpoint.description} from {platform.system().lower()}-{platform.machine()}"
     commit = _commit()
     counts: Dict[str, int] = {"PASS": 0, "DIVERGE": 0, "BLOCKED": 0}
     errors = 0
     rows: List[JsonObj] = []
     for path in _oracles(opts.oracles):
-        result = run_scenario(path, endpoint, UnavailablePlant(), WallClock())
+        result = run_scenario(path, endpoint, UnavailablePlant(), WallClock(), build)
         counts[result.verdict.status] += 1
         errors += int("harness error" in result.verdict.reason)
         print(

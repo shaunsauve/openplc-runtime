@@ -1,0 +1,15 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/inspect",
+  "corpus": "plant-io",
+  "kind": "build",
+  "criteria": ["A019"],
+  "title": "Runner fixture: inspect views of the debug info; object code has no reader yet",
+  "notes": "Runs against fake_endpoint.py's build outputs only (test_runner.py).",
+  "steps": [
+    {"inspect": "debugInfo", "expect": {"build": {"probes": true}, "probeCount": 11, "pous": {"PlantIO": {"kind": "program"}},
+      "generatedLines": [], "lines": {"0": {"~len": 11}}}},
+    {"inspect": "objectCode", "expect": {"probeSites": {"checked": {"~any": true}}}}
+  ]
+}

@@ -8,7 +8,7 @@ directory of that name is here.
 ```
 tests/debug/corpus/
   README.md               this file: the program contract and the oracle format
-  oracle.schema.json      JSON Schema 2020-12 for an oracle (format 1.0)
+  oracle.schema.json      JSON Schema 2020-12 for an oracle (format 1.1)
   validate.py             validates every header and oracle (Python stdlib only)
   test_validate.py        red/green proof for validate.py
   build_all.sh            compiles every program with STruCpp, then runs validate.py
@@ -61,13 +61,13 @@ Globals are addressed by their bare name.
 oracles; `validate.py` resolves each marker to exactly one line and checks that a stated
 `col` (1-based) starts a statement there.
 
-## Oracle format (1.0)
+## Oracle format (1.1)
 
 One JSON file per scenario, `<name>/<id>.oracle.json`, `scenario` = `<name>/<id>`.
 
 ```jsonc
 {
-  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/bp-before-statement", "corpus": "plant-io",
   "kind": "runtime",                 // "build": a debug-info / generated-code inspection, no runtime
   "criteria": ["A034", "A031"],      // the criteria this scenario discharges (⊆ the header's)
@@ -84,21 +84,27 @@ One JSON file per scenario, `<name>/<id>.oracle.json`, `scenario` = `<name>/<id>
 ```
 
 A **major** bump is incompatible; a **minor** bump only adds optional fields (as ADR-002 D2).
+1.1 adds `client`, `loop`, argument symbols, the `inspect` views, `inject` results and
+`maxGapMs`, and fixes one meaning 1.0 left open: a request `repeat` is a batch (§ Repetition).
+1.0 runners paired a request `repeat n` with a following event `repeat n`; every corpus file
+that relied on it now says `loop`, and no 1.0 file exists outside this corpus.
 
 ### Steps
 
-Each step has exactly one action key, plus optional `note`.
+Each step has exactly one action key, plus optional `note`, and on `request`, `event`, `noEvent`,
+`observe: session` and `inject: killClient` an optional `client` (§ Clients).
 
 | Step | Meaning |
 |---|---|
-| `{"request": <command>, "args": {…}, "expect": {"success": b, "error": <code>, "body": <match>}, "repeat": n}` | Send an ADR-003 D4 request (`initialize`, `setBreakpoints`, `continue`, `next`, `cycleStep`, `force`, …). `error` is an ADR-003 D2 code. Lines in `args` may be markers |
-| `{"event": <name>, "withinMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches; `count` is the number of client streams that receive it (observers); `thenContinue` sends `continue` after each repetition (loop hit counts) |
+| `{"request": <command>, "args": {…}, "expect": {"success": b, "error": <code>, "body": <match>}, "repeat": n}` | Send an ADR-003 D4 request (`initialize`, `setBreakpoints`, `continue`, `next`, `cycleStep`, `force`, …). `error` is an ADR-003 D2 code. Lines in `args` may be markers; values may be argument symbols (§ Argument symbols). `repeat` is a batch (§ Repetition) |
+| `{"event": <name>, "withinMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches, on every stream the step names; with `count`, the number of those streams that receive a matching one must match it instead. `repeat` waits for n successive events; `thenContinue` sends `continue` after each repetition (loop hit counts; one stream only) |
+| `{"loop": n, "steps": [ … ]}` | Run the body steps in order, n times: the alternating form (§ Repetition). Bodies may nest |
 | `{"noEvent": <name>, "forMs": t \| "forScans": n, "task": …}` | No such event in the window (scans counted by the plant) |
 | `{"plant": {"set": {addr: v}, "sequence": [{…}, …], "failExchanges": n}}` | Drive plant inputs: one write, or successive writes (latest-wins tests, A055) |
 | `{"wait": {"wallMs": t} \| {"vtMs": t} \| {"scans": n}}` | Wait on the harness wall clock, on PLC virtual time, or for n plant-counted scans |
 | `{"observe": "plant\|status\|session\|log", "expect": {…}, "throughout": b}` | Read back through an independent path. `throughout: true` means the expectation held for every sample since the previous step |
-| `{"inspect": "debugInfo\|debugMap\|generatedCpp\|objectCode", "expect": <match>}` | Build scenarios: read compiler outputs (ADR-002 D1 files) |
-| `{"inject": "killClient\|dropNetwork\|restoreNetwork\|sigstopRuntime\|sigcontRuntime\|killRuntime\|restartRuntime\|upload", "args": {…}}` | Fault injection (F154) |
+| `{"inspect": "debugInfo\|debugMap\|generatedCpp\|objectCode", "expect": <match>}` | Read the program's compiler outputs (ADR-002 D1 files), in a build or a runtime scenario; matched against the view of § Inspect views |
+| `{"inject": <kind>, "args": {…}, "expect": <match>}` | Fault injection (F154) and drives from outside the session. `killClient` drops the step's stream with no detach. `dropNetwork`, `restoreNetwork`, `delayNetwork` (`rttMs`), `rawFrame` (`frame`: `truncated`, `invalid`, `oversize`, `garbage`, with `bytes`/`count`), `sigstopRuntime`, `sigcontRuntime`, `killRuntime`, `restartRuntime` act on the transport or the process; `upload` (`build`, `debugInfo` patch, `conf`), `rest` (`method`, `path`, `user`), `socket` (`command`: a legacy core-socket line), `plugin` (`name`, `action`) drive the runtime the way its other clients do. `expect` matches what the injection answered: the response envelope, the HTTP `{status, body}`, or the socket reply line |
 
 ### Expectations
 
@@ -130,11 +136,75 @@ An `observe` expectation uses these keys (any subset):
 | `variables` | session | `{path: match}` |
 | `state` | status | the run state (F040: `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `SAFE_STOPPED`, `ERROR`, plus `NOT_RESPONDING`) |
 | `fields` | status / log | other fields, e.g. `{"reason": "heartbeat_timeout"}`, `{"lastFault": {…}}` |
+| `maxGapMs` | plant | `{task: match}`: the longest stretch, in ms, between scan-witness increments over the samples since the previous step (a freeze or a stall shows as a gap) |
 
 **ADR-004 arithmetic the oracles rely on.** Halted mid-scan k: the session reads the witness
 as k; the plant holds k − 1 until the scan completes (D1.1). A cycle step is exactly +1 scan
 and +1 interval of virtual time; statement steps add 0 (D4). A halt adds at most one interval
 of virtual time (D4.2).
+
+### Clients
+
+A step without `client` acts on the stream `main`, which opens on first use and takes the
+setup's `session` role. `client` names others:
+
+| `client` | Streams |
+|---|---|
+| `"c2"` | the stream named `c2`, opened on first use (its `initialize` carries its own `role`) |
+| `{"group": "obs", "count": 16}` | `obs.1` … `obs.16`, opened as needed |
+| `{"group": "obs"}` | every open stream of the group |
+| `"*"` | every open stream, `main` included |
+
+A request is sent on each stream in order and each response must match. An event step waits on
+each stream with one shared deadline; without `count` every stream must receive a matching event,
+with `count` the number that did is matched against it. `inject: killClient` closes the named
+streams' transports with no detach; the stream name can be reused later for a new client. Each
+stream has its own inbox, so one stream's events never satisfy another's step. A capture made
+on several streams keeps the last stream's value.
+
+### Argument symbols
+
+Inside `args` (of a request or an injection), an object whose keys all start with `~` is replaced
+before sending:
+
+| Symbol | Value sent |
+|---|---|
+| `{"~ref": "max"}`, `{"~ref": "max", "~add": 1}` | the captured value (plus n): a declared limit, a resume token, an ID from an earlier response |
+| `{"~build": "identity"}`, `{"~build": "identity:variant-x.st"}` | the `{md5, buildId}` of this program's build, or of that variant's build (ADR-002 D5), from the build outputs |
+| `{"~lines": n}` | the first n breakpoint-able lines of the request's `file` (debug info `lines`, F016); n may itself be a symbol |
+| `{"~leaves": "PROG0", "~count": n}` | the first n debug-map leaf paths under that instance |
+| `{"~token": "valid\|none\|forged\|expired"}` | a JWT from the endpoint: its own, null, its own with the signature replaced, or an expired one (BLOCKED without the signing key) |
+
+A symbol the build outputs cannot satisfy (no build directory, too few lines or leaves) makes the
+scenario BLOCKED, not DIVERGE. `validate.py` refuses an unknown symbol and a `~build` variant
+that is not a `variant-*.st` of the program.
+
+### Repetition
+
+Two forms, never inferred from neighbouring steps:
+
+- **Batch:** `repeat: n` on a request sends it n times back to back, checking each response;
+  on an event, it waits for n successive events. `[{"request": "next", "repeat": 3}, {"event":
+  "stopped", "repeat": 3}]` sends three `next` before reading any stop, so a runtime that is not
+  halted after the first answers `NOT_HALTED`: the scenario says so if that is what it means.
+- **Alternating:** `{"loop": 3, "steps": [{"request": "next"}, {"event": "stopped"}]}` is
+  next, stop, next, stop, next, stop. Run control is always written this way. A loop is one
+  step in the trace; a failure inside it names the iteration and the body step.
+
+### Inspect views
+
+An `inspect` step reads the program's build outputs (`build_all.sh` writes `<OUT>/<name>/debug/`;
+runner `--build-dir`) and matches this view; with no build outputs it is BLOCKED.
+
+| `inspect` | View |
+|---|---|
+| `debugInfo` | `debug-info.json` as ADR-002 D3, except `pous` keyed by name; plus `probeCount`, `instanceCount`, `generatedLines` (`[{file, line}]` of probes with flags bit 0) and `originOf` (`[{file, line, origin}]` with the `origins[].id`), both sorted by file then line |
+| `debugMap` | `debug-map.json` plus `leafCount` |
+| `generatedCpp` | `{"text": <generated_debug.cpp>}` |
+| `objectCode` | none yet: BLOCKED until the harness has a disassembly adapter |
+
+Keys no output carries yet (`loadMs`, `linkedPousMissing`) make the step BLOCKED rather than
+DIVERGE on an absent key.
 
 ### Matchers
 
@@ -164,7 +234,8 @@ and TOD as integer milliseconds since their epoch. `~display` compares the IEC t
 
 The harness walks the steps in order and reports, per step, `match` or `DIVERGE` with the
 step index and the first differing path. A run's verdict is DIVERGE on the first failing
-step; `BLOCKED` when a request is refused `UNSUPPORTED` before the feature exists (E13.4 c).
+step; `BLOCKED` when a request is refused `UNSUPPORTED` before the feature exists (E13.4 c), or
+when a seam the step needs (endpoint, plant, build outputs, injection) is not there.
 Event steps consume events in arrival order; events the oracle does not mention are allowed,
 except where a `noEvent` step forbids them.
 

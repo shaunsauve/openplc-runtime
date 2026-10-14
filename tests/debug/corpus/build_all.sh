@@ -3,7 +3,9 @@
 #
 # Usage: tests/debug/corpus/build_all.sh
 # Env:   STRUCPP  STruCpp checkout (default: ../STruCpp beside this repo)
-#        OUT      output directory (default: build/debug-corpus in this repo)
+#        OUT      output directory (default: build/debug-corpus in this repo); per program
+#                 <name>/debug/ and <name>/<variant>.debug/ hold the ADR-002 D1 files the
+#                 harness's inspect steps and ~build/~lines/~leaves symbols read
 # Exit:  0 when every program compiles (or fails as its header's `build: expect-fail` says)
 #        and validate.py passes; 1 otherwise. Per program: OK, FAIL, XFAIL, or XPASS
 #        (an expect-fail program that now compiles: remove its marker). A reject-*.st file
@@ -54,7 +56,8 @@ for dir in "$HERE"/*/; do
   for v in "$dir"/variant-*.st; do
     [ -f "$v" ] || continue
     vn=$(basename "$v" .st)
-    node "$CLI" "$v" -o "$out/$vn.cpp" ${libargs[@]+"${libargs[@]}"} >"$out/$vn.log" 2>&1 || status=1
+    vdbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && vdbg=("${DEBUG_FLAG[@]}" "$out/$vn.debug")
+    node "$CLI" "$v" -o "$out/$vn.cpp" ${libargs[@]+"${libargs[@]}"} ${vdbg[@]+"${vdbg[@]}"} >"$out/$vn.log" 2>&1 || status=1
   done
   for r in "$dir"/reject-*.st; do
     [ -f "$r" ] || continue
