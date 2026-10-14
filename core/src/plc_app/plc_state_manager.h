@@ -103,6 +103,10 @@ typedef struct PlcTaskCtx
     plc_atomic_long_t     pause_pending;   /* a PAUSE waits for the scan in flight to end; dispatcher only */
     sem_t                 resume;          /* a parked task waits here; posted by the dispatcher only */
     plc_atomic_long_t     resumes;         /* resumes applied (held or parked -> running); dispatcher only */
+    /* Scan budget (ADR-001 D4.9-D4.10): when non-zero, the dispatcher holds the task at the first
+     * scan boundary at which `completed` has reached it. Set by plc_run_control_run_scans,
+     * cleared by the dispatcher when it holds and by every plain resume. */
+    plc_atomic_long_t     hold_after;
 
     /* Per-task scan/cycle/latency tracker. The task thread updates it
      * around its scan body; STATS walks all trackers for per-task entries. */
@@ -284,6 +288,18 @@ bool plc_run_control_hold(size_t task_idx, int timeout_ms);
  * @return true when every targeted task is running again
  */
 bool plc_run_control_resume(size_t task_idx, int timeout_ms);
+
+/**
+ * @brief Resume one halted task for exactly `scans` scans, then hold it at its scan boundary.
+ *
+ * A task parked mid-scan finishes that scan as the first of them (cycle step from a probe,
+ * ADR-001 D4.9); a task held at its boundary runs `scans` released scans (cycle step from a
+ * boundary, run N scans D4.10). The dispatcher holds it before the next release, so its virtual
+ * clock moves exactly one interval per released scan (ADR-004 D4).
+ *
+ * @return true when the task resumed
+ */
+bool plc_run_control_run_scans(size_t task_idx, long scans, int timeout_ms);
 
 /**
  * @brief Pause a task (or PLC_ALL_TASKS) for the debugger. Asynchronous.

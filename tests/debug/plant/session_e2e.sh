@@ -15,7 +15,9 @@
 #                 (the stop comes one statement after the breakpoint's line); `leafoff` reads
 #                 every leaf one past the asked one (the variables read are not the program's);
 #                 `stepin-over` makes step into a step over (A035); `twostops` parks a step that
-#                 lands on an armed breakpoint twice, as a step and as the breakpoint (A038)
+#                 lands on an armed breakpoint twice, as a step and as the breakpoint (A038);
+#                 `twoscans` makes a cycle step run two scans (A036); `skipout` skips the
+#                 copy-out of a scan that was halted and resumed (A037)
 #        IMAGE    Linux image with g++, cmake and the runtime venv (default the runtime image)
 # Needs: node (host, STruCpp codegen) and docker.
 #

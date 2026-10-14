@@ -44,6 +44,21 @@ extra = ("    if (bp_wants && trap_wants) {\n"
 open(p, "w").write(s.replace(anchor, extra + anchor, 1))
 PY
     ;;
+  twoscans)  # A036 red-proof: a cycle step runs two scans
+    sed -i 's/plc_run_control_run_scans(task, 1, 2000)/plc_run_control_run_scans(task, 2, 2000)/' core/src/plc_app/debug_link.cpp
+    grep -q 'run_scans(task, 2, 2000)' core/src/plc_app/debug_link.cpp || { echo "SEED twoscans not applied"; exit 1; } ;;
+  skipout)  # A037 red-proof: a scan that was halted and resumed skips its copy-out
+    python3 - <<'PY' || { echo "SEED skipout not applied"; exit 1; }
+p = "core/src/plc_app/plc_state_manager.cpp"
+s = open(p).read()
+a1 = "            ctx->in_body = 1;\n            for (size_t p = 0; p < task->program_count; ++p)\n                task->programs[p]->run();"
+a2 = "            for (size_t p = 0; p < task->program_count; ++p)\n            {\n                uint32_t off = 0, cnt = 0;\n                task->programs[p]->located_range(&off, &cnt);\n                if (cnt) image_tables_threaded_copy_out(off, cnt);"
+assert a1 in s and a2 in s
+s = s.replace(a1, "            const long seed_r0 = ctx->resumes.load();\n" + a1, 1)
+s = s.replace(a2, "            if (ctx->resumes.load() == seed_r0)\n" + a2, 1)
+open(p, "w").write(s)
+PY
+    ;;
   *) echo "unknown SEED $SEED"; exit 1 ;;
 esac
 mkdir -p build/plugins /run/runtime core/generated

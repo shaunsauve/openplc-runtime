@@ -655,6 +655,7 @@ static bool any_task_parked(void)
 static void hold_at_boundary(PlcTaskCtx *c, int64_t now)
 {
     c->pause_pending.store(0, std::memory_order_relaxed);
+    c->hold_after.store(0, std::memory_order_relaxed);
     c->held_since_ns.store(now, std::memory_order_relaxed);
     c->run_state.store(PLC_TASK_RUN_HELD, std::memory_order_release);
     debug_agent_wake();
@@ -712,6 +713,12 @@ static bool apply_run_requests(void)
             sem_post(&c->resume);
             resumed_parked = true;
         }
+
+        /* A scan budget spent: hold at this boundary, before the next release (cycle step). */
+        const long budget = c->hold_after.load(std::memory_order_acquire);
+        if (budget != 0 && c->run_state.load(std::memory_order_acquire) == PLC_TASK_RUN_RUNNING &&
+            !task_in_scan(c) && c->completed.load(std::memory_order_acquire) >= budget)
+            hold_at_boundary(c, now);
 
         /* A pause that found the task mid-scan: hold it at the boundary its scan reaches without
          * passing a probe, or forget it once the task parked. */
@@ -1075,6 +1082,7 @@ void *plc_cycle_thread(void *arg)
                 ctx->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_relaxed);
                 ctx->run_request.store(PLC_TASK_REQ_NONE,  std::memory_order_relaxed);
                 ctx->held_since_ns.store(0, std::memory_order_relaxed);
+                ctx->hold_after.store(0, std::memory_order_relaxed);
                 ctx->in_body = 0;
 
                 if (scan_cycle_tracker_init(&ctx->tracker, ctx->interval_ns) != 0)
@@ -2188,7 +2196,21 @@ extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
     return true;
 }
 
+static bool resume_tasks(size_t task_idx, int timeout_ms, long scans);
+
 extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
+{
+    return resume_tasks(task_idx, timeout_ms, 0);
+}
+
+extern "C" bool plc_run_control_run_scans(size_t task_idx, long scans, int timeout_ms)
+{
+    if (task_idx == PLC_ALL_TASKS || scans < 1) return false;
+    return resume_tasks(task_idx, timeout_ms, scans);
+}
+
+/* scans 0: a plain resume, which also drops any scan budget left from a cycle step. */
+static bool resume_tasks(size_t task_idx, int timeout_ms, long scans)
 {
     if (plc_get_state() != PLC_STATE_RUNNING) return false;
     /* Journaled before the release, so the resumed scan's copy-in reads the saved values. */
@@ -2203,6 +2225,10 @@ extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
         if (c->idx >= DBG_MAX_TASKS) return;
         before[c->idx] = c->resumes.load(std::memory_order_acquire);
         halted[c->idx] = c->run_state.load(std::memory_order_acquire) != PLC_TASK_RUN_RUNNING;
+        /* Before the resume is posted, so the dispatcher never releases past the budget. A
+         * parked task's scan in flight completes as the first of `scans`. */
+        c->hold_after.store(scans ? c->completed.load(std::memory_order_acquire) + scans : 0,
+                            std::memory_order_release);
     });
     pthread_mutex_unlock(&plc_tasks_lock);
     if (!post_run_request(task_idx, PLC_TASK_REQ_RESUME)) return false;

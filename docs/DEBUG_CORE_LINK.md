@@ -90,7 +90,7 @@ Frame        = {pou: int, at: int, leaf: int|null}
 
 hello                   evt {link: str, engineAbi: int, capabilities: Caps, probes: int, image: Image, params?: Params}
 beat                    evt {t: num}
-stopped                 evt {reason: str, task: str, taskId: int, since: num, probe?: int, depth?: int, breakpointIds?: [int], hits?: int, heldAtBoundary?: bool, scan?: int, exception?: obj, session?: str}
+stopped                 evt {reason: str, task: str, taskId: int, since: num, vt?: num, probe?: int, depth?: int, breakpointIds?: [int], hits?: int, heldAtBoundary?: bool, scan?: int, exception?: obj, session?: str}
 continued               evt {allThreadsContinued?: bool, task?: str, taskId?: int}
 runState                evt RunState
 output                  evt {category: str, kind?: str, count?: int, task?: str, taskId?: int, scan?: int, text?: str}
@@ -136,7 +136,8 @@ readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]
 | `stop` | Stops the program as STOP does; the session stays attached | `NOT_RUNNING`, `BUSY` |
 | `stackTrace` | The halted `task`'s frames (absent: the task of the most recent stop), innermost first (ADR-001 D3). `pou` is the frame's POU by its entry probe (`debug-info.json` `pous[].entryProbe`); `at` its location probe: the stop probe for the innermost frame, the calling statement's probe for the others; `leaf` the flat index of the lowest-addressed debug-table leaf at or above the frame's instance, `null` for a function or a program without the table (see "Interim instance binding"). `truncated` is true when the walk stopped at a frame of an earlier attach (N4). A task held at its scan boundary has `frames: []` (D2.5) | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
 | `readLeaves` | Each leaf's value, by flat leaf index (the `DebugMapV2` leaf order: array 0's elements, then array 1's, …, the numbering of `instances.leafBase`), as lowercase hex of the bytes `strucpp_debug_read` writes (little-endian scalars; STRING 1+126 and WSTRING 1+252 byte windows). An index the program does not have reads `null`. At most 1024 per request. Read without stopping the program, as the legacy `0x44` read is | `BAD_REQUEST` |
-| `setExceptionBreakpoints`, `cycleStep`, `runScans`, `runToCursor`, `restart`, `setHaltMode` | Defined by the link; the real core does not implement them yet and answers `UNSUPPORTED` (their capabilities are `false` in `hello`) | `UNSUPPORTED` |
+| `cycleStep` | Runs only `task` (absent: the task of the most recent stop) for exactly one scan (ADR-001 D4.9). Halted at probe P in scan k: the rest of scan k runs to its boundary, then one released scan runs with a trap on P, so the stop is at P in scan k+1 (reason `step`), or, if that scan never reaches P, a hold at its boundary (reason `step`, `heldAtBoundary`). Held at a boundary: one released scan, then a hold (reason `step`, `heldAtBoundary`). A breakpoint reached first stops there and ends the cycle step. The dispatcher holds the task before its next release (a scan budget), so its virtual time moves exactly one interval (ADR-004 D4). `continued {task, taskId}` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
+| `setExceptionBreakpoints`, `runScans`, `runToCursor`, `restart`, `setHaltMode` | Defined by the link; the real core does not implement them yet and answers `UNSUPPORTED` (their capabilities are `false` in `hello`) | `UNSUPPORTED` |
 
 Function locals (VAR_INPUT, VAR_TEMP and VAR_IN_OUT of a function or method) are not readable over
 the link: STruCpp does not emit the `__dbg_locals` `offsetof` tables yet (`pous[].locals[]
@@ -166,7 +167,7 @@ stack. It has no variable loads, so `capabilities.conditional` is `false`.
 |---|---|
 | `hello` | First frame on every connection; again when the loaded program changes |
 | `beat` | Every 250 ms, from the agent thread (not blocked by `PLUGIN_CMD`); the gateway does not forward it |
-| `stopped` | Once per halt of each task. `probe` is the halt probe (the gateway turns it into `location` and does not forward it); `breakpointIds` are the ids `setBreakpoints` returned; a task held at its scan boundary has `heldAtBoundary: true` and no probe |
+| `stopped` | Once per halt of each task. `vt` is the task's virtual time in ms (ADR-003 D4, ADR-004 D4). `probe` is the halt probe (the gateway turns it into `location` and does not forward it); `breakpointIds` are the ids `setBreakpoints` returned; a task held at its scan boundary has `heldAtBoundary: true` and no probe |
 | `continued` | On `continue` (`allThreadsContinued`) and on each step (`task`, `taskId`) |
 | `runState` | On every change, and once to a newly connected peer. `state` is one of `RUNNING PAUSED HALTED_AT_BP STOPPED ERROR SAFE_STOPPED EMPTY INIT TRANSITIONING`: `HALTED_AT_BP` when any task is parked at a breakpoint, `PAUSED` when any task is otherwise halted. A task's `state` is `running held parked abandoning` |
 | `output` | `category: "runtime"` with `kind` (`conditionError`, `breakpointSkippedLocked`) and `count`; `category: "print"` with `task`, `taskId`, `scan` and `text` |
@@ -223,5 +224,5 @@ pm: please fold them into ADR-003 D1.3.
 ## Not built here
 
 The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), the P2 timer
-(ADR-005), forces, writes, function locals over the link, exception breakpoints, `cycleStep`,
+(ADR-005), forces, writes, function locals over the link, exception breakpoints,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).

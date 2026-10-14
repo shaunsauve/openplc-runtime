@@ -837,6 +837,9 @@ static void case_limit(void)
     for (uint32_t p = 100; p < 100 + DBG_MAX_BREAKPOINTS - 1; ++p)
         args += "," + std::to_string(p);
     args += "]}";
+    /* Marked before the arming call: K is armed by it, and the stop may come before the
+     * refusal below is answered. */
+    size_t m  = g_link.mark();
     cJSON *r  = g_link.call("setBreakpoints", args.c_str());
     cJSON *bs = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "breakpoints");
     int verified = 0;
@@ -849,7 +852,6 @@ static void case_limit(void)
     CHECK(ok(r) && past && cJSON_IsFalse(cJSON_GetObjectItem(past, "verified")) && perr &&
               !std::strcmp(cJSON_GetObjectItem(perr, "code")->valuestring, "LIMIT_EXCEEDED"),
           "the breakpoint past the limit was not refused per item with LIMIT_EXCEEDED");
-    size_t m = g_link.mark();
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_K)),
           "no stop at a previously set breakpoint after the refusal");
     r = g_link.call("clearAllBreakpoints");
@@ -885,6 +887,88 @@ static void case_pause(void)
     }
     CHECK(worst <= kTaskNs + 100 * kMs, "the plant froze %.0f ms after a pause request (bound %lld)",
           (double)worst / 1e6, (long long)((kTaskNs + 100 * kMs) / kMs));
+}
+
+static double body_num(cJSON *m, const char *key)
+{
+    cJSON *b = m ? cJSON_GetObjectItem(m, "body") : nullptr;
+    cJSON *v = b ? cJSON_GetObjectItem(b, key) : nullptr;
+    return v && cJSON_IsNumber(v) ? v->valuedouble : -1.0;
+}
+
+/* A036, A037 (the core's part): a cycle step from a probe runs exactly one scan and stops at the
+ * same probe in the next scan, with the task's virtual time one interval on and the plant one
+ * scan on; statement steps leave virtual time alone; a cycle step from a boundary hold runs one
+ * scan and holds again. Every stop reports the task's virtual time as `vt` (ms). */
+static void case_cycle_step(void)
+{
+    g_case   = "A036 cycle step";
+    size_t m = g_link.mark();
+    cJSON *r = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[1]}");
+    CHECK(ok(r), "setBreakpoints refused: %s", err_code(r));
+    Msg st{};
+    CHECK(g_link.event(m, "stopped", &st, 1000, stopped_at("breakpoint", P_K)), "no stop at K");
+    g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[]}");
+    const int64_t vt0 = plc_task_virtual_time_ns(0);
+    const int     w0  = g_witness_st.load(), pw0 = plant_word(0);
+    CHECK(body_num(st.j, "vt") == (double)vt0 / 1e6, "stopped vt %.3f, the task's virtual time %.3f ms",
+          body_num(st.j, "vt"), (double)vt0 / 1e6);
+    for (int i = 1; i <= 3; ++i)
+    {
+        m = g_link.mark();
+        r = g_link.call("cycleStep", "{\"task\":\"Main\"}");
+        CHECK(ok(r), "cycleStep refused: %s", err_code(r));
+        Msg cs{};
+        CHECK(g_link.event(m, "stopped", &cs, 1000, stopped_at("step", P_K)),
+              "cycle step %d did not stop at K in the next scan", i);
+        CHECK(plc_task_virtual_time_ns(0) == vt0 + i * kTaskNs, "virtual time +%.1f ms after %d cycle steps",
+              (double)(plc_task_virtual_time_ns(0) - vt0) / 1e6, i);
+        CHECK(body_num(cs.j, "vt") == (double)(vt0 + i * kTaskNs) / 1e6, "stopped vt %.3f after %d cycle steps",
+              body_num(cs.j, "vt"), i);
+        CHECK(g_witness_st.load() == w0 + i && plant_word(0) == pw0 + i,
+              "after %d cycle steps the program's witness is +%d and the plant's +%d", i,
+              g_witness_st.load() - w0, plant_word(0) - pw0);
+    }
+    g_case = "A036 statement steps";
+    for (int i = 0; i < 2; ++i)
+    {
+        m = g_link.mark();
+        CHECK(ok(g_link.call("next")), "next refused");
+        CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("step", -1)), "no step stop");
+    }
+    CHECK(plc_task_virtual_time_ns(0) == vt0 + 3 * kTaskNs, "statement steps moved virtual time");
+
+    g_case = "A036 from a boundary";
+    cont();
+    bool boundary = false;
+    for (int i = 0; i < 40 && !boundary; ++i)
+    {
+        m = g_link.mark();
+        g_link.call("pause");
+        Msg ps{};
+        CHECK(g_link.event(m, "stopped", &ps, 1000, stopped_at("pause", -1)), "no pause stop");
+        cJSON *hb = cJSON_GetObjectItem(cJSON_GetObjectItem(ps.j, "body"), "heldAtBoundary");
+        boundary  = hb && cJSON_IsTrue(hb);
+        if (!boundary) cont();
+    }
+    CHECK(boundary, "never paused at a scan boundary in 40 tries");
+    const int64_t vt1 = plc_task_virtual_time_ns(0);
+    const int     w1  = g_witness_st.load();
+    m = g_link.mark();
+    r = g_link.call("cycleStep");
+    CHECK(ok(r), "cycleStep from a boundary refused: %s", err_code(r));
+    Msg bs{};
+    CHECK(g_link.event(m, "stopped", &bs, 1000, [](cJSON *b) {
+              cJSON *rs = cJSON_GetObjectItem(b, "reason"), *hb = cJSON_GetObjectItem(b, "heldAtBoundary");
+              return rs && !std::strcmp(rs->valuestring, "step") && hb && cJSON_IsTrue(hb);
+          }),
+          "a cycle step from a boundary did not hold at the next boundary");
+    CHECK(g_witness_st.load() == w1 + 1 && plc_task_virtual_time_ns(0) == vt1 + kTaskNs,
+          "a cycle step from a boundary ran %d scans and moved virtual time %.1f ms",
+          g_witness_st.load() - w1, (double)(plc_task_virtual_time_ns(0) - vt1) / 1e6);
+    sleep_ms(100);
+    CHECK(g_witness_st.load() == w1 + 1, "the task ran on after the cycle step's hold");
+    cont();
 }
 
 /* A033 stop: the program stops, the session stays; a stop while parked lands STOPPED, not ERROR. */
@@ -946,6 +1030,7 @@ int main()
     case_armed_in_dwell();
     case_limit();
     case_pause();
+    case_cycle_step();
     case_stop();
     if (plc_get_state() == PLC_STATE_RUNNING) cmd("STOP");
     wait_for([] { return !plc_state_is_transitioning(); }, 3000);

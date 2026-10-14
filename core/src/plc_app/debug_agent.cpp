@@ -84,7 +84,8 @@ BpRecord g_pool[DBG_POOL_SIZE];
 SideSlot g_slots[DBG_POOL_SIZE];
 TaskSlot g_tasks[DBG_MAX_TASKS];
 
-/* Trap word (D6.3): kind | task << 8 | depth bound << 16 | generation << 32. */
+/* Trap word (D6.3): kind | task << 8 | generation << 16 | bound << 32. The bound is a frame depth,
+ * or a probe ID for AT_PROBE, so it takes the 32-bit half. */
 std::atomic<uint64_t> g_trap{0};
 std::atomic<uint32_t> g_attach_gen{0};
 
@@ -183,19 +184,20 @@ bool cond_verify(const uint8_t *c, size_t n)
     return false;
 }
 
-bool trap_matches(uint64_t trap, size_t task)
+bool trap_matches(uint64_t trap, size_t task, uint32_t probe)
 {
     const uint32_t kind = (uint32_t)(trap & 0xFF);
     if (kind == DBG_TRAP_NONE) return false;
     const uint32_t t = (uint32_t)((trap >> 8) & 0xFF);
     if (t != DBG_TASK_ANY && t != task) return false;
-    const uint32_t bound = (uint32_t)((trap >> 16) & 0xFFFF);
+    const uint32_t bound = (uint32_t)(trap >> 32);
     switch (kind)
     {
     case DBG_TRAP_PAUSE:
     case DBG_TRAP_STEP_IN: return true;
     case DBG_TRAP_STEP_OVER: return tl_depth <= bound;
     case DBG_TRAP_STEP_OUT: return tl_depth < bound;
+    case DBG_TRAP_AT_PROBE: return probe == bound;
     default: return false;
     }
 }
@@ -330,7 +332,7 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
     const uint64_t q = t->qs.fetch_add(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst); /* ③; also D2.1's acquire */
 
-    const bool trap_wants = trap_matches(g_trap.load(std::memory_order_relaxed), tl_idx);
+    const bool trap_wants = trap_matches(g_trap.load(std::memory_order_relaxed), tl_idx, id);
 
     bool     bp_wants = false;
     uint32_t hits     = 0;
@@ -525,11 +527,11 @@ extern "C" void debug_agent_reclaim(void)
     reclaim_locked();
 }
 
-extern "C" void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t depth_bound)
+extern "C" void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t bound)
 {
     std::lock_guard<std::mutex> g(g_mu);
     const uint64_t pred = (uint64_t)(kind & 0xFF) | (uint64_t)(task & 0xFF) << 8 |
-                          (uint64_t)(depth_bound & 0xFFFF) << 16 | (uint64_t)(++g_trap_gen) << 32;
+                          (uint64_t)(++g_trap_gen & 0xFFFF) << 16 | (uint64_t)bound << 32;
     g_trap.store(pred, std::memory_order_relaxed);
     /* Pairs with the slow path's fence through the flag byte: a probe that sees TRAP reads pred. */
     std::atomic_thread_fence(std::memory_order_release);

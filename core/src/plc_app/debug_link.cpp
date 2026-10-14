@@ -74,6 +74,18 @@ struct TaskView
     bool       at_boundary = false;
     dbg_stop_t stop{};
 };
+/* A cycle step in flight (ADR-001 D4.9). From probe P in scan k it runs in two legs: the rest of
+ * scan k to a boundary hold, then one released scan with an AT_PROBE trap on P (a stop at P in
+ * scan k+1, or a hold at the next boundary if that scan never reaches P). From a boundary it is
+ * the second leg alone, ending in the hold. Each leg is one scan of the dispatcher's budget, so
+ * virtual time moves exactly one interval (ADR-004 D4). */
+struct Cycle
+{
+    bool     active    = false;
+    bool     has_probe = false;
+    bool     last_leg  = false; /* the released scan is running */
+    uint32_t probe     = 0;
+};
 struct Session
 {
     std::string user;
@@ -93,6 +105,7 @@ int                            g_next_bp = 1;
 long                           g_last_stop_task = -1; /* the task of the most recent stop */
 bool        g_pausing = false; /* a pause or all-stop wants every task halted */
 TaskView    g_view[DBG_MAX_TASKS];
+Cycle       g_cycle[DBG_MAX_TASKS];
 std::string g_last_run_state;
 dbg_counters_t g_last_counters{};
 /* The loaded program's identity (debug_link_set_image) and the last hello pushed. */
@@ -226,6 +239,7 @@ cJSON *hello_locked(void)
     cJSON_AddBoolToObject(caps, "hitCount", true);
     cJSON_AddBoolToObject(caps, "conditional", false);
     cJSON_AddBoolToObject(caps, "control", true);
+    cJSON_AddBoolToObject(caps, "cycleStep", true);
     cJSON_AddItemToObject(b, "capabilities", caps);
     cJSON_AddNumberToObject(b, "probes", probes);
     cJSON *img = cJSON_CreateObject();
@@ -344,6 +358,42 @@ void all_stop_locked(void)
     plc_run_control_pause(PLC_ALL_TASKS);
 }
 
+/* ADR-003 D4: every stop carries the task's virtual time, ms since the program started. */
+void add_vt(cJSON *b, size_t task)
+{
+    const int64_t vt = plc_task_virtual_time_ns(task);
+    if (vt >= 0) cJSON_AddNumberToObject(b, "vt", (double)vt / 1e6);
+}
+
+/* A held task's cycle step: start the released scan, or report its end. Under g_mu. */
+bool cycle_on_hold_locked(size_t i, const char *name, int64_t since)
+{
+    Cycle &c = g_cycle[i];
+    if (!c.active) return false;
+    if (c.has_probe && !c.last_leg)
+    {
+        c.last_leg = true;
+        debug_agent_set_trap(DBG_TRAP_AT_PROBE, (uint32_t)i, c.probe);
+        if (!plc_run_control_run_scans(i, 1, 2000)) log_error("[debug] cycle step: the task did not resume");
+        return true;
+    }
+    c = Cycle{};
+    debug_agent_clear_trap();
+    TaskView &v   = g_view[i];
+    v.halted      = true;
+    v.at_boundary = true;
+    g_last_stop_task = (long)i;
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddStringToObject(b, "reason", "step");
+    add_task(b, i, name);
+    cJSON_AddBoolToObject(b, "heldAtBoundary", true);
+    cJSON_AddNumberToObject(b, "since", wall_ms_of(since));
+    add_vt(b, i);
+    send_event("stopped", b);
+    plc_run_control_halted(i);
+    return true;
+}
+
 /* One agent pass: hello, stops, boundary holds, resumes, counters, run state. */
 void agent_pass(void)
 {
@@ -361,6 +411,7 @@ void agent_pass(void)
             v.at_boundary = false;
             v.stop        = s;
             g_last_stop_task = (long)i;
+            g_cycle[i]    = Cycle{}; /* a cycle step ends at any stop: P, or a breakpoint first */
             cJSON *b      = cJSON_CreateObject();
             cJSON_AddStringToObject(b, "reason", reason_name(s.reason));
             add_task(b, i, names[i]);
@@ -376,6 +427,7 @@ void agent_pass(void)
                 cJSON_AddNumberToObject(b, "hits", s.hits);
             }
             cJSON_AddNumberToObject(b, "since", wall_ms_of(s.since_ns));
+            add_vt(b, i);
             send_event("stopped", b);
             plc_run_control_halted(i);
             /* D4.11: a step that landed clears the trap; a breakpoint starts the all-stop. */
@@ -385,6 +437,7 @@ void agent_pass(void)
         }
         int64_t    since = 0;
         const long st    = plc_task_run_state(i, &since);
+        if (st == PLC_TASK_RUN_HELD && !v.halted && cycle_on_hold_locked(i, names[i], since)) continue;
         if (st == PLC_TASK_RUN_HELD && !v.halted && g_pausing)
         {
             v.halted      = true;
@@ -395,6 +448,7 @@ void agent_pass(void)
             add_task(b, i, names[i]);
             cJSON_AddBoolToObject(b, "heldAtBoundary", true);
             cJSON_AddNumberToObject(b, "since", wall_ms_of(since));
+            add_vt(b, i);
             send_event("stopped", b);
             plc_run_control_halted(i);
         }
@@ -406,6 +460,7 @@ void agent_pass(void)
     if (n == 0)
     {
         for (auto &v : g_view) v = TaskView{};
+        for (auto &c : g_cycle) c = Cycle{};
         g_pausing = false;
         g_last_stop_task = -1;
     }
@@ -577,6 +632,7 @@ bool task_arg(cJSON *args, size_t *task, bool *all)
 Reply resume_all_locked(void)
 {
     g_pausing = false;
+    for (auto &c : g_cycle) c = Cycle{};
     debug_agent_clear_trap();
     const bool ok = plc_run_control_resume(PLC_ALL_TASKS, 2000);
     for (auto &v : g_view) v = TaskView{};
@@ -736,7 +792,7 @@ Reply handle(const char *command, cJSON *args)
     const bool known = is_command(command, {"detach", "terminate", "beatClient", "setBreakpoints",
                                             "clearAllBreakpoints", "continue", "pause", "next",
                                             "stepIn", "stepOut", "stop", "stackTrace",
-                                            "readLeaves"});
+                                            "readLeaves", "cycleStep"});
     if (!known)
         return fail("UNSUPPORTED", std::string("this runtime core does not implement ") + command);
 
@@ -885,6 +941,30 @@ Reply handle(const char *command, cJSON *args)
     const TaskView &v = g_view[task];
     if (plc_task_run_state(task, nullptr) == PLC_TASK_RUN_RUNNING || !v.halted)
         return fail("NOT_HALTED", "the task is not halted");
+    if (!std::strcmp(command, "cycleStep"))
+    {
+        /* D4.9: from probe P, stop at P in the next scan; from a boundary, run one scan and hold.
+         * The trap is off for the first leg so the task runs to its boundary. */
+        Cycle c;
+        c.active    = true;
+        c.has_probe = !v.at_boundary;
+        c.probe     = v.stop.probe;
+        c.last_leg  = v.at_boundary;
+        debug_agent_clear_trap();
+        g_cycle[task] = c;
+        g_view[task]  = TaskView{};
+        if (!plc_run_control_run_scans(task, 1, 2000))
+        {
+            g_cycle[task] = Cycle{};
+            return fail("INTERNAL", "the dispatcher did not resume the task");
+        }
+        char names[DBG_MAX_TASKS][32];
+        task_count(names);
+        cJSON *ev = cJSON_CreateObject();
+        add_task(ev, task, names[task]);
+        send_event("continued", ev);
+        return success();
+    }
     const uint32_t depth = v.at_boundary ? 0 : v.stop.depth;
     dbg_trap_kind_t kind = DBG_TRAP_STEP_IN;
     uint32_t        bound = 0;

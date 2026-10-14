@@ -61,6 +61,7 @@ typedef enum
     DBG_TRAP_STEP_IN,  /* the next probe of the task */
     DBG_TRAP_STEP_OVER,/* the next probe of the task at frame depth <= bound */
     DBG_TRAP_STEP_OUT, /* the next probe of the task at frame depth < bound */
+    DBG_TRAP_AT_PROBE, /* probe `bound` of the task (cycle step's second scan, D4.9) */
 } dbg_trap_kind_t;
 
 #define DBG_TASK_ANY 0xFFu
@@ -149,7 +150,8 @@ void debug_agent_reclaim(void);
 
 /* ---- Trap (pause and step) ---- */
 
-void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t depth_bound);
+/* bound: the frame depth for STEP_OVER/STEP_OUT, the probe ID for AT_PROBE. */
+void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t bound);
 void debug_agent_clear_trap(void);
 
 /* ---- Stops (agent thread) ---- */
