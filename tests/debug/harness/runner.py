@@ -792,6 +792,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     ap.add_argument("--token", default=os.environ.get("OPENPLC_DEBUG_TOKEN"))
     ap.add_argument(
+        "--user-token",
+        action="append",
+        default=[],
+        metavar="NAME=JWT",
+        help='a named test user\'s JWT, for {"~token": "user:NAME"} (repeatable)',
+    )
+    ap.add_argument(
         "--insecure", action="store_true", help="accept the runtime's self-signed certificate"
     )
     ap.add_argument(
@@ -808,7 +815,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     opts = ap.parse_args(argv)
 
-    endpoint = SocketIOEndpoint(opts.endpoint, token=opts.token, insecure=opts.insecure)
+    user_tokens = dict(item.partition("=")[::2] for item in opts.user_token)
+    endpoint = SocketIOEndpoint(
+        opts.endpoint, token=opts.token, insecure=opts.insecure, user_tokens=user_tokens
+    )
     build: BuildOutputs = (
         build_views.DirectoryBuild(opts.build_dir)
         if opts.build_dir.is_dir()

@@ -89,7 +89,9 @@ A **major** bump is incompatible; a **minor** bump only adds optional fields (as
 1.0 runners paired a request `repeat n` with a following event `repeat n`; every corpus file
 that relied on it now says `loop`, and no 1.0 file exists outside this corpus. 1.1 also pins the `throughout`
 window to "since the previous plant observation": the 1.0 runner started it at the end of the
-step just before, so after a `wait` it held no samples and checked nothing.
+step just before, so after a `wait` it held no samples and checked nothing. Later 1.1 additions (2026-10-14): the `~contains` and `~notRef` matchers and the
+`~token: "user:<name>"` symbol; the runner now fails a matcher key it does not know instead of
+skipping it, so an oracle can never pass on a runner that predates its matcher.
 
 ### Steps
 
@@ -137,7 +139,7 @@ An `observe` expectation uses these keys (any subset):
 | `outputs` | plant | `{"%QW0": match}`: last value received, by address |
 | `variables` | session | `{path: match}` |
 | `state` | status | the run state (F040: `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `SAFE_STOPPED`, `ERROR`, plus `NOT_RESPONDING`) |
-| `fields` | status / log | other fields, e.g. `{"reason": "heartbeat_timeout"}`, `{"lastFault": {…}}` |
+| `fields` | status / log | other fields, e.g. `{"reason": "heartbeat_timeout"}`, `{"lastFault": {…}}`; the log view is `{"lines": [text, …]}` (ASSUMED until the runtime has a log read-back path), matched with `~contains` |
 | `maxGapMs` | plant | `{task: match}`: the longest stretch, in ms, between scan-witness increments over the same window as `throughout` (a freeze or a stall shows as a gap) |
 
 **ADR-004 arithmetic the oracles rely on.** Halted mid-scan k: the session reads the witness
@@ -176,6 +178,7 @@ before sending:
 | `{"~lines": n}` | the first n breakpoint-able lines of the request's `file` (debug info `lines`, F016); n may itself be a symbol |
 | `{"~leaves": "PROG0", "~count": n}` | the first n debug-map leaf paths under that instance |
 | `{"~token": "valid\|none\|forged\|expired"}` | a JWT from the endpoint: its own, null, its own with the signature replaced, or an expired one (BLOCKED without the signing key) |
+| `{"~token": "user:<name>"}` | the JWT of a named test user (runner `--user-token <name>=JWT`; BLOCKED without it): permission, lock and hand-over scenarios need several identities |
 
 A symbol the build outputs cannot satisfy (no build directory, too few lines or leaves) makes the
 scenario BLOCKED, not DIVERGE. `validate.py` refuses an unknown symbol and a `~build` variant
@@ -222,6 +225,8 @@ listed are ignored). Otherwise an object whose keys start with `~`:
 | `~display: "T#1s200ms"` | the value's IEC display string (A090) |
 | `~capture: "name"` | always; binds the value for later steps (combinable with other keys) |
 | `~ref: "name"`, `~add: n`, `~tol: t` | equals the captured value (+ n), within ± t when `~tol` is given |
+| `~notRef: "name"` | differs from the captured value (a build identity that changed) |
+| `~contains: <match>` | an array with at least one element matching it, or a string containing it (an audit entry, a log line) |
 | `~any`, `~absent` | present with any value / not present |
 | `~len`, `~maxLen` | array or string length |
 

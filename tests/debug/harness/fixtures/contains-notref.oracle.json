@@ -1,0 +1,20 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/contains-notref",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A128"],
+  "title": "Runner fixture: ~contains finds an element or a substring, ~notRef holds when a value moved on; the last step must DIVERGE",
+  "notes": "Runs against fake_endpoint.py only (test_runner.py).",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 1}},
+    {"observe": "status", "expect": {"fields": {"sessions": {"~contains": {"role": "controller"}}, "state": {"~contains": "UNN"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~notRef": "w"}}}},
+    {"observe": "status", "note": "no observer is attached: must DIVERGE", "expect": {"fields": {"sessions": {"~contains": {"role": "observer"}}}}}
+  ]
+}

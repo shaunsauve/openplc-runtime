@@ -319,7 +319,9 @@
         "BUSY",
         "SESSION_ENDED",
         "INTERNAL",
-        "SAFE_STOPPED"
+        "SAFE_STOPPED",
+        "CHANGE_REFUSED",
+        "CHANGE_FAILED"
       ]
     },
     "eventName": {
@@ -837,6 +839,15 @@
         "~ref": {
           "type": "string",
           "pattern": "^[a-z][A-Za-z0-9_]*$"
+        },
+        "~notRef": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_]*$",
+          "description": "differs from the captured value (a build identity that changed, a counter that moved)"
+        },
+        "~contains": {
+          "$ref": "#/$defs/match",
+          "description": "an array with at least one element matching this, or a string containing this string"
         },
         "~add": {
           "type": "number"

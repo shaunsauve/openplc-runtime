@@ -68,6 +68,8 @@ CONSTRUCTS: List[Tuple[str, Optional[str], bool, str, Optional[int], str]] = [
     ("inspect", "short_debug_info", True, "DIVERGE", 0, "probeCount"),
     ("inspect", None, False, "BLOCKED", 0, "build outputs"),
     ("repeat-batch", None, True, "DIVERGE", 4, "cycleStep.success"),
+    ("contains-notref", None, True, "DIVERGE", 6, "sessions"),
+    ("notref-same", None, True, "DIVERGE", 3, "capture s"),
 ]
 
 

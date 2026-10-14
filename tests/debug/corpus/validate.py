@@ -340,6 +340,7 @@ def walk(node: Json, path: str = "$") -> Iterator[Tuple[str, Json]]:
 
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
 TOKENS = {"valid", "none", "forged", "expired"}
+USER_TOKEN = re.compile(r"^user:[a-z][a-z0-9_]*$")  # a named test user's JWT (README § Argument symbols)
 MARKER = re.compile(r"^@[A-Za-z0-9_]+$")  # the runner resolves this form wherever it appears
 
 
@@ -368,7 +369,10 @@ def symbol_problem(node: Dict[str, Json], prog: "Program") -> Optional[str]:
     if keys == {"~lines"} or keys == {"~leaves", "~count"}:
         return None
     if keys == {"~token"}:
-        return None if node["~token"] in TOKENS else f"~token must be one of {sorted(TOKENS)}"
+        tok = node["~token"]
+        if tok in TOKENS or (isinstance(tok, str) and USER_TOKEN.match(tok)):
+            return None
+        return f"~token must be one of {sorted(TOKENS)} or user:<name>"
     return f"unknown argument symbol {sorted(keys)}"
 
 
@@ -438,9 +442,10 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
             if isinstance(node, str) and MARKER.match(node) and not re.search(r"\.(line|endLine)$", where):
                 out.extend(f"{where}: {p}" for p in marker_lines(prog, node, programs)[0])
             if isinstance(node, dict):
-                ref = node.get("~ref")
-                if isinstance(ref, str) and ref not in captured:
-                    out.append(f"{where}: ~ref {ref!r} has no earlier ~capture")
+                for key in ("~ref", "~notRef"):
+                    ref = node.get(key)
+                    if isinstance(ref, str) and ref not in captured:
+                        out.append(f"{where}: {key} {ref!r} has no earlier ~capture")
                 cap = node.get("~capture")
                 if isinstance(cap, str):
                     captured.add(cap)

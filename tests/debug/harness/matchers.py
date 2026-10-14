@@ -60,6 +60,13 @@ def _equal(expected: Json, observed: Observed) -> bool:
     return not isinstance(observed, _Missing) and expected == observed
 
 
+KNOWN = {
+    "~eq", "~ne", "~lt", "~le", "~gt", "~ge", "~range", "~approx", "~oneOf", "~display",
+    "~capture", "~ref", "~add", "~tol", "~any", "~absent", "~len", "~maxLen", "~notRef",
+    "~contains",
+}
+
+
 def is_matcher(node: Json) -> bool:
     return isinstance(node, dict) and bool(node) and all(k.startswith("~") for k in node)
 
@@ -112,6 +119,10 @@ def _match_matcher(
         return None if isinstance(observed, _Missing) else fail("present, expected absent")
     if isinstance(observed, _Missing):
         return fail("absent")
+    unknown = sorted(set(m) - KNOWN)
+    if unknown:
+        # An unknown key used to be skipped, so a matcher this runner predates passed silently.
+        return fail(f"unknown matcher {unknown}")
     num = _number(observed)
     for key, arg in m.items():
         if key in ("~capture", "~add", "~tol", "~any"):
@@ -154,6 +165,21 @@ def _match_matcher(
                 key == "~maxLen" and len(observed) > limit
             ):
                 return fail(f"length {len(observed)}")
+        if key == "~contains":
+            if isinstance(observed, str):
+                if not isinstance(arg, str) or arg not in observed:
+                    return fail("does not contain")
+            elif isinstance(observed, list):
+                # A trial match must not leak captures from elements that then fail.
+                if not any(match(arg, item, dict(captures)) is None for item in observed):
+                    return fail("no element matches")
+            else:
+                return fail("neither an array nor a string")
+        if key == "~notRef":
+            if not isinstance(arg, str) or arg not in captures:
+                return fail(f"capture {arg!r} not bound")
+            if _equal(captures[arg], observed):
+                return fail(f"equals capture {arg}, expected a different value")
         if key == "~ref":
             if not isinstance(arg, str) or arg not in captures:
                 return fail(f"capture {arg!r} not bound")

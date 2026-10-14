@@ -30,8 +30,17 @@ RESPONSE_TIMEOUT_S = 5.0
 
 
 class SocketIOEndpoint:
-    def __init__(self, url: str, token: Optional[str], insecure: bool) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: Optional[str],
+        insecure: bool,
+        user_tokens: Optional[Dict[str, str]] = None,
+    ) -> None:
         parsed = urlparse(url)
+        # Named test users' JWTs (`~token: "user:<name>"`): permission, lock and hand-over
+        # scenarios need several identities, and the harness cannot mint them.
+        self.user_tokens = dict(user_tokens or {})
         self.url = url
         self.host = parsed.hostname or "127.0.0.1"
         self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -101,6 +110,11 @@ class SocketIOEndpoint:
     def credential(self, kind: str) -> Json:
         if kind == "none":
             return None
+        if kind.startswith("user:"):
+            name = kind[len("user:"):]
+            if name not in self.user_tokens:
+                raise Blocked(f"credential {kind}: no --user-token {name}=JWT given")
+            return self.user_tokens[name]
         if kind == "expired":
             raise Blocked("an expired JWT needs the runtime's signing key, which the harness lacks")
         if not self.token:

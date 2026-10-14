@@ -93,6 +93,14 @@ def ref_before_capture_in_loop(doc: Doc) -> None:
     _steps(doc).insert(0, {"loop": 2, "steps": [{"observe": "plant", "expect": {"witness": {"Main": {"~ref": "zz"}}}}]})
 
 
+def not_ref_before_capture(doc: Doc) -> None:
+    _steps(doc).insert(0, {"observe": "plant", "expect": {"witness": {"Main": {"~notRef": "later"}}}})
+
+
+def token_user_without_name(doc: Doc) -> None:
+    _steps(doc)[0]["args"] = {"token": {"~token": "user:"}}
+
+
 def client_on_plant_read(doc: Doc) -> None:
     _steps(doc).append({"client": "c2", "observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}})
 
@@ -112,6 +120,8 @@ ORACLE_DEFECTS: List[Tuple[str, Callable[[Doc], None], str]] = [
     ("thenContinue on several streams", then_continue_on_all_clients, "thenContinue"),
     ("~ref in a loop body before its ~capture", ref_before_capture_in_loop, "no earlier ~capture"),
     ("client on a plant read", client_on_plant_read, "client"),
+    ("~notRef with no earlier ~capture", not_ref_before_capture, "no earlier ~capture"),
+    ("~token user: with no user name", token_user_without_name, "~token"),
 ]
 
 SOURCE_DEFECTS: List[Tuple[str, Tuple[str, str], str]] = [

@@ -1,0 +1,17 @@
+{
+  "$schema": "../../corpus/oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/notref-same",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A128"],
+  "title": "Runner fixture: ~notRef against the value it just captured must DIVERGE",
+  "notes": "Runs against fake_endpoint.py only (test_runner.py).",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}},
+    {"observe": "status", "expect": {"fields": {"state": {"~capture": "s"}}}},
+    {"observe": "status", "expect": {"fields": {"state": {"~notRef": "s"}}}}
+  ]
+}
