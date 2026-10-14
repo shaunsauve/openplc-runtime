@@ -46,7 +46,10 @@ with open(dst, "a", encoding="utf-8") as fh:
     for crit, checks in by.items():
         failed = [w for v, w in checks if v == "FAIL"]
         fh.write(json.dumps({
-            "criterion": crit, "verdict": "FAIL" if failed else "PASS",
+            # The report's harness vocabulary is PASS/DIVERGE/BLOCKED/UNPROVEN. A check that
+            # ran and did not match is DIVERGE, exactly as harness/runner.py reports it; an
+            # earlier "FAIL" here fell outside that vocabulary and was dropped unread.
+            "criterion": crit, "verdict": "DIVERGE" if failed else "PASS",
             "test": f"tests/debug/plant/sec_e2e.py::{crit}", "ran_on": ran_on, "commit": commit,
             "repo": "openplc-runtime", "timestamp": stamp,
             "evidence": ("; ".join(failed) if failed else f"{len(checks)} checks passed: " + "; ".join(w for _, w in checks))[:300],
