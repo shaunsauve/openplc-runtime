@@ -1,12 +1,18 @@
 """A fake core agent: serves the internal core link (ADR-003 D1.3, `u32 BE length + UTF-8 JSON`
 frames on a unix socket) and simulates one task, `Main`, walking a fixed probe sequence.
 
-It stands in for core/src/plc_app/debug_agent.cpp until that lands. The framing is written here
-independently of the gateway's, so a framing bug on either side shows up as a failed exchange.
+It stands in for core/src/plc_app/debug_link.cpp and speaks the same link: docs/DEBUG_CORE_LINK.md.
+Every request it receives is validated against that file's linkspec block (an argument outside
+the spec is refused BAD_REQUEST, as the real core refuses it), so any gateway test that sends a
+non-conforming request fails; test_the_fake_core_speaks_the_link_spec checks what it sends back.
+It serves more of the link than the real core does (exceptions, cycleStep, runScans,
+runToCursor, restart, setHaltMode), as a stand-in for capabilities still to be built. The framing
+is written here independently of the gateway's, so a framing bug on either side shows up as a
+failed exchange.
 
 See also:
   webserver/debug_gateway/core_link.py - the gateway side of the same link.
-  docs/DEBUG_PROTOCOL.md - "Core link" lists every message this fake answers or pushes.
+  docs/DEBUG_CORE_LINK.md - the link spec; tests/debug/wire/link_spec.py - its checker.
   tests/pytest/restapi/test_debug_gateway.py - the tests that drive the gateway against it.
 """
 
@@ -21,17 +27,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
+import link_spec
+
 Json = Union[None, bool, int, float, str, List["Json"], Dict[str, "Json"]]
 JsonObj = Dict[str, Json]
 
 TASK = "Main"
+TASK_ID = 0
+SPEC = link_spec.load()
 FILE = "program.st"
 # (line, col) of each probe of task Main, in execution order; probe ID = index.
 PROBES: List[Tuple[int, int]] = [(3, 3), (4, 3), (6, 5), (7, 5), (9, 3)]
 MD5 = "0123456789abcdef0123456789abcdef"
 BUILD_ID = "b" * 64
 COMPILER = "strucpp 0.9.0"
-ENGINE_ABI = "1.0"
+ENGINE_ABI = 1
 
 FULL_CAPS: JsonObj = {
     "probes": True,
@@ -114,9 +124,13 @@ class FakeCore:
         self.cursor: Optional[int] = None
         self.skip_once = False
         self.breakpoints: Dict[int, int] = {}  # probe -> breakpoint id
+        self.bp_file: Dict[int, int] = {}  # probe -> the fileId whose setBreakpoints armed it
+        self.halt_reason: Optional[str] = None
         self.next_bp = 1
         self.exception_filters: List[str] = []
-        self.sessions: Dict[str, str] = {}
+        self.sessions: Dict[str, str] = {}  # session -> role
+        self.users: Dict[str, str] = {}  # session -> user
+        self.since = 0.0
         self.next_session = 1
         self.conns: List[_Conn] = []
         self.closed = threading.Event()
@@ -142,11 +156,18 @@ class FakeCore:
             threading.Thread(target=self._read, args=(conn,), daemon=True).start()
 
     def hello(self) -> JsonObj:
+        caps = {"hitCount": False, "conditional": False, "control": False, **self.capabilities}
         return {
             "link": "1.0",
             "engineAbi": ENGINE_ABI,
-            "capabilities": dict(self.capabilities),
-            "image": {"md5": MD5, "buildId": BUILD_ID, "buildTime": "2026-10-14T00:00:00Z"},
+            "capabilities": caps,
+            "probes": len(PROBES) if caps.get("probes") else 0,
+            "image": {
+                "md5": MD5,
+                "buildId": BUILD_ID,
+                "buildTime": "2026-10-14T00:00:00Z",
+                "sourceHash": None,
+            },
             "params": {"P1": 2, "P2": 15},
         }
 
@@ -177,12 +198,19 @@ class FakeCore:
             self._send(conn, event, body)
 
     def _answer(self, conn: _Conn, msg: JsonObj) -> None:
-        command = str(msg.get("command"))
-        args = msg.get("arguments")
-        args = args if isinstance(args, dict) else {}
-        self.received.append((command, args))
-        time.sleep(self.delays.get(command, 0.0))
+        command = msg.get("command")
+        raw = msg.get("arguments", {})
+        args = raw if isinstance(raw, dict) else {}
+        self.received.append((str(command), args))
+        time.sleep(self.delays.get(str(command), 0.0))
         try:
+            if msg.get("type") != "request" or not isinstance(command, str):
+                raise _Refusal("BAD_REQUEST", "Not a request envelope.")
+            if command not in SPEC.requests:
+                raise _Refusal("UNSUPPORTED", f"The core does not implement {command}.")
+            problems = SPEC.check_request(command, raw)
+            if problems:
+                raise _Refusal("BAD_REQUEST", "; ".join(problems))
             body = self._handle(command, args)
             reply: JsonObj = {"success": True, "body": body}
         except _Refusal as r:
@@ -191,7 +219,8 @@ class FakeCore:
             conn.seq += 1
             _send_frame(
                 conn.sock,
-                {"type": "response", "seq": conn.seq, "request_seq": msg.get("seq"), **reply},
+                {"type": "response", "seq": conn.seq, "request_seq": msg.get("seq"),
+                 "command": command, **reply},
             )
 
     def close(self) -> None:
@@ -248,17 +277,42 @@ class FakeCore:
 
     def _halt(self, reason: str, extra: Optional[JsonObj] = None) -> None:
         self.state = "HALTED"
+        self.halt_reason = reason
+        self.since = time.time() * 1000.0
         self.pending = None
         self.cycle_target = self.scans_left = self.cursor = None
-        body: JsonObj = {"reason": reason, "task": TASK, "probe": self.pc, "scan": self.scan}
+        body: JsonObj = {"reason": reason, "task": TASK, "taskId": TASK_ID, "probe": self.pc,
+                         "scan": self.scan, "since": self.since}
         if reason == "breakpoint":
             body["breakpointIds"] = [self.breakpoints[self.pc]]
         body.update(extra or {})
         self.push("stopped", body)
-        self.push("runState", {"state": "HALTED", "tasks": [TASK], "since": time.time()})
+        self.push("runState", self.run_state())
+
+    def run_state(self) -> JsonObj:
+        """The real core's runState shape; the fake's one task, HALTED refined as the core does."""
+        if self.state != "HALTED":
+            tasks: List[Json] = (
+                [{"task": TASK, "taskId": TASK_ID, "state": "running", "scan": self.scan}]
+                if self.state == "RUNNING" else []
+            )
+            return {"state": self.state, "tasks": tasks, "attached": bool(self.sessions)}
+        reason = self.halt_reason or "pause"
+        task: JsonObj = {"task": TASK, "taskId": TASK_ID, "state": "parked", "reason": reason,
+                         "probe": self.pc, "since": self.since, "scan": self.scan}
+        controller = next((sid for sid, role in self.sessions.items() if role == "controller"), None)
+        return {
+            "state": "HALTED_AT_BP" if reason == "breakpoint" else "PAUSED",
+            "tasks": [task],
+            "attached": bool(self.sessions),
+            "by": self.users.get(controller, "") if controller else "",
+            "location": {"task": TASK, "taskId": TASK_ID, "probe": self.pc},
+            "since": self.since,
+        }
 
     def _resume(self) -> None:
         self.state = "RUNNING"
+        self.halt_reason = None
         self.skip_once = True
         self.cv.notify_all()
 
@@ -268,12 +322,13 @@ class FakeCore:
                 self._halt("exception", {"exception": {"kind": "divByZero"}})
             else:
                 self.state = "ERROR"
-                self.push("runState", {"state": "ERROR", "tasks": [], "since": time.time()})
+                self.push("runState", self.run_state())
 
     def inject_print(self, text: str) -> None:
         with self.cv:
             scan = self.scan
-        self.push("output", {"category": "print", "task": TASK, "scan": scan, "text": text})
+        self.push("output", {"category": "print", "task": TASK, "taskId": TASK_ID, "scan": scan,
+                             "text": text})
 
     # -- requests
 
@@ -286,26 +341,35 @@ class FakeCore:
             raise _Refusal("NOT_HALTED", f"The task is {self.state.lower()}, not halted.")
 
     def _handle_locked(self, command: str, args: JsonObj) -> JsonObj:
+        """docs/DEBUG_CORE_LINK.md request semantics; arguments are already spec-checked."""
         if command == "attach":
             sid = f"s{self.next_session}"
             self.next_session += 1
             self.sessions[sid] = str(args.get("role"))
+            self.users[sid] = str(args.get("user"))
             return {"session": sid}
+        if command == "status":
+            return self.run_state()
+        session = str(args.get("session"))
+        if session not in self.sessions:
+            raise _Refusal("SESSION_ENDED", "The core holds no such session.")
         if command in ("detach", "terminate"):
-            role = self.sessions.pop(str(args.get("session")), None)
+            role = self.sessions.pop(session)
+            self.users.pop(session, None)
             if role == "controller":
                 self.breakpoints.clear()
+                self.bp_file.clear()
                 if command == "terminate":
                     self.state = "STOPPED"
-                    self.push("runState", {"state": "STOPPED", "tasks": [], "since": time.time()})
+                    self.push("runState", self.run_state())
                 elif self.state == "HALTED":
                     self._resume()
-                    self.push("continued", {"task": TASK})
-            return {"forces": []}
+                    self.push("continued", {"allThreadsContinued": True})
+            return {"forces": []} if command == "detach" else {}
         if command == "beatClient":
             return {}
-        if command == "status":
-            return {"state": self.state, "tasks": [{"name": TASK, "scan": self.scan}]}
+        if "task" in args and _task(args["task"]) is None:
+            raise _Refusal("BAD_REQUEST", f"The program has no task {args['task']!r}.")
         if command == "pause":
             if self.state in ("STOPPED", "ERROR"):
                 raise _Refusal("NOT_RUNNING", "The program is not running.")
@@ -314,14 +378,15 @@ class FakeCore:
         if command == "continue":
             self._need_halted()
             self._resume()
-            self.push("continued", {"task": TASK})
-            self.push("runState", {"state": "RUNNING", "tasks": [TASK], "since": time.time()})
-            return {}
+            self.push("continued", {"allThreadsContinued": True})
+            self.push("runState", self.run_state())
+            return {"allThreadsContinued": True}
         if command in ("next", "stepIn", "stepOut"):
             self._need_halted()
             self.pending = "step"
             self._resume()
-            return {}
+            self.push("continued", {"task": TASK, "taskId": TASK_ID})
+            return {"task": TASK, "taskId": TASK_ID}
         if command == "cycleStep":
             self._need_halted()
             self.cycle_target = self.scan + 1
@@ -341,7 +406,7 @@ class FakeCore:
             if self.state == "STOPPED":
                 raise _Refusal("NOT_RUNNING", "The program is already stopped.")
             self.state = "STOPPED"
-            self.push("runState", {"state": "STOPPED", "tasks": [], "since": time.time()})
+            self.push("runState", self.run_state())
             return {}
         if command == "restart":
             self.pc = 0
@@ -351,30 +416,48 @@ class FakeCore:
             self.skip_once = False
             self.state = "RUNNING"
             self.cv.notify_all()
-            self.push("runState", {"state": "RUNNING", "tasks": [TASK], "since": time.time()})
+            self.push("runState", self.run_state())
             return {}
         if command == "setHaltMode":
             return {"mode": args.get("mode")}
         if command == "setBreakpoints":
-            probes = [int(_num(p)) for p in _list(args.get("probes"))]
-            limit = int(_num(self.capabilities.get("maxBreakpoints")))
-            if len(probes) > limit:
-                raise _Refusal("LIMIT_EXCEEDED", f"At most {limit} breakpoints are supported.")
-            self.breakpoints = {}
-            out: List[Json] = []
-            for p in probes:
-                self.breakpoints[p] = self.next_bp
-                out.append({"id": self.next_bp, "probe": p, "verified": True})
-                self.next_bp += 1
-            return {"breakpoints": out}
+            return self._set_breakpoints(int(_num(args.get("fileId"))), _list(args.get("probes")))
         if command == "clearAllBreakpoints":
             removed = len(self.breakpoints)
             self.breakpoints.clear()
+            self.bp_file.clear()
             return {"removed": removed}
         if command == "setExceptionBreakpoints":
             self.exception_filters = [str(f) for f in _list(args.get("filters"))]
             return {"filters": list(self.exception_filters)}
         raise _Refusal("UNSUPPORTED", f"The core does not implement {command}.")
+
+    def _set_breakpoints(self, file_id: int, items: List[Json]) -> JsonObj:
+        """Replaces file_id's set; per-item results with ids stable per armed probe (pm ruling 6)."""
+        probes = [
+            int(_num(it.get("probe"))) if isinstance(it, dict) else int(_num(it)) for it in items
+        ]
+        for p in [p for p, f in self.bp_file.items() if f == file_id and p not in probes]:
+            self.breakpoints.pop(p, None)
+            self.bp_file.pop(p, None)
+        limit = int(_num(self.capabilities.get("maxBreakpoints")))
+        out: List[Json] = []
+        for p in probes:
+            if not 0 <= p < len(PROBES):
+                out.append({"id": None, "probe": p, "verified": False,
+                            "error": {"code": "INVALID_LOCATION", "message": "No such probe."}})
+                continue
+            if p not in self.breakpoints and len(self.breakpoints) >= limit:
+                out.append({"id": None, "probe": p, "verified": False,
+                            "error": {"code": "LIMIT_EXCEEDED",
+                                      "message": f"At most {limit} breakpoints are supported."}})
+                continue
+            if p not in self.breakpoints:
+                self.breakpoints[p] = self.next_bp
+                self.next_bp += 1
+            self.bp_file[p] = file_id
+            out.append({"id": self.breakpoints[p], "probe": p, "verified": True})
+        return {"breakpoints": out}
 
 
 class _Refusal(Exception):
@@ -386,6 +469,15 @@ class _Refusal(Exception):
 
 def _num(v: Json) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _task(v: Json) -> Optional[int]:
+    """A task argument, by name (case-insensitive, pm ruling 12) or by index; None if no such task."""
+    if isinstance(v, str) and v.casefold() == TASK.casefold():
+        return TASK_ID
+    if isinstance(v, int) and not isinstance(v, bool) and v == TASK_ID:
+        return TASK_ID
+    return None
 
 
 def _list(v: Json) -> List[Json]:

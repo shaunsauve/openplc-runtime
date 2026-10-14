@@ -44,7 +44,7 @@
     {"request": "stop", "expect": {"success": true}},
     {"request": "status", "note": "runState events queue up in arrival order; the state is read back", "expect": {"success": true, "body": {"state": "STOPPED"}}},
     {"request": "stop", "expect": {"success": false, "error": "NOT_RUNNING", "body": {"message": {"~ne": ""}}}},
-    {"client": "watcher", "event": "runState", "withinMs": 1000, "expect": {"body": {"state": {"~oneOf": ["HALTED", "RUNNING", "STOPPED"]}}}},
+    {"client": "watcher", "event": "runState", "withinMs": 1000, "expect": {"body": {"state": {"~oneOf": ["PAUSED", "HALTED_AT_BP", "RUNNING", "STOPPED"]}}}},
     {"request": "detach", "expect": {"success": true}},
     {"client": "watcher", "event": "control", "withinMs": 1000, "expect": {"body": {"controller": null}}}
   ]

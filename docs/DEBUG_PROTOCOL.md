@@ -516,9 +516,9 @@ Pushed, never polled. The controller receives every event; observers receive `st
 
 | Event | Body |
 |---|---|
-| `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, scan, location:{file, line, col}, breakpointIds?, exception?}`; one per stop |
-| `continued` | `{task}` |
-| `runState` | `{state, tasks, since}`; on every run-state change |
+| `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, taskId, since, scan?, location:{file, line, col}, breakpointIds?, exception?}`; one per stop. `task` is the task's name (an IEC identifier: compare it case-insensitively), `taskId` its index |
+| `continued` | `{allThreadsContinued: true}` on `continue` (all-stop), `{task, taskId}` on a step |
+| `runState` | `{state, tasks:[{task, taskId, state, reason?, probe?, since?}], attached, by?, location?, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING` |
 | `output` | `{category: logpoint\|print\|runtime\|plugin, task, scan, text}` |
 | `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
 | `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `core_lost` (the core link dropped) or a reason from the core |

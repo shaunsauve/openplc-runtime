@@ -3,12 +3,12 @@
 
 """The internal core link (ADR-003 D1.3): `u32 BE length + UTF-8 JSON` frames, full duplex, on
 `/run/runtime/plc_debug.socket`. Requests are correlated by `seq`/`request_seq`; the core pushes
-events unsolicited, starting with `hello` on every connect.
+events unsolicited, starting with `hello` on every connect and again when its program changes.
 
 See also:
   webserver/debug_gateway/gateway.py - the only consumer of CoreLink.
   tests/debug/wire/fake_core.py - the core agent stand-in serving this link in tests.
-  docs/DEBUG_PROTOCOL.md - "Core link" lists the messages each side sends.
+  docs/DEBUG_CORE_LINK.md - the link spec both ends implement.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from webserver.logger import get_logger
 logger, _ = get_logger("debug_gw", use_buffer=True)
 
 LINK_MAJOR = 1
-MAX_FRAME_BYTES = 16 * 1024 * 1024
+MAX_FRAME_BYTES = 1024 * 1024  # both directions (docs/DEBUG_CORE_LINK.md, pm ruling 10)
 RECONNECT_S = 0.5
 
 EventSink = Callable[[str, JsonObj], None]
@@ -154,6 +154,7 @@ class UnixCoreLink:
                 self._event(str(msg.get("event")), _obj(msg.get("body")))
 
     def _event(self, event: str, body: JsonObj) -> None:
+        # A repeated hello (the core loaded another program) replaces the image and capabilities.
         if event == "hello":
             link = str(body.get("link", ""))
             if not link.startswith(f"{LINK_MAJOR}."):

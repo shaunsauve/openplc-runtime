@@ -12,6 +12,7 @@ spec, the advertisement against every request, and the legacy namespace beside i
 See also:
   webserver/debug_gateway/gateway.py - the gateway under test.
   tests/debug/wire/fake_core.py - the core agent stand-in.
+  tests/debug/wire/link_spec.py - the core-link spec checker (docs/DEBUG_CORE_LINK.md).
   tests/debug/wire/wire_server.py - the served stack (TLS, both namespaces).
   docs/DEBUG_PROTOCOL.md - the spec the catalogue and the request list are checked against.
 """
@@ -19,8 +20,11 @@ See also:
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
+import socket
+import struct
 import sys
 import threading
 import time
@@ -37,7 +41,8 @@ WIRE = ROOT / "tests" / "debug" / "wire"
 sys.path.insert(0, str(WIRE))
 
 from conftest import create_user, token_for  # noqa: E402
-from fake_core import FULL_CAPS, Json, JsonObj, debug_info  # noqa: E402
+import link_spec  # noqa: E402
+from fake_core import FULL_CAPS, FakeCore, Json, JsonObj, debug_info  # noqa: E402
 from wire_server import WireServer, as_obj  # noqa: E402
 from wss_client import WssSio  # noqa: E402
 
@@ -222,13 +227,13 @@ def test_a_passive_observer_is_pushed_every_state_change(serve, admin_token):
     assert watcher.event("control", {"controller": "admin"})["observers"] == 1
     assert ctl.request("pause")["success"] is True
     assert watcher.event("stopped")["reason"] == "pause"
-    assert watcher.event("runState")["state"] == "HALTED"
+    assert watcher.event("runState")["state"] == "PAUSED"
     assert ctl.request("continue")["success"] is True
-    assert watcher.event("continued")["task"] == "Main"
+    assert watcher.event("continued")["allThreadsContinued"] is True
     assert watcher.event("runState")["state"] == "RUNNING"
     server.core.inject_print("hello from Main")
     out = watcher.event("output")
-    assert (out["category"], out["text"], out["task"]) == ("print", "hello from Main", "Main")
+    assert (out["category"], out["text"], out["task"], out["taskId"]) == ("print", "hello from Main", "Main", 0)
     assert ctl.request("detach")["success"] is True
     assert watcher.event("control", {"controller": None})["observers"] == 1
     assert len(watcher.sio.sent) == sent_at_attach, "the passive client sent a request"
@@ -436,7 +441,7 @@ def test_the_version_report_names_the_loaded_build(major, minor, compiler, serve
     assert body["compiler"] == compiler
     assert body["debugInfo"] == {"major": major, "minor": minor}
     assert body["runtime"] == client.get("/api/version").get_json()["version"] == RUNTIME_VERSION
-    assert body["engineAbi"] == "1.0"
+    assert body["engineAbi"] == 1
     assert "Protocol version: `1.0`" in SPEC.read_text()
 
 
@@ -463,3 +468,121 @@ def test_legacy_pdus_pass_through_unchanged_beside_the_gateway(serve, admin_toke
         assert replies.get(timeout=5) == {"success": True, "data": "41 00 01"}
     assert server.legacy.sent == [f"DEBUG:{pdu}\n" for pdu in LEGACY_SCRIPT]
     legacy.disconnect()
+
+
+# --------------------------------------------------------------------------- the core link
+
+
+class _RawLink:
+    """A bare core-link peer: u32 BE + JSON frames, every frame the core sends kept in order."""
+
+    def __init__(self, path: str) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(path)
+        self.frames: List[JsonObj] = []
+        self.seq = 0
+        self.command_of: Dict[int, str] = {}
+        self.cv = threading.Condition()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        try:
+            while True:
+                head = self.sock.recv(4, socket.MSG_WAITALL)
+                if len(head) < 4:
+                    return
+                body = self.sock.recv(struct.unpack(">I", head)[0], socket.MSG_WAITALL)
+                with self.cv:
+                    self.frames.append(json.loads(body))
+                    self.cv.notify_all()
+        except OSError:
+            return
+
+    def _wait(self, pred: Callable[[JsonObj], bool], start: int = 0, timeout: float = 2.0) -> JsonObj:
+        with self.cv:
+            assert self.cv.wait_for(
+                lambda: any(pred(f) for f in self.frames[start:]), timeout
+            ), "no matching frame"
+            return next(f for f in self.frames[start:] if pred(f))
+
+    def send(self, msg: JsonObj) -> int:
+        self.seq += 1
+        msg = {**msg, "seq": self.seq}
+        self.command_of[self.seq] = str(msg.get("command"))
+        data = json.dumps(msg).encode()
+        self.sock.sendall(struct.pack(">I", len(data)) + data)
+        return self.seq
+
+    def call(self, command: str, args: JsonObj) -> JsonObj:
+        seq = self.send({"type": "request", "command": command, "arguments": args})
+        return self._wait(lambda f: f.get("request_seq") == seq)
+
+    def stopped_after(self, mark: int) -> JsonObj:
+        return self._wait(lambda f: f.get("event") == "stopped", mark)
+
+
+def test_the_fake_core_speaks_the_link_spec():
+    """docs/DEBUG_CORE_LINK.md is the one link spec: every request in its linkspec block is
+    driven against the fake core, and every frame the fake sends is checked against the block,
+    so the fake cannot drift from the spec the real core is held to (runctl_e2e.py checks the
+    real core's frames with the same checker). The fake also refuses requests outside the spec,
+    which holds the gateway's outgoing shapes to it in every test above. NO-FOLD: contract."""
+    spec = link_spec.load()
+    path = f"/tmp/fcspec-{os.getpid()}.sock"
+    core = FakeCore(path)
+    link = _RawLink(path)
+    try:
+        first = link._wait(lambda f: True)
+        assert first.get("event") == "hello", f"the first frame is {first}"
+        session = str(as_obj(link.call("attach", {"user": "t", "role": "controller"})["body"])["session"])
+        s = {"session": session}
+
+        def halt(command: str, args: JsonObj) -> None:
+            mark = len(link.frames)
+            assert link.call(command, {**s, **args})["success"] is True, command
+            link.stopped_after(mark)
+
+        halt("setBreakpoints", {"fileId": 0, "probes": [2, {"probe": 3, "hitCount": 1}, 99]})
+        for command, args in [("next", {}), ("stepIn", {"task": "MAIN"}), ("stepOut", {"task": 0}),
+                              ("cycleStep", {}), ("runScans", {"n": 1}), ("runToCursor", {"probe": 4})]:
+            halt(command, args)
+        driven = {"attach", "setBreakpoints", "next", "stepIn", "stepOut", "cycleStep", "runScans",
+                  "runToCursor"}
+        for command, args in [
+            ("status", {}), ("beatClient", s), ("setExceptionBreakpoints", {**s, "filters": ["divByZero"]}),
+            ("setHaltMode", {**s, "mode": "allStop"}), ("clearAllBreakpoints", s), ("continue", s),
+        ]:
+            assert link.call(command, args)["success"] is True, command
+            driven.add(command)
+        halt("pause", {})
+        core.inject_print("hello")
+        for command, args in [("continue", s), ("stop", s), ("restart", {**s, "kind": "warm"}), ("detach", s)]:
+            assert link.call(command, args)["success"] is True, command
+            driven.add(command)
+        other = str(as_obj(link.call("attach", {"user": "u", "role": "controller"})["body"])["session"])
+        assert link.call("terminate", {"session": other})["success"] is True
+        driven |= {"pause", "terminate"}
+        assert driven == set(spec.requests), f"not driven: {set(spec.requests) - driven}"
+
+        refusals = [
+            ({"type": "request", "command": "initialize", "arguments": {}}, "UNSUPPORTED"),
+            ({"type": "event", "command": "status"}, "BAD_REQUEST"),
+            ({"type": "request", "command": "setBreakpoints",
+              "arguments": {"session": session, "breakpoints": [{"probe": 1}]}}, "BAD_REQUEST"),
+            ({"type": "request", "command": "pause", "arguments": {"session": "s999"}}, "SESSION_ENDED"),
+        ]
+        for msg, code in refusals:
+            seq = link.send(msg)
+            resp = link._wait(lambda f, q=seq: f.get("request_seq") == q)
+            assert as_obj(resp.get("error")).get("code") == code, (msg, resp)
+
+        time.sleep(0.1)
+        with link.cv:
+            frames = list(link.frames)
+        problems = [p for f in frames for p in spec.check_frame(f, link.command_of)]
+        seen = {str(f.get("event")) for f in frames if f.get("type") == "event"}
+        assert not problems, problems[:10]
+        assert {"hello", "stopped", "continued", "runState", "output"} <= seen, seen
+    finally:
+        link.sock.close()
+        core.close()

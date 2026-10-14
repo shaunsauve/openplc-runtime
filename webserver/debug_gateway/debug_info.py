@@ -47,6 +47,7 @@ class DebugInfo:
         build = _obj(doc.get("build"))
         self.compiler = build.get("compiler") if isinstance(build.get("compiler"), str) else None
         self.build_id = build.get("buildId") if isinstance(build.get("buildId"), str) else None
+        self.md5 = build.get("md5") if isinstance(build.get("md5"), str) else None
         self.files: Dict[str, int] = {}
         self.paths: Dict[int, str] = {}
         for f in doc.get("files") or []:

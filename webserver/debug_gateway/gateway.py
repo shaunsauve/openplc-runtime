@@ -8,6 +8,7 @@ handshake and version report (D3), translated to and from the internal core link
 See also:
   webserver/debug_gateway/protocol.py - request table, refusal catalogue, envelopes.
   webserver/debug_gateway/core_link.py - the core link and its CoreLink interface.
+  docs/DEBUG_CORE_LINK.md - the core link's messages, and the pm rulings applied here.
   webserver/debug_gateway/debug_info.py - line/probe resolution from debug-info.json.
   webserver/debug_websocket.py - the legacy /api/debug namespace on the same Socket.IO instance.
   docs/DEBUG_PROTOCOL.md - "Session protocol v1", the spec.
@@ -402,8 +403,12 @@ class DebugGateway:
         if info is None:
             raise Refusal(ErrorCode.NO_PROBES, "The running program has no debug information.")
         info.check_supported()
-        running = _obj(_obj(hello).get("image")).get("buildId")
-        if info.build_id != running:
+        image = _obj(_obj(hello).get("image"))
+        # pm ruling 11 (docs/DEBUG_CORE_LINK.md): a program without strucpp_dbg_build_id reports
+        # buildId null, and the debug info is bound to it by md5 until STruCpp emits the symbol.
+        running = image.get("buildId")
+        bound = info.build_id == running if running is not None else info.md5 == image.get("md5")
+        if not bound:
             raise Refusal(
                 ErrorCode.STALE_BUILD,
                 "The debug information on the runtime does not belong to the running program.",
@@ -459,15 +464,18 @@ class DebugGateway:
         out: List[Json] = []
         for requested, (probe, actual), bp in zip(lines, resolved, core_list):
             loc = info.location(probe)
-            out.append(
-                {
-                    "id": _obj(bp).get("id"),
-                    "verified": _obj(bp).get("verified") is True,
-                    "line": actual,
-                    "col": loc.col if loc is not None else None,
-                    "requestedLine": requested,
-                }
-            )
+            item: JsonObj = {
+                "id": _obj(bp).get("id"),
+                "verified": _obj(bp).get("verified") is True,
+                "line": actual,
+                "col": loc.col if loc is not None else None,
+                "requestedLine": requested,
+            }
+            # The core refuses per item (pm ruling 6); DAP carries the reason as `message`.
+            error = _obj(_obj(bp).get("error"))
+            if error:
+                item["message"] = str(error.get("message") or error.get("code"))
+            out.append(item)
         return {"breakpoints": out}
 
     def _breakpoint_locations(
@@ -567,7 +575,9 @@ def _compare(identity: JsonObj, image: JsonObj) -> str:
         return "none"
     if md5 != image.get("md5"):
         return "source"
-    if isinstance(build_id, str) and build_id != image.get("buildId"):
+    # An image with no buildId (pm ruling 11) can only be compared by md5.
+    running = image.get("buildId")
+    if isinstance(build_id, str) and running is not None and build_id != running:
         return "build"
     return "match"
 
