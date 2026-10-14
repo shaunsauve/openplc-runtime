@@ -30,7 +30,11 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "harness"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "wire"))
+import link_spec  # noqa: E402
 from reference_plant import ReferencePlant  # noqa: E402
+
+SPEC = link_spec.load()
 
 LINK = "/run/runtime/plc_debug.socket"
 CORE = "/run/runtime/plc_runtime.socket"
@@ -63,6 +67,9 @@ class Link:
         self.msgs: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
         self.seq = 0
+        self.session: Optional[str] = None
+        self.command_of: Dict[int, str] = {}
+        self.violations: List[str] = []  # every core frame is checked against docs/DEBUG_CORE_LINK.md
         threading.Thread(target=self._read, daemon=True).start()
 
     def _recv(self, n: int) -> bytes:
@@ -79,6 +86,9 @@ class Link:
             while True:
                 (n,) = struct.unpack(">I", self._recv(4))
                 m = json.loads(self._recv(n))
+                with self.lock:
+                    problems = SPEC.check_frame(m, self.command_of)
+                    self.violations += problems[:3]
                 m["_t"] = time.monotonic() * 1000.0
                 with self.lock:
                     self.msgs.append(m)
@@ -88,8 +98,13 @@ class Link:
     def call(self, command: str, args: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.seq += 1
         seq = self.seq
+        args = dict(args or {})
+        if self.session is not None:
+            args.setdefault("session", self.session)
+        with self.lock:
+            self.command_of[seq] = command
         body = json.dumps({"type": "request", "seq": seq, "command": command,
-                           "arguments": args or {}}).encode()
+                           "arguments": args}).encode()
         self.sock.sendall(struct.pack(">I", len(body)) + body)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -150,20 +165,25 @@ def main() -> int:
     def plant_since(t_ms: float) -> List[Any]:
         return plant.history(t_ms)
 
-    # ---- handshake: the declared limit and the probes (A032) ----
+    # ---- handshake: hello first, the declared limit and the probes (A032) ----
+    hello = link.event(0, "hello", timeout=2.0)
+    check("LINK", hello is not None and link.msgs[0].get("event") == "hello", "hello is the first frame")
+    hb = hello["body"] if hello else {}
+    check("A032", hb.get("capabilities", {}).get("maxBreakpoints", 0) >= 256,
+          f"hello declares maxBreakpoints {hb.get('capabilities', {}).get('maxBreakpoints')} (P3 >= 256)")
+    check("A032", hb.get("probes") == max(probes.values()) + 1, f"hello declares {hb.get('probes')} probes")
+    check("LINK", isinstance(hb.get("image", {}).get("md5"), str), f"hello names the image: {hb.get('image')}")
     r = link.call("initialize", {"protocol": "1.0"})
-    check("A032", r["success"] and r["body"]["maxBreakpoints"] >= 256,
-          f"handshake declares maxBreakpoints {r['body'].get('maxBreakpoints')} (P3 >= 256)")
-    check("A032", r["body"]["probes"] == max(probes.values()) + 1,
-          f"handshake declares {r['body']['probes']} probes")
-    link.call("attach", {"by": "e2e"})
+    check("LINK", r.get("error", {}).get("code") == "UNSUPPORTED", "initialize is not a link request")
+    r = link.call("attach", {"user": "e2e", "role": "controller"})
+    link.session = r["body"]["session"]
     m0 = link.mark()
     time.sleep(0.8)
     check("A047", len(link.events(m0, "beat")) >= 3, f"{len(link.events(m0, 'beat'))} beats in 800 ms")
 
     # ---- A034 / A031(a): stop before K, step, set L while halted ----
     m = link.mark()
-    link.call("setBreakpoint", {"probe": K})
+    link.call("setBreakpoints", {"fileId": 0, "probes": [K]})
     st = link.event(m, "stopped", stopped("breakpoint", K))
     check("A034", st is not None, f"stop at K (probe {K})")
     rs = link.event(m, "runState", lambda b: b.get("state") == "HALTED_AT_BP", 1.0)
@@ -171,7 +191,7 @@ def main() -> int:
           "runState HALTED_AT_BP pushed within 500 ms of the stop")
     s = link.call("status")["body"]
     t0 = s.get("tasks", [{}])[0]
-    check("A047", s.get("state") == "HALTED_AT_BP" and str(t0.get("name", "")).lower() == "main" and
+    check("A047", s.get("state") == "HALTED_AT_BP" and str(t0.get("task", "")).lower() == "main" and
           t0.get("probe") == K and "since" in t0 and s.get("by") == "e2e",
           f"status names who, where, task and since: {json.dumps(s)[:200]}")
     t_halt = time.monotonic() * 1000.0
@@ -189,7 +209,7 @@ def main() -> int:
     m = link.mark()
     link.call("next", {"task": 0})
     check("A034", link.event(m, "stopped", stopped("step", K + 1)) is not None, "step over K lands on the next statement")
-    link.call("setBreakpoint", {"probe": L})
+    link.call("setBreakpoints", {"fileId": 0, "probes": [K, L]})
     m = link.mark()
     t_c = time.monotonic() * 1000.0
     link.call("continue")
@@ -218,7 +238,7 @@ def main() -> int:
         time.sleep(0.002)
     time.sleep(0.15)
     m = link.mark()
-    r = link.call("setBreakpoint", {"probe": L})
+    r = link.call("setBreakpoints", {"fileId": 0, "probes": [L]})
     w = w_now()
     t_resp = time.monotonic() * 1000.0
     st = link.event(m, "stopped", stopped("breakpoint", L))
@@ -228,7 +248,7 @@ def main() -> int:
     halt = plant_since(t_resp)
     check("A031", halt and all(x.witness["Main"] == w for x in halt),
           f"plant witness held at w={w} for the whole halt ({sorted({x.witness['Main'] for x in halt})})")
-    link.call("clearBreakpoint", {"probe": L})
+    link.call("setBreakpoints", {"fileId": 0, "probes": []})
     m = link.mark()
     t_c = time.monotonic() * 1000.0
     link.call("continue")
@@ -243,8 +263,10 @@ def main() -> int:
     check("A031", not link.events(m, "stopped"), f"{len(link.events(m, 'stopped'))} stops after the clear")
 
     # ---- A032: a probe past the program is refused; the corpus has fewer than P3 probes ----
-    r = link.call("setBreakpoint", {"probe": 100000})
-    check("A032", not r["success"] and r["error"]["code"] == "INVALID_LOCATION", "a probe past the program is refused")
+    r = link.call("setBreakpoints", {"fileId": 0, "probes": [100000]})
+    item = (r.get("body", {}).get("breakpoints") or [{}])[0]
+    check("A032", item.get("verified") is False and item.get("error", {}).get("code") == "INVALID_LOCATION",
+          "a probe past the program is refused")
 
     # ---- A033: pause 20 times at random points, idle and inside a dwell ----
     rng = random.Random(7)
@@ -298,7 +320,7 @@ def main() -> int:
         time.sleep(0.1)
     time.sleep(0.5)
     m = link.mark()
-    link.call("setBreakpoint", {"probe": K})
+    link.call("setBreakpoints", {"fileId": 0, "probes": [K]})
     check("ADR-001 D7.4", link.event(m, "stopped", stopped("breakpoint", K), 3.0) is not None,
           "breakpoint kept across the stop stops the restarted program")
     link.call("stop")
@@ -307,6 +329,11 @@ def main() -> int:
         time.sleep(0.05)
     check("ADR-001 D7.4", core("STATUS") == "STATUS:STOPPED", f"stop while parked lands {core('STATUS')}")
 
+    hellos = link.events(0, "hello")
+    check("LINK", len(hellos) >= 1, f"{len(hellos)} hello frames (one per connection, again on a program change)")
+    check("LINK", not link.violations,
+          f"every core frame matches docs/DEBUG_CORE_LINK.md ({len(link.msgs)} frames; "
+          f"{'; '.join(link.violations[:5]) or 'no violations'})")
     print(f"runctl e2e: {len(FAILS)} failed" if FAILS else "runctl e2e: all checks passed")
     return 1 if FAILS else 0
 

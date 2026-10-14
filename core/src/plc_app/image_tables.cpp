@@ -207,6 +207,8 @@ extern "C" int symbols_init(PluginManager *pm)
     *(void **)&ext_strucpp_set_current_time  = resolve(pm, "strucpp_set_current_time",  true);
 
     *(void **)&ext_strucpp_program_md5 = plugin_manager_get_symbol(pm, "strucpp_program_md5");
+    /* Optional: STruCpp does not emit it yet; the core link reports buildId null without it. */
+    ext_strucpp_dbg_build_id = static_cast<const char *>(plugin_manager_try_get_symbol(pm, "strucpp_dbg_build_id"));
 
     *(void **)&ext_strucpp_get_config = resolve(pm, "strucpp_get_config", true);
 
@@ -702,6 +704,7 @@ void image_tables_clear_null_pointers(void)
     ext_strucpp_advance_time     = nullptr;
     ext_strucpp_set_current_time = nullptr;
     ext_strucpp_program_md5      = nullptr;
+    ext_strucpp_dbg_build_id     = nullptr;
     ext_strucpp_get_config   = nullptr;
     ext_strucpp_debug_array_count = nullptr;
     ext_strucpp_debug_elem_count  = nullptr;

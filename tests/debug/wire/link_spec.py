@@ -124,9 +124,14 @@ class Spec:
         return self._check(self.requests[command][0], args, f"{command}.arguments")
 
     def check_response(self, command: str, msg: Dict[str, object]) -> List[str]:
-        if command not in self.requests:
-            return [f"response to {command!r}, which is not in the link spec"]
         where = f"{command} response"
+        if command not in self.requests:
+            # A command outside the link is answered UNSUPPORTED (pm ruling 3), never served.
+            error = msg.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            if msg.get("success") is False and code == "UNSUPPORTED":
+                return self._check(self.types["Error"], error, f"{where}.error")
+            return [f"{where}: {command!r} is not in the link spec, yet answered {code or 'success'}"]
         problems = [f"{where}: {k} missing" for k in ("seq", "request_seq") if not isinstance(msg.get(k), int)]
         if msg.get("type") != "response":
             problems.append(f"{where}: type {msg.get('type')!r}")

@@ -395,6 +395,7 @@ struct Link
     std::vector<Msg>  msgs;
     std::atomic<bool> closed{false};
     int               seq = 0;
+    std::string       session; /* from attach; added to every request that names none */
 
     bool open(const char *path)
     {
@@ -441,14 +442,17 @@ struct Link
     }
     int send(const char *command, const char *args_json)
     {
-        char buf[65536];
+        std::string args = args_json ? args_json : "{}";
+        if (!session.empty() && args.find("\"session\"") == std::string::npos)
+            args.insert(1, "\"session\":\"" + session + "\"" + (args == "{}" ? "" : ","));
+        std::string buf(args.size() + 256, '\0');
         int  s = ++seq;
-        int  n = std::snprintf(buf, sizeof buf,
+        int  n = std::snprintf(&buf[0], buf.size(),
                                "{\"type\":\"request\",\"seq\":%d,\"command\":\"%s\",\"arguments\":%s}", s,
-                               command, args_json ? args_json : "{}");
+                               command, args.c_str());
         uint32_t be = htonl((uint32_t)n);
         (void)!::write(fd, &be, 4);
-        (void)!::write(fd, buf, (size_t)n);
+        (void)!::write(fd, buf.data(), (size_t)n);
         return s;
     }
     /* Waits for the response to a request; nullptr on timeout. */
@@ -572,17 +576,38 @@ static void cont(void)
 // Cases
 // ---------------------------------------------------------------------------
 
-/* The handshake declares the probes and the breakpoint limit; a beat arrives every 250 ms. */
+/* docs/DEBUG_CORE_LINK.md: hello is the connection's first frame and declares the link version,
+ * the probes, the breakpoint limit and the image; attach mints a session; initialize is not a link
+ * request and an unknown session is refused; a beat arrives every 250 ms. */
 static void case_handshake(void)
 {
-    g_case   = "handshake";
+    g_case = "handshake";
+    Msg hello{};
+    CHECK(g_link.event(0, "hello", &hello, 1000), "no hello from the core");
+    {
+        std::lock_guard<std::mutex> g(g_link.mu);
+        cJSON *first = g_link.msgs.empty() ? nullptr : cJSON_GetObjectItem(g_link.msgs[0].j, "event");
+        CHECK(first && cJSON_IsString(first) && !std::strcmp(first->valuestring, "hello"),
+              "hello is not the first frame");
+    }
+    cJSON *hb   = cJSON_GetObjectItem(hello.j, "body");
+    cJSON *caps = cJSON_GetObjectItem(hb, "capabilities");
+    cJSON *img  = cJSON_GetObjectItem(hb, "image");
+    CHECK(body_str(hello.j, "link") == "1.0", "hello link '%s'", body_str(hello.j, "link").c_str());
+    CHECK(body_int(hello.j, "probes") == (int)kProbes, "hello probes %d", body_int(hello.j, "probes"));
+    CHECK(caps && cJSON_GetObjectItem(caps, "maxBreakpoints") &&
+              cJSON_GetObjectItem(caps, "maxBreakpoints")->valueint == DBG_MAX_BREAKPOINTS,
+          "hello does not declare maxBreakpoints %d", DBG_MAX_BREAKPOINTS);
+    cJSON *md5 = img ? cJSON_GetObjectItem(img, "md5") : nullptr;
+    CHECK(md5 && cJSON_IsString(md5) && strlen(md5->valuestring) == 32, "hello image has no md5");
     cJSON *r = g_link.call("initialize", "{\"protocol\":\"1.0\"}");
-    CHECK(ok(r), "initialize refused: %s", err_code(r));
-    CHECK(body_int(r, "maxBreakpoints") == DBG_MAX_BREAKPOINTS, "maxBreakpoints %d",
-          body_int(r, "maxBreakpoints"));
-    CHECK(body_int(r, "probes") == (int)kProbes, "probes %d", body_int(r, "probes"));
-    r = g_link.call("attach", "{\"by\":\"tester\"}");
-    CHECK(ok(r), "attach refused: %s", err_code(r));
+    CHECK(!ok(r) && !std::strcmp(err_code(r), "UNSUPPORTED"), "initialize answered '%s', want UNSUPPORTED",
+          err_code(r));
+    r = g_link.call("pause", "{\"session\":\"s999\"}");
+    CHECK(!ok(r) && !std::strcmp(err_code(r), "SESSION_ENDED"), "an unknown session answered '%s'", err_code(r));
+    r = g_link.call("attach", "{\"user\":\"tester\",\"role\":\"controller\"}");
+    CHECK(ok(r) && !body_str(r, "session").empty(), "attach refused: %s", err_code(r));
+    g_link.session = body_str(r, "session");
     const size_t m = g_link.mark();
     sleep_ms(600);
     CHECK(g_link.count(m, "beat") >= 2, "%d beats in 600 ms", g_link.count(m, "beat"));
@@ -596,11 +621,21 @@ static void case_before_statement(void)
     g_case       = "A034 before statement";
     size_t m     = g_link.mark();
     const int64_t t_set = mono_ns();
-    cJSON *r     = g_link.call("setBreakpoint", "{\"probe\":1}");
-    CHECK(ok(r), "setBreakpoint refused: %s", err_code(r));
+    /* Another file's breakpoint first, on a probe the program never reaches, so K's breakpoint
+     * id (2) differs from its probe ID (1) and the stopped event's breakpointIds can tell them apart. */
+    cJSON *r     = g_link.call("setBreakpoints", "{\"fileId\":1,\"probes\":[2000]}");
+    CHECK(ok(r), "setBreakpoints file 1 refused: %s", err_code(r));
+    r            = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[1]}");
+    CHECK(ok(r), "setBreakpoints refused: %s", err_code(r));
+    cJSON *bp0 = cJSON_GetArrayItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "breakpoints"), 0);
+    const int bp_id = bp0 && cJSON_GetObjectItem(bp0, "id") ? cJSON_GetObjectItem(bp0, "id")->valueint : -1;
     Msg st{};
     CHECK(g_link.event(m, "stopped", &st, 1000, stopped_at("breakpoint", P_K)),
           "no breakpoint stop at K");
+    cJSON *ids = cJSON_GetObjectItem(cJSON_GetObjectItem(st.j, "body"), "breakpointIds");
+    CHECK(body_str(st.j, "task") == "Main" && body_int(st.j, "taskId") == 0 && cJSON_GetArraySize(ids) == 1 &&
+              cJSON_GetArrayItem(ids, 0)->valueint == bp_id,
+          "stopped does not name task Main, taskId 0 and breakpoint id %d", bp_id);
     Msg rs{};
     CHECK(g_link.event(m, "runState", &rs, 500, state_is("HALTED_AT_BP")),
           "no HALTED_AT_BP runState within 500 ms");
@@ -624,14 +659,15 @@ static void case_before_statement(void)
     cJSON *tasks = cJSON_GetObjectItem(cJSON_GetObjectItem(s, "body"), "tasks");
     cJSON *t0    = tasks ? cJSON_GetArrayItem(tasks, 0) : nullptr;
     CHECK(t0 && cJSON_GetObjectItem(t0, "probe") && cJSON_GetObjectItem(t0, "probe")->valueint == 1 &&
-              cJSON_GetObjectItem(t0, "since") && cJSON_GetObjectItem(t0, "name"),
+              cJSON_GetObjectItem(t0, "since") && cJSON_IsString(cJSON_GetObjectItem(t0, "task")) &&
+              cJSON_GetObjectItem(t0, "taskId"),
           "status does not carry the halted task's name, probe and since");
     CHECK(body_str(s, "by") == "tester", "status 'by' is '%s'", body_str(s, "by").c_str());
 
     /* Step over K: the counter changes by one; the plant sees nothing until the scan ends. */
     g_case = "A034 step";
     m      = g_link.mark();
-    r      = g_link.call("next", "{\"task\":0}");
+    r      = g_link.call("next"); /* no task: the task of the most recent stop */
     CHECK(ok(r), "next refused: %s", err_code(r));
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("step", P_OUT)),
           "the step did not land on the next statement");
@@ -641,8 +677,8 @@ static void case_before_statement(void)
 
     /* A031(a): set L while halted, continue: the stop is at L in the same scan. */
     g_case = "A031 same scan";
-    r      = g_link.call("setBreakpoint", "{\"probe\":4}");
-    CHECK(ok(r), "setBreakpoint L refused: %s", err_code(r));
+    r      = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[1,4]}");
+    CHECK(ok(r), "setBreakpoints K, L refused: %s", err_code(r));
     m = g_link.mark();
     cont();
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_L)), "no stop at L");
@@ -660,7 +696,7 @@ static void case_before_statement(void)
     CHECK(plant_word(0) == w_st, "plant witness %d, want %d", plant_word(0), w_st);
 
     r = g_link.call("clearAllBreakpoints");
-    CHECK(body_int(r, "removed") == 2, "clearAllBreakpoints removed %d", body_int(r, "removed"));
+    CHECK(body_int(r, "removed") == 3, "clearAllBreakpoints removed %d", body_int(r, "removed"));
     m = g_link.mark();
     cont();
     CHECK(g_link.event(m, "runState", nullptr, 500, state_is("RUNNING")), "no RUNNING runState");
@@ -674,10 +710,10 @@ static void case_armed_in_dwell(void)
     g_dwell = true;
     CHECK(wait_for([] { return g_in_dwell.load(); }, 1000), "the program never entered its dwell");
     size_t m   = g_link.mark();
-    cJSON *r   = g_link.call("setBreakpoint", "{\"probe\":4}");
+    cJSON *r   = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[4]}");
     const int w = plant_word(0);
     const size_t pm = plant_mark();
-    CHECK(ok(r), "setBreakpoint refused: %s", err_code(r));
+    CHECK(ok(r), "setBreakpoints refused: %s", err_code(r));
     CHECK(g_in_dwell.load(), "the response arrived after the dwell (test timing)");
     g_dwell = false;
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_L)), "no stop at L");
@@ -689,8 +725,8 @@ static void case_armed_in_dwell(void)
     CHECK(g_witness_st.load() == w + 1, "the session read witness %d, want %d", g_witness_st.load(),
           w + 1);
 
-    r = g_link.call("clearBreakpoint", "{\"probe\":4}");
-    CHECK(ok(r), "clearBreakpoint refused: %s", err_code(r));
+    r = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[]}");
+    CHECK(ok(r), "clearing file 0's breakpoints refused: %s", err_code(r));
     m = g_link.mark();
     const size_t pr = plant_mark();
     cont();
@@ -712,9 +748,9 @@ static void case_armed_in_dwell(void)
 static void case_limit(void)
 {
     g_case = "A032 limit";
-    std::string args = "{\"breakpoints\":[{\"probe\":1}";
+    std::string args = "{\"fileId\":0,\"probes\":[{\"probe\":1}";
     for (uint32_t p = 100; p < 100 + DBG_MAX_BREAKPOINTS - 1; ++p)
-        args += ",{\"probe\":" + std::to_string(p) + "}";
+        args += "," + std::to_string(p);
     args += "]}";
     cJSON *r  = g_link.call("setBreakpoints", args.c_str());
     cJSON *bs = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "breakpoints");
@@ -722,9 +758,12 @@ static void case_limit(void)
     for (int i = 0; bs && i < cJSON_GetArraySize(bs); ++i)
         verified += cJSON_IsTrue(cJSON_GetObjectItem(cJSON_GetArrayItem(bs, i), "verified"));
     CHECK(verified == DBG_MAX_BREAKPOINTS, "%d of %d verified", verified, DBG_MAX_BREAKPOINTS);
-    r = g_link.call("setBreakpoint", "{\"probe\":1500}");
-    CHECK(!ok(r) && std::strcmp(err_code(r), "LIMIT_EXCEEDED") == 0,
-          "the breakpoint past the limit was answered '%s'", err_code(r));
+    r = g_link.call("setBreakpoints", "{\"fileId\":1,\"probes\":[1500]}");
+    cJSON *past = cJSON_GetArrayItem(cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "breakpoints"), 0);
+    cJSON *perr = past ? cJSON_GetObjectItem(past, "error") : nullptr;
+    CHECK(ok(r) && past && cJSON_IsFalse(cJSON_GetObjectItem(past, "verified")) && perr &&
+              !std::strcmp(cJSON_GetObjectItem(perr, "code")->valuestring, "LIMIT_EXCEEDED"),
+          "the breakpoint past the limit was not refused per item with LIMIT_EXCEEDED");
     size_t m = g_link.mark();
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_K)),
           "no stop at a previously set breakpoint after the refusal");
@@ -781,8 +820,8 @@ static void case_stop(void)
     g_case = "D7.4 stop while parked";
     CHECK(start_plc(), "restart failed");
     m = g_link.mark();
-    r = g_link.call("setBreakpoint", "{\"probe\":0}");
-    CHECK(ok(r), "setBreakpoint refused after a restart: %s", err_code(r));
+    r = g_link.call("setBreakpoints", "{\"fileId\":0,\"probes\":[0]}");
+    CHECK(ok(r), "setBreakpoints refused after a restart: %s", err_code(r));
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_WITNESS)),
           "no stop after the restart");
     r = g_link.call("stop");

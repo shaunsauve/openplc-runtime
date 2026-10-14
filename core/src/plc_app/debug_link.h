@@ -6,8 +6,8 @@
  * @brief The core link (ADR-003 D1.3): the debug gateway's connection to the core agent.
  *
  * A full-duplex unix socket carrying frames of `u32 BE length + UTF-8 JSON` in the public
- * envelope. The core answers requests and pushes events (stopped, continued, runState, beat,
- * output) unsolicited. The same requests are also accepted one per line on the legacy command
+ * envelope. The core pushes `hello` first, answers requests and pushes events (stopped,
+ * continued, runState, beat, output) unsolicited. The same requests are also accepted one per line on the legacy command
  * socket as `DEBUG_LINK:<json>`, answered `DEBUG_LINK:<json>`, with no events.
  *
  * See also:
@@ -29,6 +29,12 @@ extern "C" {
 
 /* Starts the agent thread and the socket server at path. Returns 0 on success. */
 int debug_link_start(const char *path);
+
+/* Records the loaded program's identity for `hello` (md5: STruCpp's non-terminated 32-char
+ * strucpp_program_md5; build_id: strucpp_dbg_build_id, NUL-terminated); both NULL on unload.
+ * Copies both, so the program may be unloaded afterwards. The agent re-pushes `hello` when it
+ * changes. */
+void debug_link_set_image(const char *md5, const char *build_id);
 
 /* Handles one request (a JSON envelope) and writes the response envelope to out.
  * Used by the legacy socket's DEBUG_LINK: command. */

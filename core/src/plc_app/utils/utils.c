@@ -30,6 +30,7 @@
 uint64_t base_tick_ns         = 20000000ULL;
 unsigned long scan_counter    = 0;
 char *ext_strucpp_program_md5 = NULL;
+const char *ext_strucpp_dbg_build_id = NULL;
 
 void normalize_timespec(struct timespec *ts)
 {

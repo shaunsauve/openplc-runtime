@@ -191,6 +191,10 @@ pm: please fold them into ADR-003 D1.3.
     says it always does), `hello.image.buildId` is `null`, and the gateway binds
     `debug-info.json` and compares the client's identity by `md5` alone. Remove when STruCpp
     emits the symbol.
+12. **Task names are IEC identifiers, compared case-insensitively.** The core reports a task's
+    name as the program's configuration gives it, which STruCpp upper-cases (`TASK Main` runs as
+    `MAIN`); the core matches a request's `task` name case-insensitively, and so does the harness.
+    Showing the source spelling needs STruCpp to record task names in `debug-info.json`.
 
 ## Not built here
 

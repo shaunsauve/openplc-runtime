@@ -24,6 +24,7 @@ int  journal_write_dint(journal_buffer_type_t, uint16_t, uint32_t) { return 0; }
 int  journal_write_lint(journal_buffer_type_t, uint16_t, uint64_t) { return 0; }
 uint64_t base_tick_ns           = 0;
 char    *ext_strucpp_program_md5 = nullptr;
+const char *ext_strucpp_dbg_build_id = nullptr;
 }
 
 static int g_failures = 0;

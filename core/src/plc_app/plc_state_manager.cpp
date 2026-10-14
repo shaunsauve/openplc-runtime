@@ -32,6 +32,7 @@ extern "C" {
 #include "../lib/strucpp_abi.hpp"
 
 #include "debug_agent.h"
+#include "debug_link.h"
 #include "debug_write_journal.h"
 #include "image_tables.h"
 #include "journal_buffer.h"
@@ -1097,6 +1098,7 @@ void *plc_cycle_thread(void *arg)
     }
 
     bind_debug_probes(pm);
+    debug_link_set_image(ext_strucpp_program_md5, ext_strucpp_dbg_build_id);
 
     /* Spawn task threads. On partial failure (pthread_create succeeds
      * for 0..i-1, fails at i): flip state to ERROR, post every
@@ -1599,6 +1601,7 @@ static int unload_plc_program_locked(PluginManager *pm, bool restart)
         pthread_join(plc_thread, NULL);
         /* Every task thread is gone; the .so is closed below. */
         debug_agent_unbind();
+        debug_link_set_image(nullptr, nullptr);
 
         /* Commit retained values: AFTER the join (consistent snapshot)
          * and BEFORE plugin_driver_stop (plugin-backed stores need to
