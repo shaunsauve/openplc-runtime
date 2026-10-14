@@ -1,0 +1,465 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Autonomy®
+
+"""The debug session gateway (/api/debug-session) over a real WSS port, with the fake core on the
+internal link behind it. Criteria A064-A068, A070, A080 (docs/ACCEPTANCE.md of the orchestration
+root); what the fake core cannot stand in for is named in each test.
+
+JOURNEY: wire-control (tests/debug/wire/wire-control.oracle.json) is the end-to-end beat; the
+tests below cover what one oracle run cannot: concurrency, the refusal catalogue against the
+spec, the advertisement against every request, and the legacy namespace beside it.
+
+See also:
+  webserver/debug_gateway/gateway.py - the gateway under test.
+  tests/debug/wire/fake_core.py - the core agent stand-in.
+  tests/debug/wire/wire_server.py - the served stack (TLS, both namespaces).
+  docs/DEBUG_PROTOCOL.md - the spec the catalogue and the request list are checked against.
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import re
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
+
+import pytest
+
+pytest.importorskip("flask_socketio", reason="flask_socketio not installed (no venv)")
+pytest.importorskip("simple_websocket", reason="simple_websocket not installed (no venv)")
+
+ROOT = Path(__file__).resolve().parents[3]
+WIRE = ROOT / "tests" / "debug" / "wire"
+sys.path.insert(0, str(WIRE))
+
+from conftest import create_user, token_for  # noqa: E402
+from fake_core import FULL_CAPS, Json, JsonObj, debug_info  # noqa: E402
+from wire_server import WireServer, as_obj  # noqa: E402
+from wss_client import WssSio  # noqa: E402
+
+from webserver.debug_gateway import protocol  # noqa: E402
+from webserver.version import RUNTIME_VERSION  # noqa: E402
+
+NS = "/api/debug-session"
+SPEC = ROOT / "docs" / "DEBUG_PROTOCOL.md"
+
+
+class Client:
+    """One /api/debug-session client: requests correlated by request_seq, events queued."""
+
+    def __init__(self, url: str, token: Optional[str] = None) -> None:
+        self.sio = WssSio(ssl_verify=False)
+        self.sio.on("msg", self._on_msg, namespace=NS)
+        self.sio.connect(url, namespaces=[NS])
+        self.token = token
+        self.seq = 0
+        self.lock = threading.Lock()
+        self.responses: Dict[int, "queue.Queue[JsonObj]"] = {}
+        self.arrival: List[int] = []
+        self.events: "queue.Queue[JsonObj]" = queue.Queue()
+
+    def _on_msg(self, data: Json) -> None:
+        msg = as_obj(json.loads(data) if isinstance(data, str) else data)
+        if msg.get("type") == "response":
+            rseq = msg.get("request_seq")
+            if isinstance(rseq, int):
+                with self.lock:
+                    self.arrival.append(rseq)
+                    q = self.responses.setdefault(rseq, queue.Queue())
+                q.put(msg)
+        elif msg.get("type") == "event":
+            self.events.put(msg)
+
+    def send(self, command: str, args: Optional[JsonObj] = None, seq: Optional[int] = None) -> int:
+        with self.lock:
+            self.seq += 1
+            use = self.seq if seq is None else seq
+            self.responses.setdefault(use, queue.Queue())
+        self.sio.emit(
+            "msg", {"type": "request", "seq": use, "command": command, "arguments": args or {}}, NS
+        )
+        return use
+
+    def wait(self, seq: int, timeout: float = 5.0) -> JsonObj:
+        return self.responses[seq].get(timeout=timeout)
+
+    def request(self, command: str, args: Optional[JsonObj] = None) -> JsonObj:
+        return self.wait(self.send(command, args))
+
+    def initialize(self, **args: Json) -> JsonObj:
+        full: JsonObj = {"protocol": "1.0", "role": "controller"}
+        if self.token is not None:
+            full["token"] = self.token
+        full.update(args)
+        return self.request("initialize", full)
+
+    def event(self, name: str, where: Optional[JsonObj] = None, timeout: float = 2.0) -> JsonObj:
+        """The next `name` event whose body has every key/value of `where`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            ev = self.events.get(timeout=max(deadline - time.monotonic(), 0.001))
+            body = as_obj(ev.get("body"))
+            if ev.get("event") == name and all(body.get(k) == v for k, v in (where or {}).items()):
+                return body
+
+    def drain(self) -> List[str]:
+        names: List[str] = []
+        while not self.events.empty():
+            names.append(str(self.events.get().get("event")))
+        return names
+
+    def close(self) -> None:
+        self.sio.disconnect()
+
+
+@pytest.fixture()
+def tokens(client, admin_token) -> Dict[str, str]:
+    create_user(client, "tech", "tech-pass", token=admin_token, role="user")
+    return {"admin": admin_token, "user": token_for(client, "tech", "tech-pass")}
+
+
+@pytest.fixture()
+def serve(app, tmp_path) -> Iterator[Callable[..., WireServer]]:
+    """start(**WireServer options) serves the stack; every server started is closed after."""
+    servers: List[WireServer] = []
+
+    def start(**kwargs: JsonObj) -> WireServer:
+        workdir = tmp_path / f"s{len(servers)}"
+        workdir.mkdir()
+        server = WireServer(app, workdir, **kwargs)  # type: ignore[arg-type]
+        servers.append(server)
+        return server
+
+    yield start
+    for server in servers:
+        server.close()
+
+
+def _spec_section(title: str) -> str:
+    text = SPEC.read_text()
+    part = text.split("## Session protocol v1", 1)[1]
+    return part.split(f"### {title}", 1)[1].split("\n### ", 1)[0]
+
+
+def _spec_codes() -> List[str]:
+    return re.findall(r"^\| `([A-Z_]+)` \|", _spec_section("Error codes"), re.M)
+
+
+def _spec_requests() -> List[Tuple[str, str]]:
+    rows = re.findall(r"^\| `(\w+)` \| ([^|]*) \|", _spec_section("Requests"), re.M)
+    return [(name, caps.strip()) for name, caps in rows]
+
+
+def _is_sentence(message: Json) -> bool:
+    return isinstance(message, str) and len(message.split()) >= 3 and message.rstrip()[-1] in ".!?"
+
+
+def _refusal(resp: JsonObj) -> Tuple[str, str]:
+    assert resp["success"] is False, resp
+    err = as_obj(resp["error"])
+    return str(err["code"]), str(err.get("message"))
+
+
+# --------------------------------------------------------------------------- A064, A065, A067,
+# A068 (loopback), A070: the harness's own runner and session over a real WSS connection.
+
+
+def test_wire_control_oracle_passes_through_the_harness(serve, admin_token):
+    from run_harness import run  # noqa: PLC0415
+
+    server = serve()
+    [result] = run([WIRE / "wire-control.oracle.json"], server.url, admin_token, insecure=True)
+    import runner  # noqa: PLC0415
+
+    assert result.verdict.status == "PASS", runner.format_trace(result)
+
+
+# --------------------------------------------------------------------------- A064 correlation
+
+
+def test_concurrent_requests_get_their_own_correlated_responses(serve, admin_token):
+    """Requests fired back to back are answered out of order (the core delays `status`); each
+    response carries its own request's seq and its own command's body. NO-FOLD: concurrency."""
+    server = serve(delays={"status": 0.3})
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    sent = {
+        c.send("status"): "status",
+        c.send("setExceptionBreakpoints", {"filters": ["divByZero"]}): "setExceptionBreakpoints",
+        c.send("version"): "version",
+        c.send("heartbeat"): "heartbeat",
+    }
+    got = {command: c.wait(seq) for seq, command in sent.items()}
+    for seq, command in sent.items():
+        resp = got[command]
+        assert resp["request_seq"] == seq and resp["command"] == command, resp
+        assert resp["success"] is True, resp
+    assert "state" in as_obj(got["status"]["body"])
+    assert as_obj(got["setExceptionBreakpoints"]["body"])["filters"] == ["divByZero"]
+    assert "protocol" in as_obj(got["version"]["body"])
+    status_seq = next(seq for seq, cmd in sent.items() if cmd == "status")
+    assert c.arrival[-1] == status_seq, f"status was delayed, so it arrives last: {c.arrival}"
+    seqs = [as_obj(json.loads(p.split(",", 1)[1])[1])["seq"] for p in c.sio.sent]
+    assert len(set(seqs)) == len(seqs)
+    c.close()
+
+
+# --------------------------------------------------------------------------- A065 push
+
+
+def test_a_passive_observer_is_pushed_every_state_change(serve, admin_token):
+    """The observer sends nothing after initialize; the controller pauses, resumes and detaches,
+    and the program prints: the observer receives each as a pushed event."""
+    server = serve()
+    watcher, ctl = Client(server.url, admin_token), Client(server.url, admin_token)
+    assert watcher.initialize(role="observer")["success"] is True
+    sent_at_attach = len(watcher.sio.sent)
+    assert ctl.initialize()["success"] is True
+    assert watcher.event("control", {"controller": "admin"})["observers"] == 1
+    assert ctl.request("pause")["success"] is True
+    assert watcher.event("stopped")["reason"] == "pause"
+    assert watcher.event("runState")["state"] == "HALTED"
+    assert ctl.request("continue")["success"] is True
+    assert watcher.event("continued")["task"] == "Main"
+    assert watcher.event("runState")["state"] == "RUNNING"
+    server.core.inject_print("hello from Main")
+    out = watcher.event("output")
+    assert (out["category"], out["text"], out["task"]) == ("print", "hello from Main", "Main")
+    assert ctl.request("detach")["success"] is True
+    assert watcher.event("control", {"controller": None})["observers"] == 1
+    assert len(watcher.sio.sent) == sent_at_attach, "the passive client sent a request"
+    watcher.close()
+    ctl.close()
+
+
+# --------------------------------------------------------------------------- A066 refusals
+
+
+def test_the_catalogue_and_the_spec_name_the_same_codes():
+    """Each code the gateway can return is in the spec, and each spec code is in the catalogue,
+    with a plain-language default message."""
+    catalogue = {c.value for c in protocol.ErrorCode}
+    assert set(_spec_codes()) == catalogue
+    for code in protocol.ErrorCode:
+        assert _is_sentence(protocol.DEFAULT_MESSAGES[code]), code
+
+
+REFUSALS = [
+    "PROTOCOL_VERSION",
+    "UNAUTHORISED",
+    "BAD_REQUEST",
+    "LIMIT_EXCEEDED",
+    "UNSUPPORTED",
+    "NOT_CONTROLLER",
+    "BUSY",
+    "LOCKED",
+    "FORBIDDEN",
+    "INVALID_LOCATION",
+    "NO_CODE",
+    "NOT_HALTED",
+    "NOT_RUNNING",
+    "STALE_BUILD",
+    "UNSUPPORTED_DEBUG_INFO",
+    "NO_PROBES",
+    "SESSION_ENDED",
+]
+
+
+def _provoke(code: str, server: WireServer, tokens: Dict[str, str]) -> JsonObj:
+    url, admin = server.url, tokens["admin"]
+    c = Client(url, admin)
+    if code == "PROTOCOL_VERSION":
+        return c.initialize(protocol="2.0")
+    if code == "UNAUTHORISED":
+        head, _, _ = admin.rpartition(".")
+        return c.initialize(token=f"{head}.Zm9yZ2Vk")
+    if code == "BAD_REQUEST":
+        return c.request("pause")  # before initialize: out of order
+    assert c.initialize(identity=_identity(code))["success"] is True
+    if code == "LIMIT_EXCEEDED":
+        return c.request("setExceptionBreakpoints", {"filters": ["x" * (2 * 1024 * 1024)]})
+    if code == "UNSUPPORTED":
+        return c.request("stackTrace", {"task": "Main"})
+    if code == "NOT_CONTROLLER":
+        return Client(url, admin).initialize()  # a second controller
+    if code == "BUSY":
+        for _ in range(protocol.MAX_OBSERVERS):
+            assert Client(url, admin).initialize(role="observer")["success"] is True
+        return Client(url, admin).initialize(role="observer")
+    if code == "LOCKED":
+        assert c.request("setLock", {"on": True, "reason": "A066"})["success"] is True
+        resp = c.request("pause")
+        assert c.request("setLock", {"on": False})["success"] is True
+        return resp
+    if code == "FORBIDDEN":
+        u = Client(url, tokens["user"])
+        assert u.initialize(role="observer")["success"] is True
+        return u.request("setLock", {"on": True})
+    if code == "INVALID_LOCATION":
+        return c.request("setBreakpoints", {"file": "missing.st", "lines": [1]})
+    if code == "NO_CODE":
+        return c.request("setBreakpoints", {"file": "program.st", "lines": [99]})
+    if code == "NOT_HALTED":
+        return c.request("next")
+    if code == "NOT_RUNNING":
+        assert c.request("stop")["success"] is True
+        resp = c.request("stop")
+        assert c.request("restart", {"kind": "warm"})["success"] is True
+        return resp
+    if code in ("STALE_BUILD", "UNSUPPORTED_DEBUG_INFO", "NO_PROBES"):
+        return c.request("setBreakpoints", {"file": "program.st", "lines": [6]})
+    if code == "SESSION_ENDED":
+        assert c.request("detach")["success"] is True
+        return c.request("pause")
+    raise AssertionError(code)
+
+
+def _identity(code: str) -> JsonObj:
+    if code == "STALE_BUILD":
+        return {"md5": "f" * 32, "buildId": "f" * 64}
+    return {}
+
+
+def _server_for(code: str, serve) -> WireServer:
+    if code == "UNSUPPORTED_DEBUG_INFO":
+        return serve(info=debug_info(major=2))
+    if code == "NO_PROBES":
+        return serve(capabilities={**FULL_CAPS, "probes": False})
+    return serve()
+
+
+@pytest.mark.parametrize("code", REFUSALS)
+def test_each_refusal_has_its_code_a_sentence_and_changes_nothing(code, serve, tokens):
+    server = _server_for(code, serve)
+    before = server.core.witness()
+    resp = _provoke(code, server, tokens)
+    got, message = _refusal(resp)
+    assert got == code, resp
+    assert code in _spec_codes()
+    assert _is_sentence(message), message
+    if code == "PROTOCOL_VERSION":
+        assert as_obj(as_obj(resp["error"])["details"]) == {"client": "2.0", "server": "1.0"}
+    if code == "BUSY":
+        assert as_obj(as_obj(resp["error"])["details"])["reason"] == "observer_limit"
+    # The runtime state is unchanged: the task is still running and still scanning.
+    assert server.core.state == "RUNNING"
+    time.sleep(0.05)
+    assert server.core.witness() > before
+    changing = {"pause", "setBreakpoints", "stop", "restart", "continue", "next"}
+    gateway_refusals = set(REFUSALS) - {"NOT_HALTED", "NOT_RUNNING"}
+    if code in gateway_refusals:
+        reached = [cmd for cmd, _ in server.core.received if cmd in changing]
+        assert reached == [], f"{code} was refused only after reaching the core: {reached}"
+
+
+def test_a_revoked_token_ends_the_session(serve, client, admin_token):
+    """ADR-005 D2.1: control requests re-check revocation; a revoked user's session ends."""
+    server = serve()
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    assert client.post("/api/logout", headers={"Authorization": f"Bearer {admin_token}"}).status_code == 200
+    code, _ = _refusal(c.request("pause"))
+    assert code == "SESSION_ENDED"
+    assert c.event("sessionEnded")["reason"] == "revoked"
+    assert not [cmd for cmd, _ in server.core.received if cmd == "pause"]
+
+
+# --------------------------------------------------------------------------- A067 handshake
+
+
+VALID_ARGS: Dict[str, JsonObj] = {
+    "setBreakpoints": {"file": "program.st", "lines": [6]},
+    "breakpointLocations": {"file": "program.st", "line": 1},
+    "setExceptionBreakpoints": {"filters": ["divByZero"]},
+    "runScans": {"n": 1},
+    "runToCursor": {"file": "program.st", "line": 7},
+    "restart": {"kind": "warm"},
+    "setHaltMode": {"mode": "allStop"},
+    "setLock": {"on": False},
+    "pause": {"task": "Main"},
+}
+# Refusals that mean "valid, but not in this run state", which an advertised request may answer.
+STATE_REFUSALS = {"NOT_HALTED", "NOT_RUNNING"}
+LAST = ("terminate", "detach")
+
+
+@pytest.mark.parametrize(
+    "caps",
+    [FULL_CAPS, {**FULL_CAPS, "control": False, "modify": False}, {**FULL_CAPS, "cycleStep": False}],
+    ids=["full", "compiled-out", "no-cycle-step"],
+)
+def test_the_handshake_advertises_exactly_what_works(caps, serve, admin_token):
+    server = serve(capabilities=caps)
+    c = Client(server.url, admin_token)
+    body = as_obj(c.initialize()["body"])
+    advertised = set(str(r) for r in body["requests"] if isinstance(body["requests"], list))
+    flags = as_obj(body["capabilities"])
+    spec = _spec_requests()
+    assert {name for name, _ in spec} >= advertised
+    for name, needs in spec:
+        if name in ("initialize",) + LAST:
+            continue
+        resp = c.request(name, VALID_ARGS.get(name, {}))
+        if name in advertised:
+            assert resp["success"] is True or _refusal(resp)[0] in STATE_REFUSALS, (name, resp)
+        else:
+            assert _refusal(resp)[0] == "UNSUPPORTED", (name, resp)
+        for flag in filter(None, (n.strip(" `") for n in needs.split(","))):
+            if flag != "-" and not flags.get(flag):
+                assert name not in advertised, f"{name} needs {flag}, which is not advertised"
+    assert ("pause" in advertised) is bool(caps["control"])
+    # terminate and detach each end the session, so each runs on a fresh initialize.
+    for name in LAST:
+        resp = c.request(name)
+        assert (resp["success"] is True) is (name in advertised), (name, resp)
+        if resp["success"] is not True:
+            assert _refusal(resp)[0] == "UNSUPPORTED", (name, resp)
+        assert c.initialize()["success"] is True
+
+
+# --------------------------------------------------------------------------- A070 versions
+
+
+@pytest.mark.parametrize("major,minor,compiler", [(1, 0, "strucpp 0.9.0"), (1, 7, "strucpp 9.9.9")])
+def test_the_version_report_names_the_loaded_build(major, minor, compiler, serve, client, admin_token):
+    info = debug_info(major=major, minor=minor)
+    as_obj(info["build"])["compiler"] = compiler
+    server = serve(info=info)
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    body = as_obj(c.request("version")["body"])
+    assert body["protocol"] == f"{protocol.PROTOCOL_MAJOR}.{protocol.PROTOCOL_MINOR}" == "1.0"
+    assert body["compiler"] == compiler
+    assert body["debugInfo"] == {"major": major, "minor": minor}
+    assert body["runtime"] == client.get("/api/version").get_json()["version"] == RUNTIME_VERSION
+    assert body["engineAbi"] == "1.0"
+    assert "Protocol version: `1.0`" in SPEC.read_text()
+
+
+# --------------------------------------------------------------------------- A080 legacy
+
+
+LEGACY_SCRIPT = ["41 00 00", "42 00 03 01 00 01", "43 00 00", "44 00 02 00 00 00 01", "45 DE AD"]
+
+
+def test_legacy_pdus_pass_through_unchanged_beside_the_gateway(serve, admin_token):
+    """/api/debug forwards each 0x41-0x45 PDU as `DEBUG:<hex>` and returns the core's reply hex,
+    byte for byte, with the session namespace live on the same Socket.IO instance. The core's own
+    PDU handling (the hash field width) is the real core's half of A080."""
+    server = serve()
+    session = Client(server.url, admin_token)
+    assert session.initialize()["success"] is True
+    legacy = WssSio(ssl_verify=False)
+    replies: "queue.Queue[Json]" = queue.Queue()
+    legacy.on("debug_response", replies.put, namespace="/api/debug")
+    legacy.on("connected", lambda _d: None, namespace="/api/debug")
+    legacy.connect(server.url, namespaces=["/api/debug"], auth={"token": admin_token})
+    for pdu in LEGACY_SCRIPT:
+        legacy.emit("debug_command", {"command": pdu}, "/api/debug")
+        assert replies.get(timeout=5) == {"success": True, "data": "41 00 01"}
+    assert server.legacy.sent == [f"DEBUG:{pdu}\n" for pdu in LEGACY_SCRIPT]
+    legacy.disconnect()

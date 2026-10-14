@@ -29,6 +29,7 @@ import flask_login
 
 from webserver import project_snapshot
 from webserver.credentials import CertGen
+from webserver.debug_gateway import UnixCoreLink, init_debug_gateway
 from webserver.debug_websocket import init_debug_websocket
 from webserver.discovery.discovery_routes import discovery_bp
 from webserver.etherdog_manager import EtherDogManager, legacy_ethercat_config_in_use
@@ -546,6 +547,9 @@ def _stop_on_signal(signum: int, _frame: object) -> None:
     raise KeyboardInterrupt(f"signal {signum}")
 
 
+DEBUG_CORE_SOCKET: Final = "/run/runtime/plc_debug.socket"
+
+
 def run_https():
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
@@ -558,6 +562,11 @@ def run_https():
     register_callback_post(restapi_callback_post)
 
     socketio = init_debug_websocket(app_restapi, runtime_manager.runtime_socket)
+    init_debug_gateway(
+        socketio,
+        UnixCoreLink(DEBUG_CORE_SOCKET),
+        Path("core/generated") / "debug-info.json",
+    )
 
     with app_restapi.app_context():
         try:
