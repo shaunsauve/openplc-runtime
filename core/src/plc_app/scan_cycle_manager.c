@@ -70,6 +70,17 @@ void scan_cycle_tracker_start(scan_cycle_tracker_t *tracker)
         return;
     }
 
+    if (tracker->rearm)
+    {
+        // First start after a halt: its cycle time and latency span the halt.
+        tracker->rearm             = false;
+        tracker->expected_start_us = now_us + (uint64_t)(tracker->interval_ns / 1000);
+        tracker->last_start_us     = now_us;
+        tracker->stats.scan_count++;
+        pthread_mutex_unlock(&tracker->mutex);
+        return;
+    }
+
     // Cycle time: actual elapsed since previous start
     int64_t cycle_time_us = (int64_t)(now_us - tracker->last_start_us);
     plc_timing_stats_t *s = &tracker->stats;
@@ -116,7 +127,10 @@ void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker)
 
 void scan_cycle_tracker_resumed(scan_cycle_tracker_t *tracker)
 {
-    (void)tracker;
+    if (!tracker) return;
+    pthread_mutex_lock(&tracker->mutex);
+    tracker->rearm = true;
+    pthread_mutex_unlock(&tracker->mutex);
 }
 
 bool scan_cycle_tracker_snapshot(scan_cycle_tracker_t *tracker, plc_timing_stats_t *out)

@@ -28,6 +28,7 @@ void handle_unix_socket_commands(const char *command, char *response, size_t res
 }
 #include "../../core/src/plc_app/image_tables.h"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstdarg>
@@ -126,6 +127,10 @@ static uint16_t m_q0, m_q1;
 static std::atomic<int64_t> g_fast_time{-1}, g_slow_time{-1};
 static std::atomic<long>    g_fast_scans{0}, g_slow_scans{0};
 
+/* Armed by the test before a resume: the TIME() of the first scan after it. */
+static std::atomic<bool>    g_fast_arm{false}, g_slow_arm{false};
+static std::atomic<int64_t> g_fast_first{-1}, g_slow_first{-1};
+
 /* Fast-task scan starts on the monotonic clock, for the catch-up check. */
 static std::mutex           g_starts_mu;
 static std::vector<int64_t> g_fast_starts;
@@ -182,6 +187,7 @@ struct FastProgram : strucpp::ProgramBase
             g_fast_starts.push_back(mono_ns());
         }
         ton_scan(tl_time_ns);
+        if (g_fast_arm.exchange(false)) g_fast_first = tl_time_ns;
         g_fast_time = tl_time_ns;
         g_fast_scans++;
         m_q0 = (uint16_t)g_fast_scans.load();
@@ -197,6 +203,7 @@ struct SlowProgram : strucpp::ProgramBase
 {
     void run() override
     {
+        if (g_slow_arm.exchange(false)) g_slow_first = tl_time_ns;
         g_slow_time = tl_time_ns;
         g_slow_scans++;
         m_q1 = (uint16_t)g_slow_scans.load();
@@ -337,6 +344,19 @@ static int64_t next_scan_time(std::atomic<long> &scans, std::atomic<int64_t> &ti
     return time.load();
 }
 
+/* Resume and return the TIME() the first scan of each task read after it. */
+static void resume_and_read(size_t task_idx, int64_t *fast_first, int64_t *slow_first)
+{
+    g_fast_first = -1;
+    g_slow_first = -1;
+    g_fast_arm   = true;
+    g_slow_arm   = true;
+    CHECK(plc_run_control_resume(task_idx, 1000), "resume was not applied");
+    wait_for([] { return g_fast_first.load() >= 0 && g_slow_first.load() >= 0; }, 2000);
+    *fast_first = g_fast_first.load();
+    *slow_first = g_slow_first.load();
+}
+
 static plc_timing_stats_t fast_stats(void)
 {
     plc_timing_stats_t s{};
@@ -396,17 +416,14 @@ static void case_all_stop(int halt_ms)
     CHECK(plc_task_virtual_time_ns(0) == plug_h && plc_task_virtual_time_ns(1) == plug_slow_h,
           "a clock moved while every task was held (fast %.1f -> %.1f ms)", ms(plug_h),
           ms(plc_task_virtual_time_ns(0)));
-    CHECK(plc_run_control_resume(PLC_ALL_TASKS, 1000), "resume was not applied");
-    const int64_t fast_r = next_scan_time(g_fast_scans, g_fast_time);
-    const int64_t slow_r = next_scan_time(g_slow_scans, g_slow_time);
+    int64_t fast_r = 0, slow_r = 0;
+    resume_and_read(PLC_ALL_TASKS, &fast_r, &slow_r);
     CHECK(fast_r - fast_h <= kFastNs,
           "fast task's TIME() advanced %.1f ms across a %d ms halt (limit one interval, %.0f ms)",
           ms(fast_r - fast_h), halt_ms, ms(kFastNs));
-    /* The slow reader waited for its own next scan, which the running fast clock does not
-     * disturb: bound it by two of its intervals from the halted value. */
-    CHECK(slow_r - slow_h <= 2 * kSlowNs,
-          "slow task's TIME() advanced %.1f ms across a %d ms halt (limit %.0f ms)",
-          ms(slow_r - slow_h), halt_ms, ms(2 * kSlowNs));
+    CHECK(slow_r - slow_h <= kSlowNs,
+          "slow task's TIME() advanced %.1f ms across a %d ms halt (limit one interval, %.0f ms)",
+          ms(slow_r - slow_h), halt_ms, ms(kSlowNs));
     const int64_t plug = plc_task_virtual_time_ns(0), prog = g_fast_time.load();
     CHECK(plug - prog <= kFastNs && prog - plug <= kFastNs,
           "after resume the plugin reader (%.1f ms) and the program (%.1f ms) disagree",
@@ -426,8 +443,8 @@ static void case_halt_one(void)
     const int64_t slow_e = plc_task_virtual_time_ns(1);
     const int64_t wall_e = mono_ns();
     const long    slow_n = g_slow_scans.load();
-    CHECK(plc_run_control_resume(0, 1000), "resume was not applied");
-    const int64_t fast_r = next_scan_time(g_fast_scans, g_fast_time);
+    int64_t fast_r = 0, slow_r = 0;
+    resume_and_read(0, &fast_r, &slow_r);
     CHECK(fast_r - fast_h <= kFastNs, "the halted task's clock advanced %.1f ms in 1 s",
           ms(fast_r - fast_h));
     const int64_t drift = (slow_e - slow_h) - (wall_e - wall_h);
@@ -451,17 +468,26 @@ static void case_statistics(int halt_ms)
     sleep_ms(500);
     const plc_timing_stats_t after = fast_stats();
 
-    size_t starts = 0;
-    int64_t first = 0;
+    /* A catch-up burst releases the missed periods back to back. Host jitter moves a start
+     * by a few ms, so the plant's "at most 2 in 2 intervals" is checked as: no two starts
+     * within a quarter interval, and at most one start per interval over the first 10. */
+    std::vector<int64_t> after_resume;
     {
         std::lock_guard<std::mutex> g(g_starts_mu);
         for (int64_t t : g_fast_starts)
-            if (t >= t_resume && first == 0) first = t;
-        for (int64_t t : g_fast_starts)
-            if (first && t >= first && t < first + 2 * kFastNs) starts++;
+            if (t >= t_resume && after_resume.size() < 50) after_resume.push_back(t);
     }
-    CHECK(first != 0 && starts <= 2, "%zu scan starts in the first 2 intervals after resume",
-          starts);
+    int64_t min_gap = INT64_MAX;
+    size_t  in_10   = 0;
+    for (size_t i = 0; i < after_resume.size(); ++i)
+    {
+        if (i > 0 && i <= 10) min_gap = std::min(min_gap, after_resume[i] - after_resume[i - 1]);
+        if (after_resume[i] < after_resume[0] + 10 * kFastNs) in_10++;
+    }
+    CHECK(after_resume.size() > 10, "only %zu scans after resume", after_resume.size());
+    CHECK(min_gap >= kFastNs / 4, "two scan starts %.2f ms apart after resume: a catch-up burst",
+          ms(min_gap));
+    CHECK(in_10 <= 11, "%zu scan starts in the first 10 intervals after resume", in_10);
     CHECK(after.overruns == before.overruns,
           "STATS overruns went %lld -> %lld across a halt", (long long)before.overruns,
           (long long)after.overruns);
@@ -488,9 +514,9 @@ static void case_ton(int halt_ms)
     sleep_ms(50);
     const int64_t et_h = g_ton_et.load();
     sleep_ms(halt_ms);
-    CHECK(plc_run_control_resume(PLC_ALL_TASKS, 1000), "resume was not applied");
-    next_scan_time(g_fast_scans, g_fast_time);
-    const int64_t et_r = g_ton_et.load();
+    int64_t fast_r = 0, slow_r = 0;
+    resume_and_read(PLC_ALL_TASKS, &fast_r, &slow_r);
+    const int64_t et_r = fast_r - g_ton_start_vt.load();
     CHECK(et_r - et_h <= kFastNs, "ET went %.1f -> %.1f ms across the halt", ms(et_h), ms(et_r));
     CHECK(wait_for([] { return g_ton_q.load(); }, 3000), "Q never rose");
     const int64_t q_vt = g_ton_q_vt.load() - g_ton_start_vt.load();

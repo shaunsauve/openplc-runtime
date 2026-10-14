@@ -182,6 +182,19 @@ typedef void (*plugin_set_switch_position_func_t)(int position);
 typedef int (*plugin_get_plc_state_func_t)(void);
 
 /**
+ * @brief PLC virtual time in ns since the program started (ADR-004 D4).
+ *
+ * Each IEC task has its own clock: it advances one interval per due tick and stops
+ * while the task is halted, so a halt advances it by at most one interval. It is the
+ * time TIME() and the timer FBs read. get_task_virtual_time_ns takes the task's index
+ * in configuration order; get_plc_virtual_time_ns reads the fastest task's clock.
+ * Both return -1 with no program running (or no such task). A plugin that simulates
+ * the plant runs on this clock so it freezes with the PLC.
+ */
+typedef long long (*plugin_get_task_virtual_time_ns_func_t)(int task_idx);
+typedef long long (*plugin_get_plc_virtual_time_ns_func_t)(void);
+
+/**
  * @brief Runtime buffer access structure for plugins
  *
  * This structure is passed to plugins during initialization, providing
@@ -270,6 +283,10 @@ typedef struct
     /* Current PLC state, for driving a status LED — see
      * plugin_get_plc_state_func_t. */
     plugin_get_plc_state_func_t get_plc_state;
+
+    /* PLC virtual time — see plugin_get_task_virtual_time_ns_func_t. */
+    plugin_get_task_virtual_time_ns_func_t get_task_virtual_time_ns;
+    plugin_get_plc_virtual_time_ns_func_t  get_plc_virtual_time_ns;
 } plugin_runtime_args_t;
 
 #endif /* PLUGIN_TYPES_H */

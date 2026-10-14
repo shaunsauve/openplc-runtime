@@ -94,6 +94,10 @@ class PluginRuntimeArgs(ctypes.Structure):
         ("set_switch_position", ctypes.CFUNCTYPE(None, ctypes.c_int)),
         # Current PLC state: int (*)(void), 0 = STOPPED, 1 = RUNNING, 2 = ERROR.
         ("get_plc_state", ctypes.CFUNCTYPE(ctypes.c_int)),
+        # PLC virtual time in ns (ADR-004 D4): long long (*)(int task_idx) and
+        # long long (*)(void) for the fastest task; -1 with no program running.
+        ("get_task_virtual_time_ns", ctypes.CFUNCTYPE(ctypes.c_longlong, ctypes.c_int)),
+        ("get_plc_virtual_time_ns", ctypes.CFUNCTYPE(ctypes.c_longlong)),
     ]
 
     def validate_pointers(self):

@@ -188,6 +188,16 @@ static void plugin_set_switch_position(int position)
     plc_set_switch_position(position == PLC_SWITCH_STOP ? PLC_SWITCH_STOP : PLC_SWITCH_RUN);
 }
 
+static long long plugin_get_task_virtual_time_ns(int task_idx)
+{
+    return task_idx < 0 ? -1 : (long long)plc_task_virtual_time_ns((size_t)task_idx);
+}
+
+static long long plugin_get_plc_virtual_time_ns(void)
+{
+    return (long long)plc_virtual_time_ns();
+}
+
 // Map PLCState to FC 0x49 LED values (0 STOPPED, 1 RUNNING, 2 ERROR).
 // INIT/EMPTY report as STOPPED (not executing).
 static int plugin_get_plc_state(void)
@@ -1024,6 +1034,8 @@ void *generate_structured_args_with_driver(plugin_type_t type, plugin_driver_t *
     args->request_plc_start   = plugin_request_plc_start;
     args->set_switch_position = plugin_set_switch_position;
     args->get_plc_state       = plugin_get_plc_state;
+    args->get_task_virtual_time_ns = plugin_get_task_virtual_time_ns;
+    args->get_plc_virtual_time_ns  = plugin_get_plc_virtual_time_ns;
 
     // PLC base tick time. Runtime owns base_tick_ns; on first plugin init
     // (before symbols_init) it carries the 20 ms default, so plugins must

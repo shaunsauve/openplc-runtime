@@ -25,6 +25,16 @@ Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
 | W1 | A held task is not released, and its overruns, stuck ticks and first-scan time are not counted. The dispatcher keeps ticking and feeding the watchdog. There is no maximum halt duration. | `host:A050`; `corpus:watchdog-overrun/long-halt-then-overrun` |
 | W2 | On resume the stuck count is 0 and the release time moves forward by the halt, so the stuck limit measures execution time only. An overrun in the first scan after resume still trips. | `host:A050` |
 
+## Virtual time and scan statistics
+
+| # | Statement | Scenario |
+|---|---|---|
+| T1 | Each task has its own virtual clock. It advances one interval on every due tick where the task is running, released or skipped as an overrun, and does not move while the task is held. With no halts it equals the wall schedule. | `host:D4.1 no halt`, `host:R4xR8 halt-one` |
+| T2 | `TIME()` and the timer FBs (TON, TOF, TP) read the clock through the stamp of their scan, so a halt of any length advances what they read by at most one interval, and a halted TON resumes at the elapsed time it had. | `host:A052 all-stop 1 s`, `host:A052 all-stop 3 s`, `host:A053 TON`; `corpus:ton-timer/halt-mid-timing` |
+| T3 | Holding one task stops only its clock; the other tasks' clocks keep the wall schedule. Holding every task stops every clock. | `host:R4xR8 halt-one`, `host:A052 all-stop 1 s` |
+| T4 | Plugins read the clocks through `get_task_virtual_time_ns(task)` and `get_plc_virtual_time_ns()` (the fastest task); both agree with the program within one interval. Tasks are still released on the wall schedule. `CURRENT_DT` stays wall time. | `host:D4.1 no halt`, `host:A052 all-stop 1 s` |
+| T5 | The first scan after a resume records no cycle-time or latency sample, and its expected start is re-anchored, so a halt never enters STATS and never counts as an overrun. Resume releases at the next due tick with no catch-up burst. | `host:A051 statistics`; `corpus:bench/halt-no-catch-up` |
+
 ## Safe-stop
 
 | # | Statement | Scenario |
@@ -49,5 +59,6 @@ Scenario ids: `host:<case>` is a case in `tests/host/test_safe_stop.cpp` (run by
 
 ## Not yet specified here
 
-Virtual time, scan statistics during a halt, input buffering, halt-one shared data and the
-debugger's probes arrive with run control; their statements are added with it.
+Input buffering, halt-one shared data, the halt offset (ADR-004 D4.4) and the debugger's
+probes arrive with run control; their statements are added with it. A halt inside a scan needs
+probes, so T5 covers halts at the scan boundary only.

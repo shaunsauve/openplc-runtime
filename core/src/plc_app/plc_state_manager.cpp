@@ -624,6 +624,7 @@ static void apply_run_requests(void)
             c->stuck_ticks.store(0, std::memory_order_relaxed);
             c->release_ns.fetch_add(now - c->held_since_ns.load(std::memory_order_relaxed),
                                     std::memory_order_acq_rel);
+            scan_cycle_tracker_resumed(&c->tracker);
             c->run_state.store(PLC_TASK_RUN_RUNNING, std::memory_order_release);
         }
     }
@@ -887,6 +888,8 @@ void *plc_cycle_thread(void *arg)
                 ctx->divisor          = (uint64_t)(ctx->interval_ns / (int64_t)base_ns);
                 if (ctx->divisor == 0) ctx->divisor = 1;
                 ctx->time_at_dispatch = 0;
+                ctx->vt_ns.store(0,         std::memory_order_relaxed);
+                ctx->vt_next_ns       = 0;
                 ctx->alive.store(1,         std::memory_order_relaxed);
                 ctx->released.store(0,      std::memory_order_relaxed);
                 ctx->completed.store(0,     std::memory_order_relaxed);
@@ -1035,7 +1038,6 @@ void *plc_cycle_thread(void *arg)
     while (dispatcher_should_run(plc_get_state()))
     {
         /* ---- Phase B: the tick (runs at the absolute deadline) ---- */
-        const int64_t master_time = (int64_t)master_tick * (int64_t)base_ns;
 
         watchdog_feed();
 
@@ -1118,8 +1120,14 @@ void *plc_cycle_thread(void *arg)
                     PlcTaskCtx *c = &plc_tasks[i];
                     if (!c->alive.load(std::memory_order_acquire)) continue;
                     if ((master_tick % c->divisor) != 0) continue;
-                    /* Held: no release, and no overrun or stuck tick to count. */
+                    /* Held: no release, no overrun or stuck tick to count, and its clock stays. */
                     if (!task_is_running(c)) continue;
+
+                    /* Every running due tick advances the task's clock, released or skipped as
+                     * an overrun; with no halts it equals master_tick * base_ns (ADR-004 D4.1). */
+                    const int64_t vt = c->vt_next_ns;
+                    c->vt_next_ns    = vt + c->interval_ns;
+                    c->vt_ns.store(vt, std::memory_order_release);
 
                     long r  = c->released.load(std::memory_order_relaxed);
                     long cc = c->completed.load(std::memory_order_acquire);
@@ -1131,7 +1139,7 @@ void *plc_cycle_thread(void *arg)
                          * g_tasks_running negative. */
                         c->stuck_ticks.store(0, std::memory_order_relaxed);
                         c->release_ns.store(monotonic_ns(), std::memory_order_release);
-                        c->time_at_dispatch = master_time;
+                        c->time_at_dispatch = vt;
                         c->released.store(r + 1, std::memory_order_relaxed);
                         g_tasks_running.fetch_add(1, std::memory_order_acq_rel);
                         sem_post(&c->go);
@@ -1950,14 +1958,20 @@ extern "C" int64_t plc_task_virtual_time_ns(size_t task_idx)
 {
     int64_t vt = -1;
     pthread_mutex_lock(&plc_tasks_lock);
-    if (plc_tasks && task_idx < plc_task_count) vt = plc_tasks[task_idx].time_at_dispatch;
+    if (plc_tasks && task_idx < plc_task_count)
+        vt = plc_tasks[task_idx].vt_ns.load(std::memory_order_acquire);
     pthread_mutex_unlock(&plc_tasks_lock);
     return vt;
 }
 
 extern "C" int64_t plc_virtual_time_ns(void)
 {
-    return plc_task_virtual_time_ns(0);
+    int64_t vt = -1;
+    pthread_mutex_lock(&plc_tasks_lock);
+    for (size_t i = 0; plc_tasks && i < plc_task_count; ++i)
+        if (plc_tasks[i].is_fastest_task) vt = plc_tasks[i].vt_ns.load(std::memory_order_acquire);
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return vt;
 }
 
 extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
