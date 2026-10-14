@@ -22,7 +22,7 @@
       {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}}]},
     {"request": "stepIn", "note": "now at @MOTOR_PID; into the nested FB", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@PID_FIRST", "col": 3},
-      "stack": [{"pou": "PID", "kind": "fb", "instance": "PROG0.motor1.pid"}, {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"},
+      "stack": [{"pou": "PidCtl", "kind": "fb", "instance": "PROG0.motor1.pid"}, {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"},
                 {"pou": "Cell", "kind": "program", "instance": "PROG0"}]}},
     {"loop": 2, "steps": [
       {"request": "next", "expect": {"success": true}},
@@ -32,7 +32,7 @@
       "stack": [
         {"pou": "Clamp", "kind": "function", "instance": null, "location": {"file": "program.st", "line": "@CLAMP_FIRST"},
          "scopes": {"inputs": {"v": {"~approx": [30.0, 1e-6]}, "lo": 0.0, "hi": 100.0}, "temps": {"r": 0.0}}},
-        {"pou": "PID", "kind": "fb", "instance": "PROG0.motor1.pid", "location": {"file": "program.st", "line": "@PID_CALL"},
+        {"pou": "PidCtl", "kind": "fb", "instance": "PROG0.motor1.pid", "location": {"file": "program.st", "line": "@PID_CALL"},
          "scopes": {"inputs": {"sp": 50.0, "pv": 0.0}, "outputs": {"out": 0.0},
                     "members": {"kp": 0.5, "ki": {"~approx": [0.1, 1e-6]}, "err": 50.0, "integ": {"~approx": [5.0, 1e-6]}, "last": 0.0}}},
         {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1", "location": {"file": "program.st", "line": "@MOTOR_PID"},
@@ -41,7 +41,7 @@
          "scopes": {"members": {"witness": 1, "total": 0, "i": 0}}}]}},
     {"request": "stepOut", "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@PID_AFTER", "col": 3},
-      "stack": [{"pou": "PID", "kind": "fb", "instance": "PROG0.motor1.pid"}, {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"},
+      "stack": [{"pou": "PidCtl", "kind": "fb", "instance": "PROG0.motor1.pid"}, {"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1"},
                 {"pou": "Cell", "kind": "program", "instance": "PROG0"}],
       "variables": {"PROG0.motor1.pid.out": {"~approx": [30.0, 1e-6]}}}},
     {"request": "stepOut", "expect": {"success": true}},

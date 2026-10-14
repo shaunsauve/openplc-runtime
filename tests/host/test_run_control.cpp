@@ -763,10 +763,16 @@ static void case_before_statement(void)
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("step", P_WITNESS)),
           "stepOut of the FB, the program's last call, did not land on the next scan's first statement");
 
-    /* The scan completes on continue: the next stop at K sees its outputs in the plant. */
+    /* A038: a step landing on an armed breakpoint (K) is one stop, reason breakpoint. The scan
+     * the step crossed completed on the way: the stop at K sees its outputs in the plant. */
+    g_case = "A038 step onto breakpoint";
     m = g_link.mark();
-    cont();
+    r = g_link.call("next");
+    CHECK(ok(r), "next refused: %s", err_code(r));
     CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("breakpoint", P_K)), "no stop at K");
+    sleep_ms(200);
+    CHECK(g_link.count(m, "stopped") == 1, "%d stopped events for one step onto a breakpoint",
+          g_link.count(m, "stopped"));
     CHECK(plant_word(1) == c0 + 1, "plant counter %d at the next scan, want %d", plant_word(1), c0 + 1);
     CHECK(plant_word(0) == w_st, "plant witness %d, want %d", plant_word(0), w_st);
 

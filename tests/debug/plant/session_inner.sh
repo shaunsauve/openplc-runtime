@@ -24,6 +24,26 @@ case "$SEED" in
     sed -i 's/uint64_t idx = (uint64_t)item->valuedouble;/uint64_t idx = (uint64_t)item->valuedouble + 1;/' \
       core/src/plc_app/debug_link.cpp
     grep -q 'item->valuedouble + 1;' core/src/plc_app/debug_link.cpp || { echo "SEED leafoff not applied"; exit 1; } ;;
+  stepin-over)  # A035 red-proof: step into behaves as step over
+    sed -i 's/if (!std::strcmp(command, "next") \&\& !v.at_boundary)/if ((!std::strcmp(command, "next") || !std::strcmp(command, "stepIn")) \&\& !v.at_boundary)/' \
+      core/src/plc_app/debug_link.cpp
+    grep -q '|| !std::strcmp(command, "stepIn")) && !v.at_boundary' core/src/plc_app/debug_link.cpp \
+      || { echo "SEED stepin-over not applied"; exit 1; } ;;
+  twostops)  # A038 red-proof: a step landing on an armed breakpoint parks once as a step, then again as the breakpoint
+    python3 - <<'PY' || { echo "SEED twostops not applied"; exit 1; }
+p = "core/src/plc_app/debug_agent.cpp"
+s = open(p).read()
+anchor = "    timespec now;\n    clock_gettime(CLOCK_MONOTONIC, &now);\n    t->stop.reason"
+assert anchor in s
+extra = ("    if (bp_wants && trap_wants) {\n"
+         "        t->stop.reason = DBG_STOP_STEP; t->stop.probe = id; t->stop.hits = 0;\n"
+         "        t->stop.depth = tl_depth; t->stop.head = tl_head; t->stop.since_ns = 0;\n"
+         "        t->stop_pending.store(true, std::memory_order_release);\n"
+         "        if (g_host.park(tl_idx) == DBG_PARK_ABANDON) throw plc_dbg::Abandon{};\n"
+         "    }\n")
+open(p, "w").write(s.replace(anchor, extra + anchor, 1))
+PY
+    ;;
   *) echo "unknown SEED $SEED"; exit 1 ;;
 esac
 mkdir -p build/plugins /run/runtime core/generated

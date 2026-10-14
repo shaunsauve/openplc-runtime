@@ -13,7 +13,9 @@
 #                 ../openplc-debug/status/runs/u4-e2e.jsonl)
 #        SEED     a seeded defect for a red proof: `late` arms every breakpoint one probe late
 #                 (the stop comes one statement after the breakpoint's line); `leafoff` reads
-#                 every leaf one past the asked one (the variables read are not the program's)
+#                 every leaf one past the asked one (the variables read are not the program's);
+#                 `stepin-over` makes step into a step over (A035); `twostops` parks a step that
+#                 lands on an armed breakpoint twice, as a step and as the breakpoint (A038)
 #        IMAGE    Linux image with g++, cmake and the runtime venv (default the runtime image)
 # Needs: node (host, STruCpp codegen) and docker.
 #

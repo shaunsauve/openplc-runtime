@@ -13,10 +13,13 @@
    witness: Main PROG0.witness %QD0
 
    The J1 program: PROG0 -> FB_Motor instances motor1 and motor2 -> each with a
-   nested PID FB -> the function Clamp; a FOR loop; comment and blank lines.
+   nested PidCtl FB -> the function Clamp; a FOR loop; comment and blank lines.
    Scan 1 from a cold start is fully determined: motor1.pid.err = 50.0,
    motor1.pid.out = 30.0, motor1.speed = 3.0 after the call; motor2 runs only
    while the plant sets %IX0.0.
+   The nested FB is PidCtl, not PID: STruCpp's additional-function-blocks
+   library defines PID, and a user POU of a library POU's name compiles to a
+   C++ redefinition (reported to STruCpp, 2026-10-14).
 *)
 
 FUNCTION Clamp : REAL
@@ -37,7 +40,7 @@ FUNCTION Clamp : REAL
   Clamp := r;                                              (*@CLAMP_RET*)
 END_FUNCTION
 
-FUNCTION_BLOCK PID
+FUNCTION_BLOCK PidCtl
   VAR_INPUT
     sp : REAL;
     pv : REAL;
@@ -68,7 +71,7 @@ FUNCTION_BLOCK FB_Motor
     speed : REAL;
   END_VAR
   VAR
-    pid : PID;
+    pid : PidCtl;
     calls : DINT;
   END_VAR
   calls := calls + 1;                                      (*@MOTOR_FIRST*)
