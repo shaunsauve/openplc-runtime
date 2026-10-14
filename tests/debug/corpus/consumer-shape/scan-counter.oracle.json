@@ -1,0 +1,28 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "consumer-shape/scan-counter",
+  "corpus": "consumer-shape",
+  "kind": "runtime",
+  "criteria": ["A096"],
+  "title": "With the I/O plugin exchanging five times per scan, the true scan counter equals the plant's scan count (not the exchange count), the plugin reads the same value, a stop carries it, and scan statistics are present",
+  "notes": "partial: log lines and trace samples are not collected here (the trace stamp is large-data/trace-on-change's). ASSUMED: the host_io plugin takes setPeriod and readScanCounter through inject plugin; `status` reports per-task {name, scan, stats}.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IX0.1": false, "%IW0": 100, "%IW1": 100}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"inject": "plugin", "args": {"name": "host_io", "action": "setPeriod", "periodMs": 20}, "note": "5 exchanges per 100 ms scan"},
+    {"wait": {"scans": 20}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "status", "args": {}, "expect": {"success": true, "body": {"tasks": {"~contains": {"name": "Main", "scan": {"~ref": "w", "~add": 0, "~tol": 2}, "stats": {"current": {"~any": true}, "min": {"~any": true}, "max": {"~any": true}, "mean": {"~any": true}, "overruns": {"~ge": 0}}}}}}},
+    {"inject": "plugin", "args": {"name": "host_io", "action": "readScanCounter"}, "note": "the plugin's own read of the counter", "expect": {"value": {"~ref": "w", "~add": 0, "~tol": 2}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "scan": {"~capture": "k"}}},
+    {"observe": "plant", "note": "halted at the first statement of scan k: the plant has k - 1", "expect": {"witness": {"Main": {"~ref": "k", "~add": -1, "~tol": 0}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 10}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w2"}}}},
+    {"request": "status", "args": {}, "expect": {"success": true, "body": {"tasks": {"~contains": {"name": "Main", "scan": {"~ref": "w2", "~add": 0, "~tol": 2}}}}}},
+    {"inject": "plugin", "args": {"name": "host_io", "action": "setPeriod", "periodMs": 100}}
+  ]
+}

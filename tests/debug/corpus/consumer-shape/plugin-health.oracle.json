@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "consumer-shape/plugin-health",
+  "corpus": "consumer-shape",
+  "kind": "runtime",
+  "criteria": ["A101"],
+  "title": "The session shows the I/O plugin's load and init status, an error count of 5 after five failed exchanges, its log lines as events, and a warning when the project is uploaded without its plugin configuration",
+  "notes": "ASSUMED: status lists plugins as {name, loaded, init, errors}; the upload warning is a runtime `output` event naming the missing plugin configuration.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IX0.1": false, "%IW0": 100, "%IW1": 100}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "status", "args": {}, "expect": {"success": true, "body": {"plugins": {"~contains": {"name": "host_io", "loaded": true, "init": "ok"}}}}},
+    {"plant": {"failExchanges": 5}},
+    {"event": "plugin", "withinMs": 3000, "expect": {"body": {"name": "host_io", "errors": 5}}},
+    {"event": "output", "withinMs": 3000, "note": "the plugin's own log line, forwarded", "expect": {"body": {"category": "plugin", "text": {"~any": true}}}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 3}}}},
+    {"inject": "upload", "args": {"build": "program.st", "conf": {"plugins": null}}, "note": "the project without its plugin configuration", "expect": {"status": 200}},
+    {"event": "output", "withinMs": 30000, "expect": {"body": {"category": "runtime", "text": {"~contains": "plugin"}}}},
+    {"inject": "upload", "args": {"build": "program.st"}, "note": "restore plugins.json"}
+  ]
+}
