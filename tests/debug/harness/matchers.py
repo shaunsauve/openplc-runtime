@@ -8,6 +8,7 @@ See also:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
@@ -63,7 +64,7 @@ def _equal(expected: Json, observed: Observed) -> bool:
 KNOWN = {
     "~eq", "~ne", "~lt", "~le", "~gt", "~ge", "~range", "~approx", "~oneOf", "~display",
     "~capture", "~ref", "~add", "~tol", "~any", "~absent", "~len", "~maxLen", "~notRef",
-    "~contains",
+    "~contains", "~sha256",
 }
 
 
@@ -175,6 +176,14 @@ def _match_matcher(
                     return fail("no element matches")
             else:
                 return fail("neither an array nor a string")
+        if key == "~sha256":
+            # A fetched source must hash to the debug info's per-file sha256 (ADR-002 D3 files[]).
+            if not isinstance(arg, str) or arg not in captures:
+                return fail(f"capture {arg!r} not bound")
+            if not isinstance(observed, str):
+                return fail("not a string")
+            if hashlib.sha256(observed.encode("utf-8")).hexdigest() != str(captures[arg]).lower():
+                return fail(f"SHA-256 differs from capture {arg}")
         if key == "~notRef":
             if not isinstance(arg, str) or arg not in captures:
                 return fail(f"capture {arg!r} not bound")

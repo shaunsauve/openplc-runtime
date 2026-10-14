@@ -847,6 +847,11 @@
           "pattern": "^[a-z][A-Za-z0-9_]*$",
           "description": "differs from the captured value (a build identity that changed, a counter that moved)"
         },
+        "~sha256": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_]*$",
+          "description": "a string whose SHA-256 (UTF-8, hex) equals the captured value"
+        },
         "~contains": {
           "$ref": "#/$defs/match",
           "description": "an array with at least one element matching this, or a string containing this string"

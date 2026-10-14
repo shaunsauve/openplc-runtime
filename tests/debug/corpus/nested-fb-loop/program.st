@@ -51,6 +51,7 @@ FUNCTION_BLOCK PID
     integ : REAL;
     err : REAL;
     last : REAL;
+    calls : DINT := 7;  (* never written: A093's local name shared with FB_Motor.calls *)
   END_VAR
   err := sp - pv;                                          (*@PID_FIRST*)
   integ := integ + err * ki;                               (*@PID_INTEG*)

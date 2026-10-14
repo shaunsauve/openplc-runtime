@@ -89,7 +89,7 @@ A **major** bump is incompatible; a **minor** bump only adds optional fields (as
 1.0 runners paired a request `repeat n` with a following event `repeat n`; every corpus file
 that relied on it now says `loop`, and no 1.0 file exists outside this corpus. 1.1 also pins the `throughout`
 window to "since the previous plant observation": the 1.0 runner started it at the end of the
-step just before, so after a `wait` it held no samples and checked nothing. Later 1.1 additions (2026-10-14): the `~contains` and `~notRef` matchers and the
+step just before, so after a `wait` it held no samples and checked nothing. Later 1.1 additions (2026-10-14): the `~contains`, `~notRef` and `~sha256` matchers and the
 `~token: "user:<name>"` symbol; the runner now fails a matcher key it does not know instead of
 skipping it, so an oracle can never pass on a runner that predates its matcher.
 
@@ -226,6 +226,7 @@ listed are ignored). Otherwise an object whose keys start with `~`:
 | `~capture: "name"` | always; binds the value for later steps (combinable with other keys) |
 | `~ref: "name"`, `~add: n`, `~tol: t` | equals the captured value (+ n), within ± t when `~tol` is given |
 | `~notRef: "name"` | differs from the captured value (a build identity that changed) |
+| `~sha256: "name"` | a string whose SHA-256 (UTF-8, hex) equals the captured value: a fetched source against the debug info's `files[].sha256` |
 | `~contains: <match>` | an array with at least one element matching it, or a string containing it (an audit entry, a log line) |
 | `~any`, `~absent` | present with any value / not present |
 | `~len`, `~maxLen` | array or string length |

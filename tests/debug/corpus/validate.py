@@ -442,7 +442,7 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
             if isinstance(node, str) and MARKER.match(node) and not re.search(r"\.(line|endLine)$", where):
                 out.extend(f"{where}: {p}" for p in marker_lines(prog, node, programs)[0])
             if isinstance(node, dict):
-                for key in ("~ref", "~notRef"):
+                for key in ("~ref", "~notRef", "~sha256"):
                     ref = node.get(key)
                     if isinstance(ref, str) and ref not in captured:
                         out.append(f"{where}: {key} {ref!r} has no earlier ~capture")

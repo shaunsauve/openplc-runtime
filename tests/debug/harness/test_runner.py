@@ -126,6 +126,15 @@ class RunnerTest(unittest.TestCase):
                     self.assertEqual(result.verdict.step, step, trace)
                     self.assertIn(needle, result.verdict.reason, trace)
 
+    def test_sha256_matcher_compares_content_to_a_captured_hash(self) -> None:
+        import hashlib  # noqa: PLC0415
+
+        from matchers import match  # noqa: PLC0415
+
+        caps = {"h": hashlib.sha256(b"PROGRAM P\n").hexdigest()}
+        self.assertIsNone(match({"~sha256": "h"}, "PROGRAM P\n", caps))
+        self.assertIsNotNone(match({"~sha256": "h"}, "PROGRAM Q\n", caps))
+
     def test_no_endpoint_is_blocked_and_results_are_one_line_per_criterion(self) -> None:
         endpoint = SocketIOEndpoint("https://127.0.0.1:1", token=None, insecure=True)
         oracle = _oracle("plant-io/bp-before-statement")

@@ -1,0 +1,30 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "nested-fb-loop/fetch-sources",
+  "corpus": "nested-fb-loop",
+  "kind": "runtime",
+  "criteria": ["A071"],
+  "title": "A client with no checkout fetches each source, whose SHA-256 equals the debug info's, and runs J1 from it",
+  "notes": "The harness has no checkout: every line it names comes from the fetched build's debug info (markers resolve against the corpus copy the build was made from). J1's steps are nested-fb-loop/j1-break-inspect-step's.",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"inspect": "debugInfo", "expect": {"files": [{"path": "program.st", "id": {"~capture": "fid"}, "sha256": {"~capture": "h"}}]}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "source", "args": {"fileId": {"~ref": "fid"}}, "expect": {"success": true, "body": {"content": {"~sha256": "h"}}}, "note": "the built file, not today's disk copy"},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry", "location": {"file": "program.st", "line": "@WITNESS"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@MOTOR_PID"]}, "expect": {"success": true, "body": {"breakpoints": [{"verified": true, "line": "@MOTOR_PID"}]}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "task": "Main", "location": {"file": "program.st", "line": "@MOTOR_PID", "col": 5}, "stack": [{"pou": "FB_Motor", "kind": "fb", "instance": "PROG0.motor1", "location": {"file": "program.st", "line": "@MOTOR_PID"}}, {"pou": "Cell", "kind": "program", "instance": "PROG0", "location": {"file": "program.st", "line": "@CALL_M1"}}], "variables": {"PROG0.motor1.calls": 1, "PROG0.motor1.speed": 0.0, "PROG0.motor1.enable": true, "PROG0.motor1.target": 50.0, "PROG0.motor1.pid.out": 0.0}}},
+    {"observe": "plant", "note": "stop before the statement: scan 1 not yet published", "expect": {"witness": {"Main": 0}, "outputs": {"%QD2": 0.0}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@MOTOR_AFTER", "col": 5}, "variables": {"PROG0.motor1.pid.err": 50.0, "PROG0.motor1.pid.integ": {"~approx": [5.0, 1e-06]}, "PROG0.motor1.pid.out": {"~approx": [30.0, 1e-06]}, "PROG0.motor1.speed": 0.0}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "continued", "withinMs": 500},
+    {"wait": {"scans": 5}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 5}}, "outputs": {"%QD2": {"~gt": 3.0}, "%QD1": 6}}},
+    {"noEvent": "stopped", "forScans": 20}
+  ]
+}
