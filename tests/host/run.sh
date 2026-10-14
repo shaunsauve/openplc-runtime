@@ -13,6 +13,9 @@ cd "$(dirname "$0")/../.."
 CXX="${CXX:-c++}"
 CXXFLAGS="-std=c++17 -Wall -Wextra -Wno-unused-parameter -g"
 INCLUDES="-Icore/src/plc_app -Icore/src"
+# plugin_driver.h pulls in Python.h.
+PY_INCLUDE=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])' 2>/dev/null || true)
+if [ -n "$PY_INCLUDE" ]; then INCLUDES="$INCLUDES -I$PY_INCLUDE"; fi
 
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
@@ -23,6 +26,7 @@ TESTS=(
   "tests/host/test_rt_mutex.cpp:"
   "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
   "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
+  "tests/host/test_safe_stop.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c"
 )
 
 failures=0
@@ -45,7 +49,7 @@ for entry in "${TESTS[@]}"; do
     fi
   done
   # shellcheck disable=SC2086
-  if ! $CXX $CXXFLAGS $INCLUDES "$test_src" ${objs[@]+"${objs[@]}"} -o "$OUT/$name" -lpthread; then
+  if ! $CXX $CXXFLAGS $INCLUDES "$test_src" ${objs[@]+"${objs[@]}"} -o "$OUT/$name" -lpthread -lm; then
     echo "  FAIL  $name did not compile"
     failures=$((failures + 1))
     continue

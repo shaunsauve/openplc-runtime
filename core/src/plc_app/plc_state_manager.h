@@ -41,8 +41,24 @@ typedef enum
     PLC_STATE_ERROR,
     PLC_STATE_EMPTY,
     PLC_STATE_TRANSITIONING_TO_RUN,
-    PLC_STATE_TRANSITIONING_TO_STOP
+    PLC_STATE_TRANSITIONING_TO_STOP,
+    /* No program executes; the dispatcher runs without tasks and plugins exchange
+     * the held outputs. Left only by an explicit STOP or a granted start. */
+    PLC_STATE_SAFE_STOPPED
 } PLCState;
+
+/* Per-task run state, owned by the dispatcher. HELD: not released, and excluded
+ * from overrun, stuck and first-scan accounting. */
+#define PLC_TASK_RUN_RUNNING 0
+#define PLC_TASK_RUN_HELD    1
+
+/* Pending run-control request in PlcTaskCtx::run_request. */
+#define PLC_TASK_REQ_NONE   0
+#define PLC_TASK_REQ_HOLD   1
+#define PLC_TASK_REQ_RESUME 2
+
+/* Task index meaning "every task" for the run-control calls. */
+#define PLC_ALL_TASKS ((size_t)-1)
 
 typedef struct PlcTaskCtx
 {
@@ -73,6 +89,10 @@ typedef struct PlcTaskCtx
     volatile sig_atomic_t in_body;         /* inside IEC program code, where the abort may jump out */
 
     plc_atomic_u64_t      local_tick;
+
+    plc_atomic_long_t     run_state;       /* PLC_TASK_RUN_*, written by the dispatcher only */
+    plc_atomic_long_t     run_request;     /* PLC_TASK_REQ_*, written by run control */
+    plc_atomic_i64_t      held_since_ns;   /* CLOCK_MONOTONIC time the hold was applied */
 
     /* Per-task scan/cycle/latency tracker. The task thread updates it
      * around its scan body; STATS walks all trackers for per-task entries. */
@@ -194,6 +214,74 @@ bool plc_state_is_transitioning(void);
  * stuck stop is bounded by plc_stop_budget_ms() and ends in watchdog_fatal_exit(). */
 #define PLC_TRANSITION_LANDING_TIMEOUT_MS 90000
 #define PLC_TRANSITION_STUCK_TIMEOUT_MS   (PLC_TRANSITION_LANDING_TIMEOUT_MS + 30000)
+
+/**
+ * @brief Claim a start that carries a one-shot grant from an authorised user.
+ *
+ * Same as plc_claim_transition(PLC_STATE_RUNNING), except that the start gate does
+ * not refuse it. The grant is consumed by this call whether or not the claim
+ * succeeds, so it can never authorise a later, different start.
+ *
+ * @param user name of the user who holds control; must be non-empty
+ * @return true when the start is claimed and the caller must complete it
+ */
+bool plc_claim_granted_start(const char *user);
+
+/** @brief True while the outputs are held (from a safe-stop until a granted run's first copy-out, or an explicit STOP). */
+bool plc_output_hold_is_set(void);
+
+/** @brief True while every start needs a grant (from a safe-stop until a granted run's first copy-out). */
+bool plc_start_gate_is_set(void);
+
+/**
+ * @brief Ask the dispatcher to safe-stop the PLC: abandon the scan, hold the outputs.
+ *
+ * Asynchronous. The dispatcher applies it at its next tick; a transition already
+ * in flight (a user STOP) wins and the request is dropped. Behaviour:
+ * docs/HALTED_SEMANTICS.md.
+ *
+ * @param reason short text kept in the safe-stop record, e.g. "heartbeat_timeout"
+ * @return false when no dispatcher is running to apply it
+ */
+bool plc_request_safe_stop(const char *reason);
+
+/**
+ * @brief Hold a task (or PLC_ALL_TASKS) at its scan boundary.
+ *
+ * The dispatcher stops releasing it and stops counting its overruns and stuck
+ * ticks. Under a safe halt policy the configured outputs in the held scope take
+ * their safe values once the held tasks are idle. Called by run control.
+ *
+ * @param task_idx  index into plc_tasks, or PLC_ALL_TASKS
+ * @param timeout_ms how long to wait for the dispatcher to apply the hold
+ * @return true when every targeted task is held
+ */
+bool plc_run_control_hold(size_t task_idx, int timeout_ms);
+
+/**
+ * @brief Resume a held task (or PLC_ALL_TASKS).
+ *
+ * Saved values of outputs the safe policy changed are journaled back first; the
+ * dispatcher then re-arms the stuck and overrun checks (stuck count 0, release
+ * time moved forward by the hold duration) and releases at the next due tick.
+ *
+ * @return true when every targeted task is running again
+ */
+bool plc_run_control_resume(size_t task_idx, int timeout_ms);
+
+/**
+ * @brief Apply a safe_stop.hold file found at boot.
+ *
+ * GATE_ONLY sets the start gate and otherwise boots as usual. VALUES also sets the
+ * hold and enters programless SAFE_STOPPED: plugins started with the held values,
+ * and a dispatcher without tasks keeping them exchanging.
+ *
+ * @return true when the runtime is now SAFE_STOPPED and must not auto-start or drive outputs off
+ */
+bool plc_boot_from_hold_file(void);
+
+/** @brief True when the current safe-stop survived a process restart. */
+bool plc_safe_stop_runtime_restarted(void);
 
 /**
  * @brief Cleanup the PLC state manager and unloads the plugin manager.

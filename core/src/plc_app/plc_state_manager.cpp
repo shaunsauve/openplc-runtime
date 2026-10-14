@@ -1493,3 +1493,56 @@ extern "C" int plc_get_crash_signal(void)
 {
     return (int)plc_crash_signal;
 }
+
+/* ---- Safe-stop and run control: interface only, behaviour not implemented yet ---- */
+
+extern "C" bool plc_claim_granted_start(const char *user)
+{
+    (void)user;
+    return plc_claim_transition(PLC_STATE_RUNNING);
+}
+
+extern "C" bool plc_output_hold_is_set(void)
+{
+    return false;
+}
+
+extern "C" bool plc_start_gate_is_set(void)
+{
+    return false;
+}
+
+/* Publishes the state only, which is what any new state does to today's dispatcher. */
+extern "C" bool plc_request_safe_stop(const char *reason)
+{
+    (void)reason;
+    pthread_mutex_lock(&state_mutex);
+    const bool running = (plc_state == PLC_STATE_RUNNING);
+    if (running) plc_state = PLC_STATE_SAFE_STOPPED;
+    pthread_mutex_unlock(&state_mutex);
+    return running;
+}
+
+extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
+{
+    (void)task_idx;
+    (void)timeout_ms;
+    return false;
+}
+
+extern "C" bool plc_run_control_resume(size_t task_idx, int timeout_ms)
+{
+    (void)task_idx;
+    (void)timeout_ms;
+    return false;
+}
+
+extern "C" bool plc_boot_from_hold_file(void)
+{
+    return false;
+}
+
+extern "C" bool plc_safe_stop_runtime_restarted(void)
+{
+    return false;
+}

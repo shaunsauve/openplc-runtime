@@ -58,6 +58,9 @@ extern "C"
  * itself hangs; the next boot then skips it instead of looping. */
 #define PLC_FAULT_CONTEXT_BOOT_OUTPUTS_OFF "safe-mode boot outputs-off"
 
+/* Fault context while SAFE_STOPPED. A watchdog exit in it boots into the held outputs. */
+#define PLC_FAULT_CONTEXT_SAFE_STOPPED "safe-stopped"
+
 /* Signal the teardown sends to a task still in its scan after its grace. Runtime
  * code reached from IEC bodies blocks it around fork/allocation-heavy sections. */
 #define PLC_TASK_ABORT_SIGNAL SIGUSR2
