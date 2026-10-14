@@ -300,6 +300,7 @@ class _Run:
         if self.doc.get("kind") != "runtime":
             return  # build scenarios read compiler outputs; no endpoint or plant involved
         self.endpoint.prepare(self.setup)
+        self.plant.prepare(_obj(self.setup.get("plant")))
         inputs = _obj(_obj(self.setup.get("plant")).get("inputs"))
         if inputs:
             self.plant.set_inputs(inputs)
@@ -808,6 +809,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="build_all.sh's output directory (ADR-002 D1 files per corpus program)",
     )
     ap.add_argument(
+        "--plant", metavar="SOCKET", help="the reference plant plugin's Unix socket (F150)"
+    )
+    ap.add_argument(
+        "--no-debugger",
+        action="store_true",
+        help="drive the runtime over its core socket only (needs --plant); session steps BLOCK",
+    )
+    ap.add_argument(
         "--results", type=Path, help="append status/runs JSON lines here (default: dry run)"
     )
     ap.add_argument(
@@ -816,9 +825,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     opts = ap.parse_args(argv)
 
     user_tokens = dict(item.partition("=")[::2] for item in opts.user_token)
-    endpoint = SocketIOEndpoint(
-        opts.endpoint, token=opts.token, insecure=opts.insecure, user_tokens=user_tokens
-    )
+    plant: Plant = UnavailablePlant()
+    endpoint: Endpoint
+    if opts.no_debugger and not opts.plant:
+        ap.error("--no-debugger needs --plant")
+    if opts.plant:
+        from reference_plant import CoreSocketEndpoint, ReferencePlant  # noqa: PLC0415
+
+        reference = ReferencePlant(opts.plant)
+        plant = reference
+    if opts.no_debugger:
+        endpoint = CoreSocketEndpoint(reference)
+    else:
+        endpoint = SocketIOEndpoint(
+            opts.endpoint, token=opts.token, insecure=opts.insecure, user_tokens=user_tokens
+        )
     build: BuildOutputs = (
         build_views.DirectoryBuild(opts.build_dir)
         if opts.build_dir.is_dir()
@@ -830,7 +851,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     errors = 0
     rows: List[JsonObj] = []
     for path in _oracles(opts.oracles):
-        result = run_scenario(path, endpoint, UnavailablePlant(), WallClock(), build)
+        result = run_scenario(path, endpoint, plant, WallClock(), build)
         counts[result.verdict.status] += 1
         errors += int("harness error" in result.verdict.reason)
         print(

@@ -531,6 +531,10 @@ class FakePlant:
     def __init__(self, world: FakeWorld) -> None:
         self.world = world
 
+    def prepare(self, plant_setup: JsonObj) -> None:
+        if plant_setup.get("schedule"):
+            raise Blocked("fake plant has no input schedule")
+
     def set_inputs(self, values: Mapping[str, Json]) -> None:
         self.world.plant_inputs.update(values)
 

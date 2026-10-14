@@ -1,13 +1,14 @@
 """The runner's four seams: the debug endpoint (ADR-003), the plant (scan witness, I/O, virtual
 time), the clock and the build outputs (ADR-002 D1 files). A real run plugs the Socket.IO
-endpoint, the reference plant (F150), the wall clock and the build directory; the tests plug a
-simulation that implements all four.
+endpoint (or, with no debugger, the core socket), the reference plant (F150), the wall clock and
+the build directory; the tests plug a simulation that implements all four.
 
 See also:
   tests/debug/harness/runner.py - executes oracle steps through these seams and emits verdicts.
   tests/debug/harness/build_views.py - the build directory reader and the `inspect` views.
   tests/debug/harness/socketio_endpoint.py - the real endpoint (ADR-003 D1/D2, ADR-005 D1/D2/D4).
   tests/debug/harness/fake_endpoint.py - the simulated endpoint, plant and clock (tests only).
+  tests/debug/harness/reference_plant.py - the real plant adapter and the debugger-less endpoint.
 """
 
 from __future__ import annotations
@@ -74,6 +75,10 @@ class PlantSample:
 
 
 class Plant(Protocol):
+    def prepare(self, plant_setup: JsonObj) -> None:
+        """Arm the oracle's `setup.plant` (its `schedule` runs on the plant clock, PLC virtual
+        time, counted from now); raise Blocked if this plant cannot."""
+
     def set_inputs(self, values: Mapping[str, Json]) -> None: ...
 
     def fail_exchanges(self, n: int) -> None: ...
@@ -109,7 +114,11 @@ class WallClock:
 class UnavailablePlant:
     """Stands in until the reference plant plugin (F150) exists."""
 
-    REASON = "reference plant plugin (F150) not built: no plant adapter"
+    REASON = "no reference plant: pass --plant SOCKET (tests/debug/plant/e2e.sh)"
+
+    def prepare(self, plant_setup: JsonObj) -> None:
+        if plant_setup.get("schedule"):
+            raise Blocked(self.REASON)
 
     def set_inputs(self, values: Mapping[str, Json]) -> None:
         raise Blocked(self.REASON)
