@@ -51,6 +51,11 @@ for o in "${ORACLES[@]}"; do
   [ "$(dirname "$o")" = "$C" ] || { echo "FAIL: $o is not of corpus $C (run one corpus per invocation)"; exit 2; }
 done
 COMMIT=$(git -C "$REPO" rev-parse --short HEAD)$(git -C "$REPO" diff --quiet HEAD -- core webserver tests || echo -dirty)
+# The payload's debug info and probes come from STruCpp, so the runtime head alone does not
+# identify what was measured. E13.5(c) requires a verdict to be measured at the current head of
+# every member repo, which is unprovable if the compiler's head is never recorded.
+STRUCPP_COMMIT=$(git -C "$STRUCPP" rev-parse --short HEAD 2>/dev/null || echo unknown)
+COMMIT="$COMMIT strucpp:$STRUCPP_COMMIT"
 
 rm -rf "$OUT"; mkdir -p "$OUT/payload"
 OUT=$(cd "$OUT" && pwd)  # docker -v needs an absolute path
