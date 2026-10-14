@@ -1,0 +1,816 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openplc.local/tests/debug/corpus/oracle.schema.json",
+  "title": "OpenPLC debug corpus oracle (expected trace), format 1.0",
+  "description": "One scenario: scripted gestures and the observations they must produce. Vocabulary from ADR-002 (locations, POUs, instance paths), ADR-003 (requests, events, error codes) and ADR-004 (halt semantics, scan witness, virtual time). Prose: README.md.",
+  "type": "object",
+  "required": [
+    "format",
+    "major",
+    "minor",
+    "scenario",
+    "corpus",
+    "kind",
+    "criteria",
+    "title",
+    "steps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "format": {
+      "const": "openplc-debug-oracle"
+    },
+    "major": {
+      "const": 1
+    },
+    "minor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "scenario": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+/[a-z0-9_.-]+$"
+    },
+    "corpus": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "kind": {
+      "enum": [
+        "runtime",
+        "build"
+      ]
+    },
+    "criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^A[0-9]{3}$"
+      }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "notes": {
+      "type": "string"
+    },
+    "setup": {
+      "$ref": "#/$defs/setup"
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    }
+  },
+  "$defs": {
+    "setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "probes": {
+              "type": "boolean"
+            },
+            "variant": {
+              "type": "string"
+            },
+            "path": {
+              "enum": [
+                "library",
+                "cli",
+                "editor"
+              ]
+            },
+            "control": {
+              "type": "boolean"
+            }
+          }
+        },
+        "haltPolicy": {
+          "enum": [
+            "hold",
+            "safe"
+          ]
+        },
+        "safeValues": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        "haltMode": {
+          "enum": [
+            "allStop",
+            "nonStop"
+          ]
+        },
+        "startHalted": {
+          "type": "boolean"
+        },
+        "session": {
+          "enum": [
+            "none",
+            "controller",
+            "observer"
+          ]
+        },
+        "plant": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "samplePeriodMs": {
+              "type": "number",
+              "minimum": 0
+            },
+            "inputs": {
+              "$ref": "#/$defs/ioValues"
+            }
+          }
+        },
+        "tasks": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "intervalMs": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/value"
+          }
+        }
+      }
+    },
+    "step": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/requestStep"
+        },
+        {
+          "$ref": "#/$defs/eventStep"
+        },
+        {
+          "$ref": "#/$defs/noEventStep"
+        },
+        {
+          "$ref": "#/$defs/plantStep"
+        },
+        {
+          "$ref": "#/$defs/waitStep"
+        },
+        {
+          "$ref": "#/$defs/observeStep"
+        },
+        {
+          "$ref": "#/$defs/buildStep"
+        },
+        {
+          "$ref": "#/$defs/injectStep"
+        }
+      ]
+    },
+    "requestStep": {
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/command"
+        },
+        "args": {
+          "type": "object"
+        },
+        "expect": {
+          "$ref": "#/$defs/response"
+        },
+        "note": {
+          "type": "string"
+        },
+        "repeat": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "command": {
+      "enum": [
+        "initialize",
+        "attach",
+        "detach",
+        "terminate",
+        "heartbeat",
+        "setBreakpoints",
+        "setFunctionBreakpoints",
+        "setInstanceBreakpoints",
+        "setExceptionBreakpoints",
+        "breakpointLocations",
+        "clearAllBreakpoints",
+        "continue",
+        "pause",
+        "next",
+        "stepIn",
+        "stepOut",
+        "cycleStep",
+        "runScans",
+        "runToCursor",
+        "stop",
+        "restart",
+        "setHaltMode",
+        "threads",
+        "stackTrace",
+        "scopes",
+        "variables",
+        "evaluate",
+        "setVariable",
+        "force",
+        "unforce",
+        "unforceAll",
+        "listForces",
+        "subscribe",
+        "unsubscribe",
+        "traceStart",
+        "traceStop",
+        "traceRead",
+        "source",
+        "sync",
+        "status",
+        "version",
+        "requestControl",
+        "answerControlRequest",
+        "takeControl",
+        "releaseControl",
+        "setLock",
+        "auditRead"
+      ]
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "success"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "error": {
+          "$ref": "#/$defs/errorCode"
+        },
+        "body": {
+          "$ref": "#/$defs/match"
+        }
+      }
+    },
+    "errorCode": {
+      "enum": [
+        "PROTOCOL_VERSION",
+        "UNAUTHORISED",
+        "FORBIDDEN",
+        "NOT_CONTROLLER",
+        "LOCKED",
+        "UNSUPPORTED",
+        "NO_PROBES",
+        "STALE_BUILD",
+        "UNSUPPORTED_DEBUG_INFO",
+        "INVALID_LOCATION",
+        "NO_CODE",
+        "NOT_HALTED",
+        "NOT_RUNNING",
+        "LIMIT_EXCEEDED",
+        "BAD_REQUEST",
+        "TYPE_ERROR",
+        "RANGE_ERROR",
+        "EXPR_SIDE_EFFECT",
+        "EXPR_LIMIT",
+        "EXPR_SYNTAX",
+        "NO_SOURCE",
+        "BUSY",
+        "SESSION_ENDED",
+        "INTERNAL",
+        "SAFE_STOPPED"
+      ]
+    },
+    "eventName": {
+      "enum": [
+        "stopped",
+        "continued",
+        "runState",
+        "output",
+        "values",
+        "breakpoint",
+        "forces",
+        "control",
+        "programReplaced",
+        "plugin",
+        "time",
+        "sessionEnded"
+      ]
+    },
+    "eventStep": {
+      "type": "object",
+      "required": [
+        "event"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/eventName"
+        },
+        "withinMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "count": {
+          "$ref": "#/$defs/match"
+        },
+        "expect": {
+          "$ref": "#/$defs/eventExpect"
+        },
+        "note": {
+          "type": "string"
+        },
+        "repeat": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "noEventStep": {
+      "type": "object",
+      "required": [
+        "noEvent"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "noEvent": {
+          "$ref": "#/$defs/eventName"
+        },
+        "forMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "forScans": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "task": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "eventExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "enum": [
+            "breakpoint",
+            "step",
+            "pause",
+            "entry",
+            "exception"
+          ]
+        },
+        "task": {
+          "type": "string"
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        },
+        "stack": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/frame"
+          }
+        },
+        "variables": {
+          "$ref": "#/$defs/varMatches"
+        },
+        "exception": {
+          "$ref": "#/$defs/match"
+        },
+        "scan": {
+          "$ref": "#/$defs/match"
+        },
+        "vtMs": {
+          "$ref": "#/$defs/match"
+        },
+        "body": {
+          "$ref": "#/$defs/match"
+        }
+      }
+    },
+    "location": {
+      "type": "object",
+      "required": [
+        "file",
+        "line"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "$ref": "#/$defs/lineRef"
+        },
+        "col": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "endLine": {
+          "$ref": "#/$defs/lineRef"
+        },
+        "boundary": {
+          "const": true
+        }
+      }
+    },
+    "lineRef": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^@[A-Za-z0-9_]+$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "frame": {
+      "type": "object",
+      "required": [
+        "pou",
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pou": {
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "program",
+            "fb",
+            "function",
+            "method"
+          ]
+        },
+        "instance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "$ref": "#/$defs/location"
+        },
+        "scopes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/varMatches"
+          }
+        }
+      }
+    },
+    "plantStep": {
+      "type": "object",
+      "required": [
+        "plant"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "plant": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {
+            "set": {
+              "$ref": "#/$defs/ioValues"
+            },
+            "sequence": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/ioValues"
+              }
+            },
+            "failExchanges": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "waitStep": {
+      "type": "object",
+      "required": [
+        "wait"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "wait": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "wallMs": {
+              "type": "number",
+              "minimum": 0
+            },
+            "vtMs": {
+              "type": "number",
+              "minimum": 0
+            },
+            "scans": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "observeStep": {
+      "type": "object",
+      "required": [
+        "observe",
+        "expect"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "observe": {
+          "enum": [
+            "plant",
+            "status",
+            "session",
+            "log"
+          ]
+        },
+        "expect": {
+          "$ref": "#/$defs/observation"
+        },
+        "throughout": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "witness": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/match"
+          }
+        },
+        "scanDelta": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/match"
+          }
+        },
+        "vtMs": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/match"
+          }
+        },
+        "outputs": {
+          "$ref": "#/$defs/varMatches"
+        },
+        "variables": {
+          "$ref": "#/$defs/varMatches"
+        },
+        "state": {
+          "$ref": "#/$defs/match"
+        },
+        "fields": {
+          "$ref": "#/$defs/match"
+        }
+      }
+    },
+    "buildStep": {
+      "type": "object",
+      "required": [
+        "inspect"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "inspect": {
+          "enum": [
+            "debugInfo",
+            "debugMap",
+            "generatedCpp",
+            "objectCode"
+          ]
+        },
+        "expect": {
+          "$ref": "#/$defs/match"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "injectStep": {
+      "type": "object",
+      "required": [
+        "inject"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "inject": {
+          "enum": [
+            "killClient",
+            "dropNetwork",
+            "restoreNetwork",
+            "sigstopRuntime",
+            "sigcontRuntime",
+            "killRuntime",
+            "restartRuntime",
+            "upload"
+          ]
+        },
+        "args": {
+          "type": "object"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "ioValues": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/value"
+      }
+    },
+    "varMatches": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/match"
+      }
+    },
+    "value": {
+      "type": [
+        "boolean",
+        "integer",
+        "number",
+        "string",
+        "null"
+      ]
+    },
+    "match": {
+      "description": "A literal (equality, recursively for arrays and objects) or one matcher object whose single key starts with '~'.",
+      "oneOf": [
+        {
+          "type": [
+            "boolean",
+            "integer",
+            "number",
+            "string",
+            "null",
+            "array"
+          ]
+        },
+        {
+          "$ref": "#/$defs/matcher"
+        },
+        {
+          "$ref": "#/$defs/objectMatch"
+        }
+      ]
+    },
+    "objectMatch": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[^~]"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/match"
+      }
+    },
+    "matcher": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 2,
+      "additionalProperties": false,
+      "properties": {
+        "~eq": {
+          "$ref": "#/$defs/value"
+        },
+        "~ne": {
+          "$ref": "#/$defs/value"
+        },
+        "~lt": {
+          "type": "number"
+        },
+        "~le": {
+          "type": "number"
+        },
+        "~gt": {
+          "type": "number"
+        },
+        "~ge": {
+          "type": "number"
+        },
+        "~range": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        },
+        "~approx": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "number"
+          }
+        },
+        "~oneOf": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/value"
+          }
+        },
+        "~display": {
+          "type": "string"
+        },
+        "~capture": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_]*$"
+        },
+        "~ref": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_]*$"
+        },
+        "~add": {
+          "type": "number"
+        },
+        "~any": {
+          "const": true
+        },
+        "~absent": {
+          "const": true
+        },
+        "~len": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "~maxLen": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
