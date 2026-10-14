@@ -560,46 +560,10 @@ Every failure carries one of these codes. The message names the problem in a sen
 ### Core link
 
 Internal, not a client surface: the gateway (webserver) and the core agent (`plc_main`) over
-`/run/runtime/plc_debug.socket`, full duplex. A frame is a big-endian `u32` byte length followed
-by that many bytes of UTF-8 JSON, using the envelope above (`type`, `seq`, `request_seq`,
-`command`, `event`, `body`, `error`). Symbolic resolution stays in the gateway: the core sees
+`/run/runtime/plc_debug.socket`, `u32` BE length + UTF-8 JSON frames in this protocol's envelope.
+Its one spec, with every request, event and shape both ends implement, is
+[DEBUG_CORE_LINK.md](DEBUG_CORE_LINK.md). Symbolic resolution stays in the gateway: the core sees
 probe IDs and file IDs from `debug-info.json`, never names.
-
-The core sends, unsolicited:
-
-| Event | Body |
-|---|---|
-| `hello` | First frame on every connection: `{link: "1.0", engineAbi, capabilities: {flag: bool, maxBreakpoints: n}, image: {md5, buildId, buildTime, sourceHash}, params?: {P1, P2}}`. The gateway serves nothing until it arrives and drops a link whose `link` major is not 1 |
-| `beat` | Liveness, every 250 ms; not forwarded |
-| `stopped` | As the public event, with `probe` (the halt probe ID) instead of `location`; the gateway adds `location` |
-| `continued`, `runState`, `output` | As the public events |
-| `sessionEnded` | `{session, reason}`: ends that session only |
-
-An event whose body has `session` goes only to that session; otherwise it is broadcast.
-
-The gateway sends these requests; each carries the core's `session` ID (from `attach`) unless
-noted, and the core answers with the public envelope's response, using the public error codes:
-
-| Request | Arguments | Body |
-|---|---|---|
-| `attach` | `{user, role}` (no session) | `{session}` |
-| `detach` | `{session, reason?}` | `{forces}` |
-| `terminate` | `{session}` | `{}` |
-| `beatClient` | `{session}` | `{}` |
-| `status` | `{session}` | `{state, tasks}` |
-| `setBreakpoints` | `{session, fileId, probes[]}` (replaces that file's breakpoints) | `{breakpoints:[{id, probe, verified}]}` |
-| `clearAllBreakpoints` | `{session}` | `{removed}` |
-| `setExceptionBreakpoints` | `{session, filters[]}` | `{}` |
-| `continue`, `pause`, `next`, `stepIn`, `stepOut`, `cycleStep` | `{session, task?}` | `{}` |
-| `runScans` | `{session, n, task?}` | `{}` |
-| `runToCursor` | `{session, probe, task?}` | `{}` |
-| `stop` | `{session}` | `{}` |
-| `restart` | `{session, kind?, startHalted?}` | `{}` |
-| `setHaltMode` | `{session, mode}` | `{}` |
-
-The core refuses with `NOT_HALTED`, `NOT_RUNNING`, `LIMIT_EXCEEDED`, `BUSY`, `SAFE_STOPPED` or
-`UNSUPPORTED` as the run state requires. A code outside the catalogue reaches the client as
-`INTERNAL` and is logged.
 
 ## Related Documentation
 
