@@ -1,0 +1,16 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "generated-region/generated-flags",
+  "corpus": "generated-region",
+  "kind": "build",
+  "criteria": ["A026"],
+  "title": "The generated flag is set on exactly the generated POU's and the marked region's statements",
+  "setup": {"build": {"probes": true, "path": "library"}},
+  "steps": [
+    {"inspect": "debugInfo", "note": "generatedLines: the lines of every probe with flags bit 0; the harness compares the set exactly",
+     "expect": {"pous": {"GenScale": {"generated": true}, "GenUser": {"generated": false}},
+      "generatedLines": [{"file": "program.st", "line": "@GEN_FB_1"}, {"file": "program.st", "line": "@GEN_FB_2"},
+                         {"file": "program.st", "line": "@GEN_REGION_1"}, {"file": "program.st", "line": "@GEN_REGION_2"}]}}
+  ]
+}

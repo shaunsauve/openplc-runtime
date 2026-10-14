@@ -1,0 +1,23 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "library-pou/step-into-no-source",
+  "corpus": "library-pou",
+  "kind": "runtime",
+  "criteria": ["A040"],
+  "title": "Step into a no-source library call lands on the next user statement",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LIB_FB", "@LIB_FN"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@LIB_FB"}}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@AFTER_LIB_FB", "col": 3},
+      "stack": [{"pou": "LibUser", "kind": "program", "instance": "PROG0"}]}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@LIB_FN"}}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@STD_FN", "col": 3}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}}
+  ]
+}

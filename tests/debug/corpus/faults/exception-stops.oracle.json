@@ -1,0 +1,31 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "faults/exception-stops",
+  "corpus": "faults",
+  "kind": "runtime",
+  "criteria": ["A181", "A107"],
+  "title": "J9: with exception breakpoints on, a division by zero and then an index past bound each stop with reason exception at the faulting statement",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 0, "%IX0.0": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"capabilities": {"exceptionBreakpoints": true}}}},
+    {"request": "setExceptionBreakpoints", "args": {"filters": ["divByZero", "arrayBounds", "nullRef", "watchdogOverrun"]}, "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"outputs": {"%QD1": 100}}},
+    {"plant": {"set": {"%IW0": 1}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "exception", "task": "Main", "exception": {"kind": "divByZero"},
+      "location": {"file": "program.st", "line": "@DIV", "col": 3},
+      "stack": [{"pou": "Divide", "kind": "function", "instance": null, "scopes": {"inputs": {"a": 100, "b": 0}}},
+                {"pou": "Faults", "kind": "program", "instance": "PROG0", "location": {"file": "program.st", "line": "@DIV_CALL"}}],
+      "variables": {"PROG0.sel": 1, "PROG0.witness": {"~capture": "k"}}}},
+    {"observe": "plant", "note": "outputs held at the last complete scan", "expect": {"witness": {"Main": {"~ref": "k", "~add": -1}}, "outputs": {"%QD1": 100}}},
+    {"plant": {"set": {"%IW0": 2}}},
+    {"request": "continue", "note": "the fault is delivered as without a debugger; the task terminates", "expect": {"success": true}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "status", "expect": {"fields": {"lastFault": {"kind": "divByZero", "line": "@DIV", "file": "program.st"}}}},
+    {"request": "restart", "args": {"kind": "warm"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 3000, "expect": {"reason": "exception", "exception": {"kind": "arrayBounds"},
+      "location": {"file": "program.st", "line": "@OOB", "col": 3}, "variables": {"PROG0.idx": 10}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 0}}}}
+  ]
+}

@@ -1,0 +1,161 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle",
+  "major": 1,
+  "minor": 0,
+  "scenario": "faults/native-depth",
+  "corpus": "faults",
+  "kind": "runtime",
+  "criteria": [
+    "A214"
+  ],
+  "title": "A native-block fault at any depth names its POU in a probe build",
+  "notes": "A214's probe-off half (pou null, precision symbol, the helper's dladdr symbol) is the same steps with setup.build.probes false and sel 8 only.",
+  "setup": {
+    "session": "none",
+    "build": {
+      "probes": true
+    },
+    "plant": {
+      "samplePeriodMs": 10,
+      "inputs": {
+        "%IW0": 0
+      }
+    }
+  },
+  "steps": [
+    {
+      "observe": "plant",
+      "expect": {
+        "witness": {
+          "Main": {
+            "~ge": 0
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 8
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "Faults",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "SIGSEGV two calls below the C block: the calling statement's POU"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 9
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "Faults",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "fault in a function the Python block calls"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 10
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "AfterC",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "names the second POU, not the C block's caller"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    }
+  ]
+}

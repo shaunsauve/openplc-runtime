@@ -1,0 +1,27 @@
+{
+  "file": "program.st",
+  "origins": [
+    {
+      "span": [
+        23,
+        3,
+        23,
+        41
+      ],
+      "pou": "LD_Main",
+      "kind": "rung",
+      "id": "r0"
+    },
+    {
+      "span": [
+        24,
+        3,
+        24,
+        16
+      ],
+      "pou": "LD_Main",
+      "kind": "rung",
+      "id": "r1"
+    }
+  ]
+}

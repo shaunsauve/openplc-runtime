@@ -1,0 +1,30 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "generated-region/step-into-generated",
+  "corpus": "generated-region",
+  "kind": "runtime",
+  "criteria": ["A040"],
+  "title": "Step into skips generated code by default and enters it when the session opts out of skipping",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 1}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@USER_1", "@USER_CALL"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@USER_1"}}},
+    {"request": "stepIn", "note": "default: the generated region is stepped over", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@USER_CALL"}}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@USER_2", "col": 3}}},
+    {"request": "initialize", "args": {"stepIntoGenerated": true}, "note": "session option off: do not skip", "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@USER_1"}}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@GEN_REGION_1", "col": 3}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@USER_CALL"}}},
+    {"request": "stepIn", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@GEN_FB_1", "col": 3},
+      "stack": [{"pou": "GenScale", "kind": "fb", "instance": "PROG0.gs"}, {"pou": "GenUser", "kind": "program", "instance": "PROG0"}]}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}

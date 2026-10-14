@@ -1,0 +1,31 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "multi-task/all-stop",
+  "corpus": "multi-task",
+  "kind": "runtime",
+  "criteria": ["A130", "A131"],
+  "title": "Tasks are listed as threads; in all-stop a fast-task breakpoint freezes both tasks and both virtual clocks",
+  "setup": {"session": "controller", "haltMode": "allStop", "plant": {"samplePeriodMs": 5}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 20}},
+    {"request": "threads", "expect": {"success": true, "body": {"threads": [
+      {"name": "Fast", "intervalMs": 10, "priority": 1, "state": "RUNNING", "stats": {"cycles": {"~any": true}, "overruns": {"~any": true}}},
+      {"name": "Slow", "intervalMs": 100, "priority": 2, "state": "RUNNING", "stats": {"cycles": {"~any": true}}}]}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@FAST_BUMP"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "task": "Fast",
+      "stack": [{"pou": "FastProg", "kind": "program", "instance": "PROG_FAST", "location": {"file": "program.st", "line": "@FAST_BUMP"}}]}},
+    {"wait": {"wallMs": 100}},
+    {"observe": "plant", "note": "both counts frozen within one slow interval", "expect": {
+      "witness": {"Fast": {"~capture": "f"}, "Slow": {"~capture": "s"}}, "vtMs": {"Fast": {"~capture": "vf"}, "Slow": {"~capture": "vs"}}}},
+    {"wait": {"wallMs": 10000}},
+    {"observe": "plant", "throughout": true, "expect": {
+      "witness": {"Fast": {"~ref": "f"}, "Slow": {"~ref": "s"}}, "vtMs": {"Fast": {"~ref": "vf"}, "Slow": {"~ref": "vs"}}}},
+    {"request": "stackTrace", "args": {"task": "Slow"}, "note": "the slow task reports its own stop and stack", "expect": {"success": true, "body": {"frames": {"~any": true}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "expect": {"scanDelta": {"Fast": {"~ge": 20}, "Slow": {"~ge": 2}}}}
+  ]
+}

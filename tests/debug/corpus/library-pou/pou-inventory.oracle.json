@@ -1,0 +1,19 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "library-pou/pou-inventory",
+  "corpus": "library-pou",
+  "kind": "build",
+  "criteria": ["A020"],
+  "title": "Every linked POU appears in the debug info, with statements or marked no source; none is absent",
+  "setup": {"build": {"probes": true, "path": "library"}},
+  "steps": [
+    {"inspect": "debugInfo", "note": "pous[] keyed by name; the harness also checks this set equals the compiler's linked-POU list",
+     "expect": {"pous": {
+       "LibUser": {"kind": "program", "noSource": false},
+       "Debounce": {"kind": "fb", "noSource": true, "noSourceReason": "library"},
+       "Twice": {"kind": "function", "noSource": true, "noSourceReason": "library"},
+       "R_TRIG": {"kind": "fb"}, "CTU": {"kind": "fb"}},
+      "linkedPousMissing": {"~len": 0}}}
+  ]
+}

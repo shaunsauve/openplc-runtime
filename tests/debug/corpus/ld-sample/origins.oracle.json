@@ -1,0 +1,22 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "ld-sample/origins",
+  "corpus": "ld-sample",
+  "kind": "runtime",
+  "criteria": ["A024"],
+  "title": "Each transpiled statement's debug info carries its rung reference unchanged; an ST breakpoint stops at the right ST line regardless",
+  "setup": {"session": "controller", "build": {"path": "editor"}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true}}},
+  "steps": [
+    {"inspect": "debugInfo", "note": "probes.origin -> origins[]; equal to program.st.origin.json",
+     "expect": {"origins": [{"pou": "LD_Main", "kind": "rung", "id": "r0"}, {"pou": "LD_Main", "kind": "rung", "id": "r1"}],
+                "originOf": [{"file": "program.st", "line": "@RUNG0", "origin": "r0"}, {"file": "program.st", "line": "@RUNG1", "origin": "r1"}]}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@RUNG1"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@RUNG1", "col": 3}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": true, "%QX0.1": true}}}
+  ]
+}

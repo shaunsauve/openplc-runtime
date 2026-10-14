@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "multi-task/shared-pou-and-global",
+  "corpus": "multi-task",
+  "kind": "runtime",
+  "criteria": ["A134"],
+  "title": "ADR-004 D6.6 under non-stop: shared globals stay live and flagged shared; a breakpoint in a POU both tasks reach halts only the reaching task; a write to a shared global applies at the next quiescent window",
+  "notes": "Rule 4 (configuration-scope located globals freeze in the image during the halt) is the G_IN step at the end.",
+  "setup": {"session": "controller", "haltMode": "nonStop", "plant": {"samplePeriodMs": 5, "inputs": {"%IX0.0": true}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@BUMP"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "note": "rule 2: whichever task reaches Bump first", "expect": {"reason": "breakpoint", "task": "Fast",
+      "stack": [{"pou": "Bump", "kind": "function", "instance": null}, {"pou": "FastProg", "kind": "program", "instance": "PROG_FAST"}]}},
+    {"event": "stopped", "withinMs": 1000, "note": "the slow task reaches it independently", "expect": {"reason": "breakpoint", "task": "Slow",
+      "stack": [{"pou": "Bump", "kind": "function", "instance": null}, {"pou": "SlowProg", "kind": "program", "instance": "PROG_SLOW"}]}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@FAST_BUMP"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "task": "Fast"}},
+    {"request": "variables", "args": {"path": "G_SHARED", "task": "Fast"}, "note": "rule 1", "expect": {"success": true, "body": {"shared": true}}},
+    {"request": "setVariable", "args": {"path": "G_SHARED", "value": 1000000}, "note": "rule 3", "expect": {"success": true}},
+    {"wait": {"wallMs": 300}},
+    {"observe": "plant", "expect": {"outputs": {"%QD3": 1000000}}},
+    {"plant": {"set": {"%IX0.0": false}}},
+    {"wait": {"wallMs": 300}},
+    {"observe": "plant", "note": "rule 4: G_IN frozen during the mid-scan halt, so the slow task still sees TRUE via G_CNT unchanged", "expect": {"witness": {"Slow": {"~ge": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"wallMs": 300}},
+    {"observe": "plant", "expect": {"scanDelta": {"Fast": {"~ge": 10}}}}
+  ]
+}

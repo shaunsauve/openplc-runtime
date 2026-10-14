@@ -1,0 +1,38 @@
+{
+  "file": "program.st",
+  "origins": [
+    {
+      "span": [
+        20,
+        3,
+        20,
+        24
+      ],
+      "pou": "FBD_Main",
+      "kind": "block",
+      "id": "b1"
+    },
+    {
+      "span": [
+        21,
+        3,
+        21,
+        39
+      ],
+      "pou": "FBD_Main",
+      "kind": "block",
+      "id": "b2"
+    },
+    {
+      "span": [
+        22,
+        3,
+        22,
+        24
+      ],
+      "pou": "FBD_Main",
+      "kind": "block",
+      "id": "b3"
+    }
+  ]
+}

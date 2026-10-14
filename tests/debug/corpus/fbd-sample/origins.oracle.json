@@ -1,0 +1,22 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "fbd-sample/origins",
+  "corpus": "fbd-sample",
+  "kind": "runtime",
+  "criteria": ["A024"],
+  "title": "Each transpiled FBD statement carries its block reference unchanged; an ST breakpoint stops at the right ST line",
+  "setup": {"session": "controller", "build": {"path": "editor"}, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 600, "%IW1": 700}}},
+  "steps": [
+    {"inspect": "debugInfo", "expect": {"originOf": [{"file": "program.st", "line": "@BLK_ADD", "origin": "b1"},
+      {"file": "program.st", "line": "@BLK_LIMIT", "origin": "b2"}, {"file": "program.st", "line": "@BLK_MOVE", "origin": "b3"}]}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@BLK_MOVE"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@BLK_MOVE", "col": 3},
+      "variables": {"PROG0._tmp_add": 1300, "PROG0._tmp_lim": 1000}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 1000}}}
+  ]
+}

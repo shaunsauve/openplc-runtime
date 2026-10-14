@@ -1,0 +1,18 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "print-builtin/with-and-without-session",
+  "corpus": "print-builtin",
+  "kind": "runtime",
+  "criteria": ["A100", "A065"],
+  "title": "The builtin's messages reach the runtime log with no session and, when attached, a passive observer's event stream",
+  "setup": {"session": "none", "build": {"path": "cli"}, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 1}}},
+  "steps": [
+    {"wait": {"scans": 5}},
+    {"observe": "log", "note": "no session: runtime log only", "expect": {"fields": {"printLines": {"~ge": 5}}}},
+    {"request": "initialize", "args": {"role": "observer"}, "note": "passive client: sends nothing more", "expect": {"success": true}},
+    {"event": "output", "withinMs": 1000, "expect": {"body": {"category": "print", "task": "Main", "text": {"~any": true}, "scan": {"~ge": 6}}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 1}}}},
+    {"inspect": "debugMap", "note": "the builtin uses no located memory", "expect": {"leavesForBuiltin": {"~len": 0}}}
+  ]
+}

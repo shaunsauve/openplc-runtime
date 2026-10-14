@@ -6,7 +6,8 @@
 #        OUT      output directory (default: build/debug-corpus in this repo)
 # Exit:  0 when every program compiles (or fails as its header's `build: expect-fail` says)
 #        and validate.py passes; 1 otherwise. Per program: OK, FAIL, XFAIL, or XPASS
-#        (an expect-fail program that now compiles: remove its marker).
+#        (an expect-fail program that now compiles: remove its marker). A reject-*.st file
+#        must fail to compile (a construct the compiler refuses); variant-*.st must compile.
 #
 # See also:
 #   tests/debug/corpus/README.md - program header keys read here (sources, build).
@@ -54,6 +55,13 @@ for dir in "$HERE"/*/; do
     [ -f "$v" ] || continue
     vn=$(basename "$v" .st)
     node "$CLI" "$v" -o "$out/$vn.cpp" ${libargs[@]+"${libargs[@]}"} >"$out/$vn.log" 2>&1 || status=1
+  done
+  for r in "$dir"/reject-*.st; do
+    [ -f "$r" ] || continue
+    rn=$(basename "$r" .st)
+    if node "$CLI" "$r" -o "$out/$rn.cpp" >"$out/$rn.log" 2>&1; then
+      echo "      $rn compiled but must be refused"; status=1
+    fi
   done
   case "$expect" in
     expect-fail*)

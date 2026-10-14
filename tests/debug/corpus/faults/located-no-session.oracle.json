@@ -1,0 +1,340 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle",
+  "major": 1,
+  "minor": 0,
+  "scenario": "faults/located-no-session",
+  "corpus": "faults",
+  "kind": "runtime",
+  "criteria": [
+    "A060"
+  ],
+  "title": "With no debugger attached, each fault is reported with its location: a line for checked faults, the POU for the rest",
+  "notes": "The located (\"line\") form is ADR-008 D5.1; the POU form is D5.2 cases 0-1. Probe-enabled default build.",
+  "setup": {
+    "session": "none",
+    "plant": {
+      "samplePeriodMs": 10,
+      "inputs": {
+        "%IW0": 0
+      }
+    }
+  },
+  "steps": [
+    {
+      "observe": "plant",
+      "expect": {
+        "witness": {
+          "Main": {
+            "~ge": 0
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 1
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "kind": "divByZero",
+            "task": "Main",
+            "file": "program.st",
+            "line": "@DIV",
+            "precision": "line",
+            "pou": "Divide"
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 2
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "kind": "arrayBounds",
+            "task": "Main",
+            "file": "program.st",
+            "line": "@OOB",
+            "precision": "line",
+            "pou": "Faults"
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 3
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "kind": "nullRef",
+            "task": "Main",
+            "file": "program.st",
+            "line": "@NULL",
+            "precision": "line",
+            "pou": "Faults"
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 4
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "kind": "watchdogOverrun",
+            "task": "Main",
+            "file": "program.st",
+            "line": "@OVERRUN",
+            "precision": "line",
+            "pou": "Faults"
+          }
+        }
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 5
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "Faults",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "dangling POINTER TO in ST: POU precision only"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 6
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "Faults",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "C block fault: the POU of the calling ST statement, through native_probe"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 7
+        }
+      }
+    },
+    {
+      "wait": {
+        "wallMs": 3000
+      }
+    },
+    {
+      "observe": "status",
+      "expect": {
+        "fields": {
+          "lastFault": {
+            "pou": "Faults",
+            "line": null,
+            "precision": "pou"
+          }
+        }
+      },
+      "note": "Python block fault: the POU of the calling ST statement"
+    },
+    {
+      "plant": {
+        "set": {
+          "%IW0": 0
+        }
+      }
+    },
+    {
+      "inject": "restartRuntime",
+      "note": "fresh start for the next fault; lastFault is kept until the next start"
+    },
+    {
+      "wait": {
+        "scans": 3
+      }
+    },
+    {
+      "observe": "plant",
+      "expect": {
+        "scanDelta": {
+          "Main": {
+            "~ge": 3
+          }
+        }
+      }
+    }
+  ]
+}

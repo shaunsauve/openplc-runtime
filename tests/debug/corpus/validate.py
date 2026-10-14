@@ -293,9 +293,8 @@ def load_program(directory: Path) -> Program:
 
 def check_witness(prog: Program, main: Path) -> None:
     """Enforce the corpus contract: each task's first program increments a located DINT witness first."""
-    variant = re.compile(r"^variant-.*\.st$")
     for fname, lines in prog.sources.items():
-        if variant.match(fname):
+        if SECONDARY.match(fname):
             continue
         code = strip_comments("\n".join(lines))
         tasks = re.findall(r"^\s*TASK\s+(\w+)\s*\(", code, re.M | re.I)
@@ -314,7 +313,7 @@ def check_witness(prog: Program, main: Path) -> None:
             if inst != bound[0][0]:
                 prog.problems.append(f"{main}: witness of {task} must be on its first program {bound[0][0]}, not {inst}")
                 continue
-            pou_code = "\n".join("\n".join(v) for v in prog.sources.values())
+            pou_code = "\n".join("\n".join(v) for f, v in prog.sources.items() if not SECONDARY.match(f))
             stmt = first_statement(strip_comments(pou_code), bound[0][1])
             want = f"{var} := {var} + 1"
             if stmt is None or stmt.replace(" ", "").lower() != want.replace(" ", "").lower():
@@ -337,16 +336,22 @@ def walk(node: Json, path: str = "$") -> Iterator[Tuple[str, Json]]:
             yield from walk(v, f"{path}[{i}]")
 
 
-def marker_lines(prog: Program, marker: str, programs: Dict[str, Program]) -> Tuple[List[str], List[str]]:
-    """Resolve `marker` in each member program: (one problem per miss or duplicate, matched line texts)."""
+SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
+
+
+def marker_lines(prog: Program, marker: str, programs: Dict[str, Program],
+                 fname: Optional[str] = None) -> Tuple[List[str], List[str]]:
+    """Resolve `marker` in `fname`, or in each member's primary sources: (problems, matched line texts)."""
     targets = [programs[m] for m in prog.members if m in programs] if prog.members else [prog]
     out: List[str] = []
     texts: List[str] = []
     tag = f"(*{marker}*)"
     for target in targets:
-        hits = [line for lines in target.sources.values() for line in lines if tag in line]
+        files = [fname] if fname else [f for f in target.sources if not SECONDARY.match(f)]
+        hits = [line for f in files for line in target.sources.get(f, []) if tag in line]
         if len(hits) != 1:
-            out.append(f"marker {marker} found {len(hits)} times in {target.name}, expected once")
+            where = fname or "its primary sources"
+            out.append(f"marker {marker} found {len(hits)} times in {target.name} ({where}), expected once")
         texts.extend(hits[:1])
     return out, texts
 
@@ -395,7 +400,8 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                     val = node.get(key)
                     if not (isinstance(val, str) and val.startswith("@")):
                         continue
-                    missing, texts = marker_lines(prog, val, programs)
+                    fname = node.get("file")
+                    missing, texts = marker_lines(prog, val, programs, fname if isinstance(fname, str) else None)
                     out.extend(f"{where}.{key}: {p}" for p in missing)
                     col = node.get("col")
                     if key == "line" and isinstance(col, int):
