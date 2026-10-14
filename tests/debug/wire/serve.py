@@ -1,5 +1,6 @@
 """Serves /api/debug-session with the fake core on HOST:PORT until killed, and writes an admin
-JWT to TOKEN_FILE: the server half of the other-network-namespace run (A068, netns.sh).
+JWT to TOKEN_FILE (and an expired one to TOKEN_FILE.expired): the server half of the
+other-network-namespace run (A068, netns.sh) and of the real-core end-to-end runs.
 
   python3 tests/debug/wire/serve.py HOST PORT TOKEN_FILE [CORE_SOCKET DEBUG_INFO]
 
@@ -19,6 +20,7 @@ import secrets
 import sys
 import tempfile
 import threading
+from datetime import timedelta
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -31,6 +33,8 @@ os.environ.setdefault("OPENPLC_PERSISTENT_DATA_DIR", os.path.join(_TMP, "data"))
 os.environ.setdefault("SQLALCHEMY_DATABASE_URI", f"sqlite:///{os.path.join(_TMP, 'test.db')}")
 os.environ.setdefault("JWT_SECRET_KEY", secrets.token_hex(32))
 os.environ.setdefault("PEPPER", secrets.token_hex(32))
+
+from flask_jwt_extended import create_access_token  # noqa: E402
 
 from webserver import restapi  # noqa: E402
 from wire_server import WireServer  # noqa: E402
@@ -48,6 +52,11 @@ def main() -> None:
     http.post("/api/create-user", json={"username": "admin", "password": "admin-pass"})
     login = http.post("/api/login", json={"username": "admin", "password": "admin-pass"})
     token = str(login.get_json()["access_token"])
+    with app.app_context():
+        # An already-expired JWT for the same user, signed with this server's key (A119).
+        admin = restapi.User.query.filter_by(username="admin").one()
+        expired = create_access_token(identity=admin, expires_delta=timedelta(seconds=-1))
+    Path(f"{token_file}.expired").write_text(expired)
     server = WireServer(
         app,
         Path(_TMP),

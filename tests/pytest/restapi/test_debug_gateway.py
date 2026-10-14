@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Autonomy®
 
 """The debug session gateway (/api/debug-session) over a real WSS port, with the fake core on the
-internal link behind it. Criteria A064-A068, A070, A080 (docs/ACCEPTANCE.md of the orchestration
-root); what the fake core cannot stand in for is named in each test.
+internal link behind it. Criteria A064-A068, A070, A080 and A117-A120 (docs/ACCEPTANCE.md of the
+orchestration root); what the fake core cannot stand in for is named in each test.
 
 JOURNEY: wire-control (tests/debug/wire/wire-control.oracle.json) is the end-to-end beat; the
 tests below cover what one oracle run cannot: concurrency, the refusal catalogue against the
@@ -46,7 +46,9 @@ from fake_core import FULL_CAPS, FakeCore, Json, JsonObj, debug_info  # noqa: E4
 from wire_server import WireServer, as_obj  # noqa: E402
 from wss_client import WssSio  # noqa: E402
 
+from webserver import restapi  # noqa: E402
 from webserver.debug_gateway import protocol  # noqa: E402
+from webserver.debug_gateway.session_guard import ConfigError, HeartbeatParams, parse_params  # noqa: E402
 from webserver.version import RUNTIME_VERSION  # noqa: E402
 
 NS = "/api/debug-session"
@@ -66,11 +68,19 @@ class Client:
         self.responses: Dict[int, "queue.Queue[JsonObj]"] = {}
         self.arrival: List[int] = []
         self.events: "queue.Queue[JsonObj]" = queue.Queue()
+        # Every message both ways, for the spec check (A084).
+        self.frames: List[JsonObj] = []
+        self.sent: List[Tuple[str, JsonObj]] = []
+        self.command_of: Dict[int, str] = {}
 
     def _on_msg(self, data: Json) -> None:
         msg = as_obj(json.loads(data) if isinstance(data, str) else data)
+        with self.lock:
+            self.frames.append(msg)
         if msg.get("type") == "response":
             rseq = msg.get("request_seq")
+            if rseq is None:
+                rseq = -1  # a message whose seq could not be read
             if isinstance(rseq, int):
                 with self.lock:
                     self.arrival.append(rseq)
@@ -84,6 +94,8 @@ class Client:
             self.seq += 1
             use = self.seq if seq is None else seq
             self.responses.setdefault(use, queue.Queue())
+            self.command_of[use] = command
+            self.sent.append((command, dict(args or {})))
         self.sio.emit(
             "msg", {"type": "request", "seq": use, "command": command, "arguments": args or {}}, NS
         )
@@ -94,6 +106,13 @@ class Client:
 
     def request(self, command: str, args: Optional[JsonObj] = None) -> JsonObj:
         return self.wait(self.send(command, args))
+
+    def raw(self, data: Json) -> JsonObj:
+        """Send any payload on `msg`; the reply to an unreadable one has request_seq null."""
+        with self.lock:
+            q = self.responses.setdefault(-1, queue.Queue())
+        self.sio.emit("msg", data, NS)
+        return q.get(timeout=5.0)
 
     def initialize(self, **args: Json) -> JsonObj:
         full: JsonObj = {"protocol": "1.0", "role": "controller"}
@@ -119,6 +138,10 @@ class Client:
 
     def close(self) -> None:
         self.sio.disconnect()
+
+    def kill(self) -> None:
+        """Drop the transport with no Socket.IO disconnect, as a SIGKILLed client does."""
+        self.sio.eio.disconnect(abort=True)
 
 
 @pytest.fixture()
@@ -371,6 +394,305 @@ def test_a_revoked_token_ends_the_session(serve, client, admin_token):
     assert code == "SESSION_ENDED"
     assert c.event("sessionEnded")["reason"] == "revoked"
     assert not [cmd for cmd, _ in server.core.received if cmd == "pause"]
+
+
+# --------------------------------------------------------------------------- A117-A120 session
+
+
+def _expired_token(app, username: str) -> str:
+    from datetime import timedelta  # noqa: PLC0415
+
+    from flask_jwt_extended import create_access_token  # noqa: PLC0415
+
+    with app.app_context():
+        user = restapi.User.query.filter_by(username=username).one()
+        return create_access_token(identity=user, expires_delta=timedelta(seconds=-1))
+
+
+def test_only_a_logged_in_user_over_tls_attaches(serve, app, tokens):
+    """A119: no token, an expired JWT and a forged one are refused UNAUTHORISED and open no core
+    session; a plain `user` account controls (MVP rights, R7). A120: the gateway refuses a
+    plaintext connection outright, and a plaintext client cannot speak to the TLS port."""
+    server = serve()
+    head, _, _ = tokens["user"].rpartition(".")
+    for bad in (None, _expired_token(app, "tech"), f"{head}.Zm9yZ2Vk"):
+        resp = Client(server.url).initialize(**({"token": bad} if bad else {}))
+        assert _refusal(resp)[0] == "UNAUTHORISED", (bad, resp)
+    assert not [cmd for cmd, _ in server.core.received if cmd == "attach"]
+    tech = Client(server.url, tokens["user"])
+    assert tech.initialize()["success"] is True
+    for command, args, then in (
+        ("setBreakpoints", {"file": "program.st", "lines": [6]}, "stopped"),
+        ("setBreakpoints", {"file": "program.st", "lines": []}, None),
+        ("continue", {}, "continued"),
+        ("pause", {}, "stopped"),
+        ("continue", {}, "continued"),
+        ("status", {}, None),
+    ):
+        assert tech.request(command, args)["success"] is True, command
+        if then is not None:
+            tech.event(then)
+    assert [a["user"] for cmd, a in server.core.received if cmd == "attach"] == ["tech"]
+
+    plain = serve(tls=False)
+    with pytest.raises(ConnectionError):
+        Client(plain.url, tokens["admin"])
+    with pytest.raises(Exception):  # noqa: B017 - a TLS port answers ws:// with a TLS alert
+        Client(server.url.replace("https://", "http://"), tokens["admin"])
+    assert plain.core is not None and plain.core.received == []
+
+
+def test_attach_and_detach_leave_the_program_alone(serve, admin_token):
+    """A117: 20 attach/detach cycles while running neither stop nor restart the program. A118:
+    detach while halted with another breakpoint armed resumes the program and clears every
+    breakpoint, so no stop follows."""
+    server = serve()
+    core = server.core
+    assert core is not None
+    before = core.witness()
+    for _ in range(20):
+        c = Client(server.url, admin_token)
+        assert c.initialize(role="observer")["success"] is True
+        assert c.request("detach")["success"] is True
+        c.close()
+    assert core.state == "RUNNING" and core.witness() > before
+    assert not [cmd for cmd, _ in core.received if cmd in ("stop", "restart", "pause", "terminate")]
+
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    assert c.request("setBreakpoints", {"file": "program.st", "lines": [4, 7]})["success"] is True
+    c.event("stopped", {"reason": "breakpoint"})
+    assert as_obj(c.request("detach")["body"])["forces"] == []
+    time.sleep(0.05)
+    halted_at = core.witness()
+    time.sleep(0.1)
+    assert core.state == "RUNNING" and core.breakpoints == {} and core.witness() > halted_at
+
+
+# --------------------------------------------------------------------------- A121, A057, A058,
+# A122 (gateway half): P1/P2, loss past P2, resume within it.
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("", HeartbeatParams(2, 15)),
+        ("# defaults\nlock = off\n", HeartbeatParams(2, 15)),
+        ("P1 = 0.5\nP2 = 5\n", HeartbeatParams(0.5, 5)),
+        ("P1=10\nP2=30", HeartbeatParams(10, 30)),
+        ("P1 = 2\nP2 = 5\n", "below 3 x P1"),
+        ("P1 = 0.4", "outside"),
+        ("P2 = 601", "outside"),
+        ("P2 = soon", "not a number"),
+        ("P2", "key = value"),
+    ],
+)
+def test_debug_conf_sets_p1_p2_and_refuses_bad_values(text, expected):
+    """ADR-005 D4.2: P1 0.5-30 s, P2 5-600 s, P2 >= 3 x P1, else refused at load. NO-FOLD:
+    parser."""
+    if isinstance(expected, HeartbeatParams):
+        assert parse_params(text) == expected
+    else:
+        with pytest.raises(ConfigError, match=expected):
+            parse_params(text)
+
+
+P = HeartbeatParams(0.2, 1.0)
+
+
+def _wait_for(pred: Callable[[], bool], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def _detaches(core: FakeCore) -> List[JsonObj]:
+    return [a for cmd, a in core.received if cmd == "detach"]
+
+
+def test_losing_the_controller_past_p2_safe_stops_a_halt_and_detaches_a_run(serve, admin_token):
+    """ADR-005 D4.5-D4.6, gateway half of A057/A058/A177: a dropped transport ends nothing
+    within P2; past P2 the gateway detaches the session with reason heartbeat_timeout, which the
+    core turns into a safe-stop when a task is halted and a plain detach when running; a client
+    that comes back with the old resume token is told the session ended and why. A heartbeating
+    idle controller outlives P2 several times over (A121)."""
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    body = as_obj(c.initialize()["body"])
+    assert body["params"] == {"P1": 0.2, "P2": 1}
+    token = str(body["resumeToken"])
+    for _ in range(int(3 * P.p2_s / P.p1_s)):
+        assert c.request("heartbeat")["success"] is True
+        time.sleep(P.p1_s)
+    assert _detaches(core) == [] and "sessionEnded" not in c.drain()
+
+    assert c.request("setBreakpoints", {"file": "program.st", "lines": [6]})["success"] is True
+    c.event("stopped")
+    c.kill()
+    killed = time.monotonic()
+    time.sleep(P.p2_s * 0.7)
+    assert core.state == "HALTED" and _detaches(core) == [], "the session ended within P2"
+    assert _wait_for(lambda: core.state == "SAFE_STOPPED", P.p2_s)
+    lost_after = time.monotonic() - killed
+    assert P.p2_s <= lost_after <= P.p2_s + 0.5, lost_after
+    assert _detaches(core)[-1]["reason"] == "heartbeat_timeout"
+    late = Client(server.url).initialize(resumeToken=token)
+    assert _refusal(late)[0] == "SESSION_ENDED"
+    assert as_obj(as_obj(late["error"])["details"])["reason"] == "heartbeat_timeout"
+
+    running = serve(params=P)
+    assert running.core is not None
+    r = Client(running.url, admin_token)
+    assert r.initialize()["success"] is True
+    r.kill()
+    assert _wait_for(lambda: len(_detaches(running.core)) == 1, P.p2_s + 0.5)  # type: ignore[arg-type]
+    assert _detaches(running.core)[0]["reason"] == "heartbeat_timeout"
+    before = running.core.witness()
+    time.sleep(0.05)
+    assert running.core.state == "RUNNING" and running.core.witness() > before
+
+
+def test_a_resume_token_within_p2_keeps_the_session(serve, admin_token):
+    """ADR-005 D2.4/D4.5: the resume token alone, within P2, rebinds the same core session (no
+    second attach, still halted), rotates, and the spent token is dead. A clean Socket.IO
+    disconnect is a leave, not a loss: it detaches at once."""
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    token = str(as_obj(c.initialize()["body"])["resumeToken"])
+    assert c.request("pause")["success"] is True
+    c.event("stopped")
+    c.kill()
+    time.sleep(P.p2_s / 2)
+    back = Client(server.url)
+    body = as_obj(back.initialize(resumeToken=token)["body"])
+    assert body["resumed"] is True and body["role"] == "controller"
+    assert body["resumeToken"] != token
+    assert [cmd for cmd, _ in core.received].count("attach") == 1 and core.state == "HALTED"
+    for _ in range(int(P.p2_s / P.p1_s) + 2):  # past the old transport's P2, beating
+        assert back.request("heartbeat")["success"] is True
+        time.sleep(P.p1_s)
+    assert back.request("continue")["success"] is True
+    assert _refusal(Client(server.url).initialize(resumeToken=token))[0] == "UNAUTHORISED"
+    back.close()
+    assert _wait_for(lambda: len(_detaches(core)) == 1, 0.3)
+    assert _detaches(core)[0].get("reason") == "disconnect"
+
+
+# --------------------------------------------------------------------------- A087, A084: wire
+
+
+GARBAGE: List[Json] = [
+    '{"type":"request","seq":7,"command":"pau',  # truncated
+    "{not json}",
+    "",
+    "null",
+    "[1, 2]",
+    "NaN",
+    "[" * 100000,  # nested past the JSON parser's recursion limit
+    {"type": "request", "seq": True, "command": "status"},
+    {"type": "request", "seq": 3.5, "command": "status"},
+    {"type": "request", "command": "status"},
+    [{"type": "request", "seq": 1, "command": "status"}],
+]
+
+
+def test_malformed_messages_are_refused_and_change_nothing(serve, admin_token):
+    """A087, gateway half: each malformed message gets a BAD_REQUEST reply with request_seq null,
+    a binary one too; 1,000 garbage messages in a burst neither stall the program nor break the
+    session, and a valid request then works. The scan-gap half needs the real core
+    (tests/debug/plant/sec_e2e.sh)."""
+    server = serve()
+    core = server.core
+    assert core is not None
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    for frame in GARBAGE:
+        resp = c.raw(frame)
+        assert resp["request_seq"] is None and _refusal(resp)[0] == "BAD_REQUEST", (str(frame)[:40], resp)
+    resp = server.gateway.handle("no-such-sid", b"\xff\x00binary")  # type: ignore[arg-type]
+    assert _refusal(resp)[0] == "BAD_REQUEST", resp
+    before = core.witness()
+    for i in range(1000):
+        c.sio.emit("msg", f"garbage {i}", NS)
+    replies = [c.wait(-1) for _ in range(1000)]
+    assert {_refusal(r)[0] for r in replies} == {"BAD_REQUEST"}
+    assert core.witness() > before and core.state == "RUNNING"
+    assert c.request("status")["success"] is True
+    assert [cmd for cmd, _ in core.received if cmd not in ("attach", "status")] == []
+
+
+def test_every_message_on_the_wire_is_in_the_spec_and_back(serve, admin_token):
+    """A084 against the fake core: every message of a full session (every served request
+    succeeding, every event, failures, an unreadable message, a P2 timeout, a resume) matches
+    DEBUG_PROTOCOL.md's sessionspec block, and every request and event the block specifies was
+    observed. The real core's half is the frame check in tests/debug/plant/sec_e2e.py.
+    NO-FOLD: contract."""
+    spec = link_spec.load(SPEC, block="sessionspec")
+    server = serve(params=P)
+    core = server.core
+    assert core is not None
+    watcher, c = Client(server.url, admin_token), Client(server.url, admin_token)
+    assert watcher.initialize(role="observer")["success"] is True
+    assert c.initialize()["success"] is True
+
+    def ok(command: str, args: Optional[JsonObj] = None, then: Optional[str] = None) -> None:
+        assert c.request(command, args)["success"] is True, command
+        if then is not None:
+            c.event(then)
+
+    ok("pause", {}, "stopped")
+    for command, args in (("next", {}), ("stepIn", {"task": "Main"}), ("stepOut", {}),
+                          ("cycleStep", {}), ("runScans", {"n": 1}),
+                          ("runToCursor", {"file": "program.st", "line": 7})):
+        ok(command, args, "stopped")
+    # Inspection of the halted task (debug-support's half of the wire, beside u4-sec's).
+    for command in ("stackTrace", "scopes", "variables"):
+        ok(command, VALID_ARGS.get(command, {}))
+    ok("setBreakpoints", {"file": "program.st", "lines": [6, 4]})
+    ok("continue", {}, "stopped")
+    ok("setBreakpoints", {"file": "program.st", "lines": []})
+    ok("continue", {}, "continued")
+    core.inject_print("hello")
+    c.event("output")
+    for command in ("status", "version", "heartbeat", "attach", "setLock", "breakpointLocations",
+                    "clearAllBreakpoints", "setExceptionBreakpoints", "setHaltMode", "stop",
+                    "restart"):
+        ok(command, VALID_ARGS.get(command, {}))
+    assert _refusal(c.request("next"))[0] in STATE_REFUSALS
+    assert c.raw("{not json}")["request_seq"] is None
+    assert watcher.event("sessionEnded", timeout=3 * P.p2_s)["reason"] == "heartbeat_timeout"
+    ok("detach")
+    other = Client(server.url, admin_token)
+    token = str(as_obj(other.initialize()["body"])["resumeToken"])
+    other.kill()
+    back = Client(server.url)
+    assert as_obj(back.initialize(resumeToken=token)["body"])["resumed"] is True
+    assert back.request("terminate")["success"] is True
+
+    problems: List[str] = []
+    seen: Dict[str, int] = {}
+    for client in (watcher, c, other, back):
+        for command, args in client.sent:
+            problems += spec.check_request(command, args)
+        for frame in client.frames:
+            if frame.get("type") == "response" and frame.get("request_seq") is None:
+                problems += spec._check(spec.types["Error"], frame.get("error"), "unreadable")
+                continue
+            problems += spec.check_frame(frame, client.command_of)  # type: ignore[arg-type]
+            if frame.get("type") == "event":
+                seen[str(frame.get("event"))] = 1
+            elif frame.get("success") is True:
+                seen[client.command_of[int(str(frame["request_seq"]))]] = 1
+    assert not problems, problems[:10]
+    unobserved = (set(spec.requests) | set(spec.events)) - set(seen)
+    assert not unobserved, f"specified but never on the wire: {sorted(unobserved)}"
 
 
 # --------------------------------------------------------------------------- A067 handshake

@@ -27,7 +27,6 @@ NAMESPACE = "/api/debug-session"
 EVENT_NAME = "msg"
 MAX_MESSAGE_BYTES = 1024 * 1024
 MAX_OBSERVERS = 16
-DEFAULT_PARAMS: JsonObj = {"P1": 2, "P2": 15}
 
 
 class ErrorCode(str, Enum):
@@ -146,6 +145,7 @@ COMMANDS: Mapping[str, Command] = {
                 "role": Arg("str", choices=("controller", "observer")),
                 "token": Arg("str"),
                 "identity": Arg("obj"),
+                "resumeToken": Arg("str"),
             },
             local=True,
         ),

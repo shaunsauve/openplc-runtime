@@ -3,10 +3,12 @@
 
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
 import time
+from typing import Optional
 
 # psutil is optional - not available on MSYS2/Cygwin platforms
 try:
@@ -359,12 +361,22 @@ class RuntimeManager:
             logger.error("Failed to ping PLC runtime (unexpected): %s", e)
             return "PING:ERROR\n"
 
-    def start_plc(self):
+    def start_plc(self, granting_user: Optional[str] = None):
         """
-        Send START command
+        Send START. While the safe-stop start gate is set the core answers
+        START:ERROR_SAFE_STOPPED (whatever the state); a caller that checked the
+        user's control right names them, and the start is resent as a grant
+        (ADR-005 D4.7: keyed on the reply, not on the status string).
         """
         try:
-            return self.runtime_socket.send_and_receive("START\n")
+            reply = self.runtime_socket.send_and_receive("START\n")
+            if granting_user is None or not str(reply).startswith("START:ERROR_SAFE_STOPPED"):
+                return reply
+            if not re.fullmatch(r"[\x21-\x7e]{1,64}", granting_user):
+                logger.error("Granted start refused: unusable user name %r", granting_user)
+                return reply
+            logger.warning("Start from the safe-stop gate granted to %s", granting_user)
+            return self.runtime_socket.send_and_receive(f"START_AUTHORISED:{granting_user}\n")
         except (OSError, socket.error) as e:
             logger.error("Failed to start PLC runtime: %s", e)
             return "START:ERROR\n"
