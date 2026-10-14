@@ -114,6 +114,11 @@ void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker)
     pthread_mutex_unlock(&tracker->mutex);
 }
 
+void scan_cycle_tracker_resumed(scan_cycle_tracker_t *tracker)
+{
+    (void)tracker;
+}
+
 bool scan_cycle_tracker_snapshot(scan_cycle_tracker_t *tracker, plc_timing_stats_t *out)
 {
     if (!tracker || !out) return false;

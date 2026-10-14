@@ -1946,6 +1946,20 @@ bool output_in_scope(const halt_policy_output_t *o, void *ctx)
 
 }  // namespace
 
+extern "C" int64_t plc_task_virtual_time_ns(size_t task_idx)
+{
+    int64_t vt = -1;
+    pthread_mutex_lock(&plc_tasks_lock);
+    if (plc_tasks && task_idx < plc_task_count) vt = plc_tasks[task_idx].time_at_dispatch;
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return vt;
+}
+
+extern "C" int64_t plc_virtual_time_ns(void)
+{
+    return plc_task_virtual_time_ns(0);
+}
+
 extern "C" bool plc_run_control_hold(size_t task_idx, int timeout_ms)
 {
     if (plc_get_state() != PLC_STATE_RUNNING) return false;

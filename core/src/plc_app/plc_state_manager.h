@@ -97,6 +97,12 @@ typedef struct PlcTaskCtx
     /* Per-task scan/cycle/latency tracker. The task thread updates it
      * around its scan body; STATS walks all trackers for per-task entries. */
     scan_cycle_tracker_t  tracker;
+
+    /* Virtual clock (ADR-004 D4), written by the dispatcher only. vt_ns is the time
+     * of the task's last running due tick; vt_next_ns the next one's. Neither moves
+     * while the task is held. */
+    plc_atomic_i64_t      vt_ns;
+    int64_t               vt_next_ns;
 } PlcTaskCtx;
 
 extern PlcTaskCtx *plc_tasks;
@@ -268,6 +274,20 @@ bool plc_run_control_hold(size_t task_idx, int timeout_ms);
  * @return true when every targeted task is running again
  */
 bool plc_run_control_resume(size_t task_idx, int timeout_ms);
+
+/**
+ * @brief Virtual time of one task, in ns since the program started (ADR-004 D4).
+ *
+ * The time its last released scan read through TIME() and the timer FBs, or the
+ * due tick it skipped as an overrun. Frozen while the task is held; a halt advances
+ * it by at most one interval. Equal to the wall schedule when nothing ever halts.
+ *
+ * @return the task's virtual time, or -1 when no program is running or the index names no task
+ */
+int64_t plc_task_virtual_time_ns(size_t task_idx);
+
+/** @brief Virtual time of the fastest task (the plugins' default clock), or -1 with no program. */
+int64_t plc_virtual_time_ns(void);
 
 /**
  * @brief Apply a safe_stop.hold file found at boot.

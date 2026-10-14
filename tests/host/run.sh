@@ -27,6 +27,7 @@ TESTS=(
   "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
   "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
   "tests/host/test_safe_stop.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c"
+  "tests/host/test_virtual_clock.cpp:core/src/plc_app/plc_state_manager.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c:core/src/plc_app/journal_buffer.c:core/src/plc_app/utils/utils.c:core/src/plc_app/scan_cycle_manager.c:core/src/plc_app/task_policy.c:core/src/plc_app/unix_socket.c:core/src/plc_app/plc_switch.c:core/src/plc_app/plc_output_hold.cpp:core/src/drivers/plugins/native/cjson/cJSON.c"
 )
 
 failures=0

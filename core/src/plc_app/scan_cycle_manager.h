@@ -45,6 +45,7 @@ typedef struct
     uint64_t           expected_start_us;
     uint64_t           last_start_us;
     int64_t            interval_ns;
+    bool               rearm;             /* next start follows a halt: skip its sample, re-anchor */
     pthread_mutex_t    mutex;
 } scan_cycle_tracker_t;
 
@@ -61,6 +62,11 @@ void scan_cycle_tracker_cleanup(scan_cycle_tracker_t *tracker);
  * for the snapshot reader, not for cross-task synchronisation). */
 void scan_cycle_tracker_start(scan_cycle_tracker_t *tracker);
 void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker);
+
+/* The task resumes from a halt (ADR-004 D3.2): the next start records no cycle-time
+ * or latency sample spanning the halt and re-anchors the expected start, so neither
+ * the halt nor a missed deadline it caused enters the statistics. Any thread. */
+void scan_cycle_tracker_resumed(scan_cycle_tracker_t *tracker);
 
 /* Atomically copy the tracker's stats. Returns true if the task has
  * completed at least one full cycle (snapshot is meaningful). */
