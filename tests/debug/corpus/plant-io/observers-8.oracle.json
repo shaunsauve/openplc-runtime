@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/observers-8",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A123"],
+  "title": "A controller and 8 observers: every observer gets run-state, stop and live-value events; observer control and modify requests and a second controller are refused with no effect on the plant",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "args": {"role": "controller"}, "expect": {"success": true}},
+    {"client": {"group": "obs", "count": 8}, "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}},
+    {"client": {"group": "obs"}, "request": "subscribe", "args": {"paths": ["PROG0.counter", "PROG0.out_int"], "rateHz": 10}, "expect": {"success": true}},
+    {"client": {"group": "obs"}, "event": "values", "withinMs": 2000},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"client": {"group": "obs"}, "event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"client": {"group": "obs"}, "event": "runState", "withinMs": 1000, "expect": {"body": {"state": "HALTED_AT_BP"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"client": {"group": "obs"}, "request": "continue", "expect": {"success": false, "error": "NOT_CONTROLLER"}},
+    {"client": {"group": "obs"}, "request": "force", "args": {"path": "PROG0.out_int", "value": 8888, "reason": "observer"}, "expect": {"success": false, "error": "NOT_CONTROLLER"}},
+    {"client": {"group": "obs"}, "request": "setVariable", "args": {"path": "PROG0.x", "value": 8888}, "expect": {"success": false, "error": "NOT_CONTROLLER"}},
+    {"client": "second", "request": "initialize", "args": {"role": "controller"}, "expect": {"success": false, "error": "NOT_CONTROLLER"}},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "throughout": true, "note": "no observer request took effect: still halted, outputs untouched", "expect": {"witness": {"Main": {"~ref": "w"}}, "outputs": {"%QW0": 5}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"client": {"group": "obs"}, "event": "continued", "withinMs": 500},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 3}}, "outputs": {"%QW0": 5}}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 0}}}}
+  ]
+}

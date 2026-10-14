@@ -1,0 +1,24 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/interval-change",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A147"],
+  "title": "A task-interval change from 100 ms to 50 ms applies through an online change by the 3rd scan, with the scan count continuing (no restart, no reset)",
+  "notes": "ADR-006 D5: an interval change is an inPlace item of an ordinary online change; variant-interval.st differs from program.st only in the task interval.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 5}},
+    {"request": "classifyChange", "args": {"build": "variant-interval.st"}, "expect": {"success": true, "body": {"class": "inPlace"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "applyChange", "args": {"build": "variant-interval.st"}, "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "note": "no reset: the witness continued past its pre-change value", "expect": {"witness": {"Main": {"~gt": 3}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "w", "~add": 50, "~tol": 47}}}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "plant", "note": "the new interval, measured from the witness at a 10 ms sample period", "expect": {"scanDelta": {"Main": {"~range": [18, 22]}}, "maxGapMs": {"Main": {"~le": 70}}}},
+    {"observe": "status", "expect": {"state": "RUNNING"}}
+  ]
+}

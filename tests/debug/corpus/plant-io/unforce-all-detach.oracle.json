@@ -1,0 +1,31 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/unforce-all-detach",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A113"],
+  "title": "Unforce-all returns three forced points to logic; detach lists the two forces still active, and a new session lists them too",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 1111, "reason": "A113"}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_dint", "value": 2222, "reason": "A113"}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_bool", "value": true, "reason": "A113"}, "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 1111, "%QD2": 2222, "%QX0.0": true}}},
+    {"request": "unforceAll", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "logic values on all three", "expect": {"outputs": {"%QW0": 5, "%QD2": 7, "%QX0.0": false}}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 0}}}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 3333, "reason": "A113 kept"}, "expect": {"success": true}},
+    {"request": "force", "args": {"path": "PROG0.out_bool", "value": true, "reason": "A113 kept"}, "expect": {"success": true}},
+    {"request": "detach", "expect": {"success": true, "body": {"forces": [
+      {"path": "PROG0.out_int", "value": 3333}, {"path": "PROG0.out_bool", "value": true}]}}},
+    {"client": "next", "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}},
+    {"client": "next", "request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 2}}}},
+    {"client": "next", "request": "listForces", "expect": {"success": true, "body": {"forces": {"~contains": {"path": "PROG0.out_int", "value": 3333}}}}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "forces persist across the detach (ADR-005 D1.3)", "expect": {"outputs": {"%QW0": 3333, "%QX0.0": true, "%QD2": 7}}}
+  ]
+}

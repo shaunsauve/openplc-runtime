@@ -458,7 +458,8 @@
       "additionalProperties": false,
       "properties": {
         "file": {
-          "type": "string"
+          "type": ["string", "null"],
+          "description": "null with line null and boundary true: the scan boundary has no source location (ADR-001 D2.5)"
         },
         "line": {
           "$ref": "#/$defs/lineRef"

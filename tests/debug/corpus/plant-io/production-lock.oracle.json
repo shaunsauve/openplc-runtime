@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/production-lock",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A126"],
+  "title": "A fresh runtime is unlocked; only an admin sets the lock; locked, control and modify are refused LOCKED with no plant effect, even for a session attached before the lock, and live watch still delivers",
+  "notes": "ADR-005 D6.1. ASSUMED: the status API reports the lock as `lock`. Test users ctl_only and plain hold the default user permissions; admin holds admin_debug.",
+  "setup": {"session": "none", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"observe": "status", "note": "fresh runtime: debugging allowed", "expect": {"fields": {"lock": false}}},
+    {"request": "initialize", "args": {"role": "controller", "token": {"~token": "user:ctl_only"}}, "expect": {"success": true}},
+    {"client": "np", "request": "initialize", "args": {"role": "observer", "token": {"~token": "user:plain"}}, "expect": {"success": true}},
+    {"client": "np", "request": "setLock", "args": {"on": true}, "expect": {"success": false, "error": "FORBIDDEN"}, "note": "not an admin"},
+    {"observe": "status", "expect": {"fields": {"lock": false}}},
+    {"client": "adm", "request": "initialize", "args": {"role": "observer", "token": {"~token": "user:admin"}}, "expect": {"success": true}},
+    {"client": "adm", "request": "setLock", "args": {"on": true}, "expect": {"success": true}},
+    {"observe": "status", "expect": {"fields": {"lock": true}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": false, "error": "LOCKED"}, "note": "attached before the lock"},
+    {"request": "pause", "args": {"task": "Main"}, "expect": {"success": false, "error": "LOCKED"}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 6006, "reason": "locked"}, "expect": {"success": false, "error": "LOCKED"}},
+    {"request": "setVariable", "args": {"path": "PROG0.x", "value": 6006}, "expect": {"success": false, "error": "LOCKED"}},
+    {"request": "subscribe", "args": {"paths": ["PROG0.counter"], "rateHz": 5}, "expect": {"success": true}},
+    {"event": "values", "withinMs": 2000, "note": "live watch still works"},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "note": "no halt, no forced output", "expect": {"scanDelta": {"Main": {"~ge": 3}}, "outputs": {"%QW0": 5}}},
+    {"client": "adm", "request": "setLock", "args": {"on": false}, "expect": {"success": true}, "note": "leave the runtime as found"},
+    {"observe": "status", "expect": {"fields": {"lock": false}}}
+  ]
+}

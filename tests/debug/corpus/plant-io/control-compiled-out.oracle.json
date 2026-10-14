@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/control-compiled-out",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A127"],
+  "title": "With debug control compiled out the handshake omits control and modify, every halt, step, write and force is refused UNSUPPORTED, live watch works, and the binary has no control handler",
+  "notes": "ADR-005 D6.2 (OPENPLC_DEBUG_CONTROL=OFF). The objectCode view is BLOCKED until the harness has a disassembly adapter (README § Inspect views); `controlHandlers` is the list that adapter is to report.",
+  "setup": {"session": "controller", "build": {"control": false}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"capabilities": {"control": {"~absent": true}, "modify": {"~absent": true}, "cycleStep": {"~absent": true}, "force": {"~absent": true}}}}},
+    {"request": "pause", "args": {"task": "Main"}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "next", "args": {"task": "Main"}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "setVariable", "args": {"path": "PROG0.x", "value": 1}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 1, "reason": "compiled out"}, "expect": {"success": false, "error": "UNSUPPORTED"}},
+    {"request": "subscribe", "args": {"paths": ["PROG0.counter", "PROG0.out_int"], "rateHz": 10}, "expect": {"success": true}},
+    {"event": "values", "withinMs": 2000},
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 3}}, "outputs": {"%QW0": 5}}},
+    {"inspect": "objectCode", "note": "plc_main's symbols: no halt, step, write or force handler", "expect": {"controlHandlers": {"~len": 0}}}
+  ]
+}

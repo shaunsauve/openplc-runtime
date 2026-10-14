@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/pause-at-boundary",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A043"],
+  "title": "Pause at the scan boundary halts after the output write and before the next input read; the first scan after resume reads the input changed during the halt",
+  "notes": "ASSUMED: the boundary pause is `pause` with `atBoundary: true` (F036; ADR-003 D4 names only `pause {task}`). ADR-001 D2.5: a boundary stop has no source location and an empty stack.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 5}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"request": "pause", "args": {"task": "Main", "atBoundary": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "pause", "task": "Main", "location": {"file": null, "line": null, "boundary": true}, "stack": []}},
+    {"request": "variables", "args": {"path": "PROG0.witness"}, "expect": {"success": true, "body": {"value": {"~capture": "k"}}}},
+    {"observe": "plant", "note": "halted after the output phase: the plant already has scan k's witness and outputs",
+     "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 5, "%QW100": 6}}},
+    {"plant": {"set": {"%IW0": 77}}, "note": "changed during the halt"},
+    {"wait": {"wallMs": 500}},
+    {"observe": "plant", "throughout": true, "note": "nothing ran: no input read, no output", "expect": {"witness": {"Main": {"~ref": "k"}}, "outputs": {"%QW0": 5}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "continued", "withinMs": 500},
+    {"wait": {"scans": 1}},
+    {"observe": "plant", "note": "scan k+1 read the new input", "expect": {"witness": {"Main": {"~ref": "k", "~add": 1, "~tol": 0}}, "outputs": {"%QW0": 77, "%QW100": 78}}}
+  ]
+}

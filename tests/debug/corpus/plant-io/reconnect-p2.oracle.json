@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/reconnect-p2",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A122"],
+  "title": "A network blip shorter than P2 resumes the same session halted with its breakpoints and force; after P2 the reconnecting client is told the session ended with the safe-stop reason",
+  "notes": "Blips of P2 - 3 s = 12 s and P2 + 5 s = 20 s at the default P2 = 15 s. ASSUMED: dropNetwork cuts every client transport (and nothing else); the resume is an `initialize` that presents the resumeToken (ADR-005 D2.4).",
+  "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"resumeToken": {"~capture": "tok"}}}},
+    {"wait": {"scans": 2}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 4444, "reason": "A122"}, "expect": {"success": true}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"inject": "dropNetwork", "args": {}},
+    {"wait": {"wallMs": 12000}},
+    {"inject": "restoreNetwork", "args": {}},
+    {"client": "back", "request": "initialize", "args": {"role": "controller", "resumeToken": {"~ref": "tok"}}, "expect": {"success": true, "body": {"resumed": true, "resumeToken": {"~capture": "tok2"}}}},
+    {"client": "back", "request": "listForces", "expect": {"success": true, "body": {"forces": {"~contains": {"path": "PROG0.out_int", "value": 4444}}}}},
+    {"observe": "status", "expect": {"state": "HALTED_AT_BP", "fields": {"breakpoints": {"~len": 1}}}},
+    {"observe": "plant", "throughout": true, "note": "still halted: no safe-stop, scan count frozen", "expect": {"witness": {"Main": {"~ref": "w"}}}},
+    {"inject": "dropNetwork", "args": {}},
+    {"wait": {"wallMs": 20000}},
+    {"inject": "restoreNetwork", "args": {}},
+    {"client": "late", "request": "initialize", "args": {"role": "controller", "resumeToken": {"~ref": "tok2"}}, "expect": {"success": false, "error": "SESSION_ENDED", "body": {"details": {"reason": "heartbeat_timeout"}}}},
+    {"observe": "status", "expect": {"state": "SAFE_STOPPED", "fields": {"reason": "heartbeat_timeout"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ref": "w"}}}}
+  ]
+}

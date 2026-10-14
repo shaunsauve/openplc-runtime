@@ -1,0 +1,24 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/force-default-ttl",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A210"],
+  "title": "A force with no TTL gets P5's 10 min default: listings show 10 then 5 min remaining, the plant sees the forced value until 10 min after the response and the program's value after",
+  "notes": "Default debug.conf. The program writes in_value (5) to out_int, never 31111. ASSUMED: `remaining` is milliseconds. The 10 min instant is counted from the force response; the harness steps add a few ms, inside the ± 1 s tolerance.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IW0": 5, "%ID0": 7}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"request": "force", "args": {"path": "PROG0.out_int", "value": 31111, "reason": "A210 default TTL"}, "expect": {"success": true}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": [{"path": "PROG0.out_int", "remaining": {"~approx": [600000, 1000]}}]}}},
+    {"wait": {"wallMs": 299000}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": [{"path": "PROG0.out_int", "remaining": {"~approx": [300000, 1000]}}]}}},
+    {"wait": {"wallMs": 300500}},
+    {"observe": "plant", "note": "just before 10 min: still forced", "expect": {"outputs": {"%QW0": 31111}}},
+    {"event": "forces", "withinMs": 1500, "note": "the removal is reported", "expect": {"body": {"list": {"~len": 0}}}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "note": "the program's value, within one scan of 10 min", "expect": {"outputs": {"%QW0": 5}}}
+  ]
+}

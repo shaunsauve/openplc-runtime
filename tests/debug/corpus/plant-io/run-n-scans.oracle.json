@@ -1,0 +1,32 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "plant-io/run-n-scans",
+  "corpus": "plant-io",
+  "kind": "runtime",
+  "criteria": ["A045"],
+  "title": "From halted, run N executes exactly N plant-counted scans for N = 1, 7 and 10,000, then halts; N = 0 and 1,000,001 are refused, not clamped",
+  "notes": "partial: the plugin exchange counter is not read back (no observation key carries it); %QW100, the plugin-exchanged output, reaching the plant shows only that exchanges happened. The 1,000,000 case is the soak batch's. A 10 ms task keeps N = 10,000 to about 100 s.",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 10}}, "plant": {"samplePeriodMs": 5, "inputs": {"%IW0": 9}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "pause", "args": {"task": "Main", "atBoundary": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "pause"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w0"}}}},
+    {"request": "runScans", "args": {"n": 1}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"location": {"file": null, "line": null, "boundary": true}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": 1}, "outputs": {"%QW100": 10}}},
+    {"request": "runScans", "args": {"n": 7}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"location": {"file": null, "line": null, "boundary": true}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": 7}}},
+    {"request": "runScans", "args": {"n": 10000}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 150000, "expect": {"location": {"file": null, "line": null, "boundary": true}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": 10000}, "witness": {"Main": {"~ref": "w0", "~add": 10008, "~tol": 0}}}},
+    {"wait": {"wallMs": 300}},
+    {"observe": "plant", "throughout": true, "note": "then halted", "expect": {"scanDelta": {"Main": 0}}},
+    {"request": "runScans", "args": {"n": 0}, "expect": {"success": false, "error": "RANGE_ERROR"}},
+    {"request": "runScans", "args": {"n": 1000001}, "expect": {"success": false, "error": "RANGE_ERROR"}},
+    {"wait": {"wallMs": 300}},
+    {"observe": "plant", "throughout": true, "note": "a refused N ran nothing (not clamped to 1 or 1,000,000)", "expect": {"scanDelta": {"Main": 0}}}
+  ]
+}
