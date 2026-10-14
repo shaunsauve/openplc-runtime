@@ -73,6 +73,8 @@ typedef enum
     DBG_STOP_STEP,
 } dbg_stop_reason_t;
 
+struct strucpp_dbg_frame;
+
 /* What a parked task stopped on; written by the scan thread before park. */
 typedef struct
 {
@@ -81,7 +83,18 @@ typedef struct
     uint32_t          hits;     /* the breakpoint's hit count, 0 for a trap stop */
     uint32_t          depth;    /* linked frames at the stop */
     int64_t           since_ns; /* CLOCK_MONOTONIC */
+    /* The task's innermost linked frame (ADR-001 D3). Valid only while the task stays parked on
+     * this stop: the frames live on its stack. */
+    const struct strucpp_dbg_frame *head;
 } dbg_stop_t;
+
+/* One stack frame of a parked task, innermost first (ADR-001 D3.3). */
+typedef struct
+{
+    uint32_t    pou;  /* the POU body's entry probe ID */
+    uint32_t    at;   /* the frame's location: the stop probe (innermost) or its call statement */
+    const void *self; /* the FB or program instance, or null (a function) */
+} dbg_frame_t;
 
 /* park() return values (ADR-001 D2.2). */
 #define DBG_PARK_RESUME  0
@@ -140,6 +153,21 @@ void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t depth_bo
 void debug_agent_clear_trap(void);
 
 /* ---- Stops (agent thread) ---- */
+
+/* The stack of a task parked on `stop`, innermost first; at most `max` frames. The walk stops at
+ * the first frame of another attach generation, and sets *truncated (N4, D3.4). The caller must
+ * know the task is still parked on this stop (D3.5: only a parked thread's chain is read). */
+size_t debug_agent_frames(const dbg_stop_t *stop, dbg_frame_t *out, size_t max, bool *truncated);
+
+/* ---- Leaf addresses (instance mapping) ---- */
+
+/* The program's debug-table leaf addresses in flat leaf order (generated_debug.cpp), or none.
+ * Interim stand-in for ADR-002's strucpp_dbg_instances[]: see debug_agent_leaf_of. */
+void debug_agent_set_leaves(const void *const *addrs, size_t count);
+/* The flat index of the lowest-addressed leaf at or above `self`, or -1. An instance's members
+ * follow its `this`, so this is the first leaf of the instance (or of its first nested member);
+ * the gateway disambiguates by the frame's POU type. */
+long debug_agent_leaf_of(const void *self);
 
 /* Takes the stop record a task left at park, once. False when none is pending. */
 bool debug_agent_take_stop(size_t task_idx, dbg_stop_t *out);

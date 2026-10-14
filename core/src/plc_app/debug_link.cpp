@@ -44,6 +44,7 @@
 
 #include "../lib/strucpp_abi.hpp"
 #include "debug_agent.h"
+#include "image_tables.h"
 #include "plc_state_manager.h"
 
 extern "C" {
@@ -55,6 +56,9 @@ extern "C" {
 namespace {
 
 const char *kLink   = "1.0";
+/* readLeaves: leaves per request, and the widest leaf (a WSTRING window is 253 bytes). */
+const int   kMaxLeaves   = 1024;
+const int   kMaxLeafSize = 512;
 const int   kTickMs = 10;
 const int   kBeatMs = 250;
 
@@ -607,6 +611,96 @@ void end_session_locked(const std::string &id, bool running)
     }
 }
 
+/* The parked task's frames (ADR-001 D3), innermost first. A task held at its scan boundary has
+ * reached no probe: an empty stack (D2.5). Under g_mu, so no step or continue can resume the task
+ * during the walk. */
+Reply stack_trace_locked(size_t task)
+{
+    const TaskView &v = g_view[task];
+    if (plc_task_run_state(task, nullptr) == PLC_TASK_RUN_RUNNING || !v.halted)
+        return fail("NOT_HALTED", "the task is not halted");
+    dbg_frame_t frames[256];
+    bool        truncated = false;
+    const size_t n = v.at_boundary ? 0 : debug_agent_frames(&v.stop, frames, 256, &truncated);
+    char names[DBG_MAX_TASKS][32];
+    task_count(names);
+    cJSON *b = cJSON_CreateObject();
+    add_task(b, task, names[task]);
+    cJSON *list = cJSON_CreateArray();
+    for (size_t i = 0; i < n; ++i)
+    {
+        cJSON *f = cJSON_CreateObject();
+        cJSON_AddNumberToObject(f, "pou", frames[i].pou);
+        cJSON_AddNumberToObject(f, "at", frames[i].at);
+        const long leaf = debug_agent_leaf_of(frames[i].self);
+        if (leaf >= 0)
+            cJSON_AddNumberToObject(f, "leaf", (double)leaf);
+        else
+            cJSON_AddItemToObject(f, "leaf", cJSON_CreateNull());
+        cJSON_AddItemToArray(list, f);
+    }
+    cJSON_AddItemToObject(b, "frames", list);
+    cJSON_AddBoolToObject(b, "truncated", truncated);
+    return success(b);
+}
+
+/* Leaf values by flat leaf index (ADR-002 D3 "Addressing"), as the hex of the bytes
+ * strucpp_debug_read writes; null for an index the program does not have. The gateway decodes
+ * them by the leaf's IEC type. Read without stopping the program, as the legacy 0x44 read is: a
+ * halted task's values are stable, a running task's are a snapshot. */
+Reply read_leaves(cJSON *list)
+{
+    if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > kMaxLeaves)
+        return fail("BAD_REQUEST", "readLeaves needs a list of at most 1024 leaf indexes");
+    cJSON *item;
+    cJSON_ArrayForEach(item, list)
+    {
+        if (!is_int(item) || item->valuedouble < 0)
+            return fail("BAD_REQUEST", "a leaf index must be a non-negative integer");
+    }
+    std::vector<uint16_t> counts;
+    if (ext_strucpp_debug_array_count && ext_strucpp_debug_elem_count && ext_strucpp_debug_read &&
+        ext_strucpp_debug_size)
+        for (uint8_t a = 0, n = ext_strucpp_debug_array_count(); a < n; ++a)
+            counts.push_back(ext_strucpp_debug_elem_count(a));
+    cJSON *values = cJSON_CreateArray();
+    cJSON_ArrayForEach(item, list)
+    {
+        uint64_t idx = (uint64_t)item->valuedouble;
+        int      arr = -1;
+        for (size_t a = 0; a < counts.size(); ++a)
+        {
+            if (idx < counts[a])
+            {
+                arr = (int)a;
+                break;
+            }
+            idx -= counts[a];
+        }
+        uint8_t        buf[kMaxLeafSize];
+        const uint16_t size = arr < 0 ? 0 : ext_strucpp_debug_size((uint8_t)arr, (uint16_t)idx);
+        const uint16_t got  = size == 0 || size > kMaxLeafSize
+                                  ? 0
+                                  : ext_strucpp_debug_read((uint8_t)arr, (uint16_t)idx, buf);
+        if (got == 0)
+        {
+            cJSON_AddItemToArray(values, cJSON_CreateNull());
+            continue;
+        }
+        std::string hex(got * 2u, '0');
+        static const char kHex[] = "0123456789abcdef";
+        for (uint16_t i = 0; i < got; ++i)
+        {
+            hex[2 * i]     = kHex[buf[i] >> 4];
+            hex[2 * i + 1] = kHex[buf[i] & 0xF];
+        }
+        cJSON_AddItemToArray(values, cJSON_CreateString(hex.c_str()));
+    }
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddItemToObject(b, "values", values);
+    return success(b);
+}
+
 bool is_command(const char *c, std::initializer_list<const char *> names)
 {
     for (const char *n : names)
@@ -641,7 +735,8 @@ Reply handle(const char *command, cJSON *args)
     /* pm ruling 3: a command outside the link, or one this core has not built, is UNSUPPORTED. */
     const bool known = is_command(command, {"detach", "terminate", "beatClient", "setBreakpoints",
                                             "clearAllBreakpoints", "continue", "pause", "next",
-                                            "stepIn", "stepOut", "stop"});
+                                            "stepIn", "stepOut", "stop", "stackTrace",
+                                            "readLeaves"});
     if (!known)
         return fail("UNSUPPORTED", std::string("this runtime core does not implement ") + command);
 
@@ -738,6 +833,8 @@ Reply handle(const char *command, cJSON *args)
         return success(b);
     }
 
+    if (!std::strcmp(command, "readLeaves")) return read_leaves(arg(args, "leaves"));
+
     if (!running) return fail("NOT_RUNNING", "no program is running");
 
     if (!std::strcmp(command, "stop"))
@@ -765,6 +862,15 @@ Reply handle(const char *command, cJSON *args)
             plc_run_control_pause(task);
         }
         return success();
+    }
+    if (!std::strcmp(command, "stackTrace"))
+    {
+        if (all)
+        {
+            if (g_last_stop_task < 0) return fail("NOT_HALTED", "no task is halted");
+            task = (size_t)g_last_stop_task;
+        }
+        return stack_trace_locked(task);
     }
     /* pm ruling 8: continue is all-stop, whatever `task` says. */
     if (!std::strcmp(command, "continue")) return resume_all_locked();

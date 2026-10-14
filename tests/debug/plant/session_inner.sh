@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Inside the runtime image (Linux): build plc_main (with SEED's defect, if any) and the reference
-# plant, compile the probed corpus:plant-io payload, start plc_main with the plant and the real
+# plant, compile the probed corpus payload (CORPUS, default plant-io), start plc_main with the plant and the real
 # gateway, run the harness over WSS. Called by session_e2e.sh; not for direct use.
 # Mounts: /src (repo, read-only), /payload (gen_payload.mjs output), /out (logs), /runs (results).
 set -uo pipefail
 PYINC=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
 PY=/workdir/venvs/runtime/bin/python
-CORPUS=tests/debug/corpus/plant-io
+CORPUS=${CORPUS:-tests/debug/corpus/plant-io}
+NAME=$(basename "$CORPUS")
 
 echo "### build plc_main${SEED:+ with seeded defect '$SEED'} and the reference plant"
 mkdir -p /work
@@ -19,6 +20,10 @@ case "$SEED" in
     sed -i 's/debug_agent_set_breakpoint(\*probe, cond.data()/debug_agent_set_breakpoint(*probe + 1, cond.data()/' \
       core/src/plc_app/debug_link.cpp
     grep -q 'set_breakpoint(\*probe + 1' core/src/plc_app/debug_link.cpp || { echo "SEED late not applied"; exit 1; } ;;
+  leafoff)  # read every leaf one past the asked one: the values read are another variable's
+    sed -i 's/uint64_t idx = (uint64_t)item->valuedouble;/uint64_t idx = (uint64_t)item->valuedouble + 1;/' \
+      core/src/plc_app/debug_link.cpp
+    grep -q 'item->valuedouble + 1;' core/src/plc_app/debug_link.cpp || { echo "SEED leafoff not applied"; exit 1; } ;;
   *) echo "unknown SEED $SEED"; exit 1 ;;
 esac
 mkdir -p build/plugins /run/runtime core/generated
@@ -28,13 +33,13 @@ gcc -shared -fPIC -O1 -Wall -Wextra -o build/plugins/libreference_plant.so \
   tests/debug/plant/reference_plant.c -I core/src/drivers -I core/src -I "$PYINC" -lpthread -ldl \
   || { echo "PLANT BUILD FAIL"; exit 1; }
 
-echo "### compile the probed corpus:plant-io through scripts/compile.sh"
+echo "### compile the probed corpus:$NAME through scripts/compile.sh"
 cp -r /payload/. core/generated/
 bash scripts/compile.sh >/out/compile.log 2>&1 || { echo "COMPILE FAIL"; tail -15 /out/compile.log; exit 1; }
 [ -f build/new_libplc.so ] && mv build/new_libplc.so "build/libplc_$(date +%s%N).so"
 ls build/libplc_*.so >/dev/null || { echo "COMPILE FAIL: no libplc"; exit 1; }
 cp /payload/debug-info.json core/generated/debug-info.json
-mkdir -p /out/build/plant-io/debug && cp /payload/debug-info.json /out/build/plant-io/debug/
+mkdir -p "/out/build/$NAME/debug" && cp /payload/debug-info.json "/out/build/$NAME/debug/"
 
 python3 tests/lifecycle/logserver.py &
 sleep 0.3
@@ -66,7 +71,7 @@ ARCH=$(uname -m)
 "$PY" tests/debug/wire/run_harness.py --endpoint https://127.0.0.1:8443 --insecure \
   --token "$(cat /tmp/token)" --plant /tmp/plant.sock --build-dir /out/build \
   ${RESULTS:+--results "$RESULTS"} \
-  --ran-on "linux-$ARCH docker: plc_main + probed corpus:plant-io (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
+  --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
   "$@" | tee /out/harness.txt
 RC=${PIPESTATUS[0]}
 kill "$GW" 2>/dev/null

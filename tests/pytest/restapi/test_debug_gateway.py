@@ -288,7 +288,7 @@ def _provoke(code: str, server: WireServer, tokens: Dict[str, str]) -> JsonObj:
     if code == "LIMIT_EXCEEDED":
         return c.request("setExceptionBreakpoints", {"filters": ["x" * (2 * 1024 * 1024)]})
     if code == "UNSUPPORTED":
-        return c.request("stackTrace", {"task": "Main"})
+        return c.request("evaluate", {"expression": "x"})
     if code == "NOT_CONTROLLER":
         return Client(url, admin).initialize()  # a second controller
     if code == "BUSY":
@@ -386,6 +386,8 @@ VALID_ARGS: Dict[str, JsonObj] = {
     "setHaltMode": {"mode": "allStop"},
     "setLock": {"on": False},
     "pause": {"task": "Main"},
+    "scopes": {"frameId": 0},
+    "variables": {"path": "PROG0.witness"},
 }
 # Refusals that mean "valid, but not in this run state", which an advertised request may answer.
 STATE_REFUSALS = {"NOT_HALTED", "NOT_RUNNING"}
@@ -549,7 +551,7 @@ def test_the_fake_core_speaks_the_link_spec():
         driven = {"attach", "setBreakpoints", "next", "stepIn", "stepOut", "cycleStep", "runScans",
                   "runToCursor"}
         for command, args in [
-            ("status", {}), ("beatClient", s), ("setExceptionBreakpoints", {**s, "filters": ["divByZero"]}),
+            ("stackTrace", s), ("readLeaves", {**s, "leaves": [0, 7]}), ("status", {}), ("beatClient", s), ("setExceptionBreakpoints", {**s, "filters": ["divByZero"]}),
             ("setHaltMode", {**s, "mode": "allStop"}), ("clearAllBreakpoints", s), ("continue", s),
         ]:
             assert link.call(command, args)["success"] is True, command

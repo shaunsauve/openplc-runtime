@@ -486,9 +486,9 @@ and the lock off; `admin` requests need an administrator account.
 | `setFunctionBreakpoints` | `control`, `functionBreakpoints` | control | planned |
 | `setInstanceBreakpoints` | `control`, `instanceBreakpoints` | control | planned |
 | `threads` | - | - | planned |
-| `stackTrace` | - | - | planned |
-| `scopes` | - | - | planned |
-| `variables` | - | - | planned |
+| `stackTrace` | `probes` | probe | `{task?, startFrame?, levels?}`: the halted task's frames, innermost first. Body `{stackFrames:[{id, name, pou, kind, instance, location:{file, line, col}, line, column, source}], totalFrames, truncated, task, taskId}`; `kind` is `program`, `fb`, `function` or `method`, `instance` the instance path (null for a function); `truncated` when frames from before the attach are missing (ADR-001 D3.4). A task held at its scan boundary has no frames |
+| `scopes` | `probes` | probe | `{frameId}`; body `{scopes:[{name, variablesReference, namedVariables}]}`, `name` one of `inputs`, `outputs`, `inOuts`, `members`, `temps`, `externals` |
+| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout |
 | `evaluate` | - | - | planned |
 | `setVariable` | `modify`, `write` | control | planned |
 | `force` | `modify`, `force` | control | planned |

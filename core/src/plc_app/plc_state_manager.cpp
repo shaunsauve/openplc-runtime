@@ -19,6 +19,7 @@
 #include <ctime>
 #include <exception>
 #include <functional>
+#include <vector>
 
 #include <pthread.h>
 #include <sched.h>
@@ -758,6 +759,24 @@ __attribute__((constructor)) static void register_debug_host(void)
     debug_agent_set_host(&host);
 }
 
+/* Hands the debug agent the program's leaf addresses in flat leaf order, so a frame's `self` maps
+ * to its instance (debug_agent_leaf_of). A program without the table gets none: its frames carry
+ * no instance. */
+static void bind_debug_leaves(PluginManager *pm)
+{
+    auto *arrays = static_cast<const strucpp_debug_entry *const *>(
+        plugin_manager_try_get_symbol(pm, STRUCPP_DEBUG_ARRAYS_SYMBOL));
+    std::vector<const void *> addrs;
+    if (arrays && ext_strucpp_debug_array_count && ext_strucpp_debug_elem_count)
+    {
+        const uint8_t n = ext_strucpp_debug_array_count();
+        for (uint8_t a = 0; a < n; ++a)
+            for (uint16_t e = 0; e < ext_strucpp_debug_elem_count(a); ++e)
+                addrs.push_back(arrays[a][e].ptr);
+    }
+    debug_agent_set_leaves(addrs.data(), addrs.size());
+}
+
 /* Binds the program's probes to the debug agent; a probe-off or pre-probe build has none. */
 static void bind_debug_probes(PluginManager *pm)
 {
@@ -779,6 +798,7 @@ static void bind_debug_probes(PluginManager *pm)
     }
     debug_agent_bind(flags, count(), active(), lockdep, plc_task_count);
     log_info("[debug] %u probes bound", count());
+    bind_debug_leaves(pm);
 }
 
 static bool task_is_running(const PlcTaskCtx *c)
@@ -1601,6 +1621,7 @@ static int unload_plc_program_locked(PluginManager *pm, bool restart)
         pthread_join(plc_thread, NULL);
         /* Every task thread is gone; the .so is closed below. */
         debug_agent_unbind();
+        debug_agent_set_leaves(nullptr, 0);
         debug_link_set_image(nullptr, nullptr);
 
         /* Commit retained values: AFTER the join (consistent snapshot)

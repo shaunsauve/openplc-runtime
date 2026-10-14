@@ -29,7 +29,7 @@ from flask_socketio import SocketIO
 from jwt.exceptions import PyJWTError
 
 from webserver.debug_gateway.core_link import CoreLink, CoreUnavailable
-from webserver.debug_gateway.debug_info import DebugInfo
+from webserver.debug_gateway.debug_info import SCOPE_OF_SECTION, DebugInfo, Node, Pou
 from webserver.debug_gateway.protocol import (
     COMMANDS,
     DEFAULT_MESSAGES,
@@ -61,6 +61,10 @@ OBSERVER_EVENTS = frozenset(
      "programReplaced"}
 )
 _CODES = {c.value: c for c in ErrorCode}
+# frameId = taskId * _FRAMES_PER_TASK + the frame's index, innermost 0. Valid while the task stays
+# halted on the stop it was listed for, as DAP's frame ids are.
+_FRAMES_PER_TASK = 4096
+_MAX_LEAVES = 1024  # per core readLeaves request (docs/DEBUG_CORE_LINK.md)
 
 
 def _obj(v: Json) -> JsonObj:
@@ -108,6 +112,9 @@ class DebugGateway:
         self._seq = 0
         self._info: Optional[DebugInfo] = None
         self._info_stamp: Optional[Tuple[int, int]] = None
+        # variablesReference -> what it expands; stable per (debug info, key), never reused.
+        self._refs: Dict[int, Tuple[str, ...]] = {}
+        self._ref_ids: Dict[Tuple[str, ...], int] = {}
         link.set_event_sink(self._on_core_event)
 
     # ------------------------------------------------------------------ transport
@@ -276,6 +283,9 @@ class DebugGateway:
             "setBreakpoints": self._set_breakpoints,
             "breakpointLocations": self._breakpoint_locations,
             "runToCursor": self._run_to_cursor,
+            "stackTrace": self._stack_trace,
+            "scopes": self._scopes,
+            "variables": self._variables,
         }
 
     def _core(self, command: str, args: JsonObj) -> JsonObj:
@@ -431,6 +441,8 @@ class DebugGateway:
             return None
         stamp = (st.st_mtime_ns, st.st_size)
         if stamp != self._info_stamp:
+            self._refs.clear()
+            self._ref_ids.clear()
             try:
                 self._info = DebugInfo.load(self.debug_info_path)
             except ValueError as exc:
@@ -496,6 +508,192 @@ class DebugGateway:
         if "task" in args:
             forwarded["task"] = args["task"]
         return self._core("runToCursor", forwarded)
+
+    # ------------------------------------------------------------------ inspection
+
+    def _core_frames(
+        self, session: ClientSession, info: DebugInfo, task: Json
+    ) -> Tuple[JsonObj, List[JsonObj]]:
+        """The core's stackTrace, each frame resolved to its POU, instance and location."""
+        args: JsonObj = {"session": session.core_session}
+        if task is not None:
+            args["task"] = task
+        body = self._core("stackTrace", args)
+        out: List[JsonObj] = []
+        for f in _list(body.get("frames")):
+            f_obj = _obj(f)
+            pou = info.pou_by_entry.get(f_obj.get("pou")) if isinstance(f_obj.get("pou"), int) else None
+            at = f_obj.get("at")
+            loc = info.location(at) if isinstance(at, int) else None
+            leaf = f_obj.get("leaf") if isinstance(f_obj.get("leaf"), int) else None
+            out.append({
+                "pou": pou,
+                "instance": info.instance_of(leaf, pou) if pou is not None and pou.kind != "function" else None,
+                "location": loc.as_json() if loc is not None else None,
+            })
+        return body, out
+
+    def _stack_trace(self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]) -> JsonObj:
+        assert info is not None
+        body, frames = self._core_frames(session, info, args.get("task"))
+        task_id = body.get("taskId") if isinstance(body.get("taskId"), int) else 0
+        listed: List[JsonObj] = []
+        for i, f in enumerate(frames):
+            pou: Optional[Pou] = f["pou"]
+            loc = _obj(f["location"])
+            listed.append({
+                "id": task_id * _FRAMES_PER_TASK + i,
+                "name": pou.name if pou is not None else "?",
+                "pou": pou.name if pou is not None else None,
+                "kind": pou.kind if pou is not None else None,
+                "instance": f["instance"],
+                "location": f["location"],
+                "line": loc.get("line", 0),
+                "column": loc.get("col", 0),
+                "source": {"path": loc["file"]} if "file" in loc else None,
+            })
+        # ADR-001 D3.4: a walk that stopped at an older attach, or never reached the program's
+        # run() frame, is a truncated stack.
+        outermost = frames[-1]["pou"] if frames else None
+        truncated = body.get("truncated") is True or (
+            bool(frames) and (outermost is None or outermost.kind != "program")
+        )
+        start = args.get("startFrame") if isinstance(args.get("startFrame"), int) else 0
+        levels = args.get("levels") if isinstance(args.get("levels"), int) else 0
+        page = listed[start: start + levels] if levels else listed[start:]
+        return {"stackFrames": page, "totalFrames": len(listed), "truncated": truncated,
+                "task": body.get("task"), "taskId": task_id}
+
+    def _frame(
+        self, session: ClientSession, info: DebugInfo, frame_id: int
+    ) -> Tuple[JsonObj, int]:
+        task_id, index = divmod(frame_id, _FRAMES_PER_TASK)
+        _body, frames = self._core_frames(session, info, task_id)
+        if index >= len(frames):
+            raise Refusal(ErrorCode.BAD_REQUEST, f"There is no frame {frame_id}; list the stack again.")
+        return frames[index], index
+
+    def _ref(self, *key: str) -> int:
+        ref = self._ref_ids.get(key)
+        if ref is None:
+            ref = len(self._ref_ids) + 1
+            self._ref_ids[key] = ref
+            self._refs[ref] = key
+        return ref
+
+    def _scopes(self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]) -> JsonObj:
+        """F074: a frame's variables grouped by section; a function's locals have no values yet
+        (docs/DEBUG_CORE_LINK.md: no __dbg_locals tables)."""
+        assert info is not None
+        frame_id = _int(args["frameId"])
+        frame, _ = self._frame(session, info, frame_id)
+        pou: Optional[Pou] = frame["pou"]
+        groups: Dict[str, List[str]] = {}
+        instance = frame["instance"]
+        if instance is not None:
+            for name, child in info.children(info.resolve(instance)):
+                section = self._section_of(info, info.resolve(instance), name)
+                groups.setdefault(SCOPE_OF_SECTION.get(section, "members"), []).append(name)
+        for name, _tid, section in pou.locals if pou is not None else ():
+            groups.setdefault(SCOPE_OF_SECTION.get(section, "locals"), []).append(name)
+        scopes = [
+            {"name": scope, "variablesReference": self._ref("scope", str(frame_id), scope, *names),
+             "namedVariables": len(names), "expensive": False}
+            for scope, names in groups.items()
+        ]
+        return {"scopes": scopes}
+
+    @staticmethod
+    def _section_of(info: DebugInfo, node: Node, name: str) -> str:
+        t = info.types.get(node.type_id)
+        for m in t.members if t is not None else []:
+            if str(m.get("name")).upper() == name.upper():
+                return str(m.get("section") or "VAR")
+        return "VAR_EXTERNAL"
+
+    def _read(self, info: DebugInfo, session: ClientSession, nodes: List[Node]) -> List[Json]:
+        leaves = [n.leaf for n in nodes]
+        values: List[Json] = []
+        for i in range(0, len(leaves), _MAX_LEAVES):
+            body = self._core("readLeaves", {"session": session.core_session,
+                                             "leaves": leaves[i: i + _MAX_LEAVES]})
+            values.extend(_list(body.get("values")))
+        return [
+            info.decode(n.type_id, v if isinstance(v, str) else None, n.leaf)
+            for n, v in zip(nodes, values)
+        ]
+
+    def _listing(
+        self, session: ClientSession, info: DebugInfo, named: List[Tuple[str, Optional[Node]]],
+        native: bool = False,
+    ) -> List[JsonObj]:
+        """One level of variables: an elementary one with its value, a composite one with a
+        variablesReference to expand it (A089: no grandchild is read before it is asked for).
+        DAP's `value` is display text, with the JSON value in `data`; `native` (the by-path form)
+        puts the JSON value in `value`."""
+        readable = [n for _, n in named if n is not None and info.is_elementary(n.type_id)]
+        values = dict(zip((n.path for n in readable), self._read(info, session, readable)))
+        out: List[JsonObj] = []
+        for name, node in named:
+            item: JsonObj = {"name": name, "variablesReference": 0}
+            if node is None:
+                item.update({"value": "<not readable>", "data": None, "type": "?"})
+            elif info.is_elementary(node.type_id):
+                data = values.get(node.path)
+                text = data if isinstance(data, str) or native else json.dumps(data)
+                item.update({"value": text, "data": data, "type": info.type_name(node.type_id),
+                             "evaluateName": node.path})
+            else:
+                item.update({"value": info.type_name(node.type_id), "type": info.type_name(node.type_id),
+                             "evaluateName": node.path, "variablesReference": self._ref("path", node.path),
+                             "namedVariables": len(info.children(node))})
+            out.append(item)
+        return out
+
+    def _variables(self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]) -> JsonObj:
+        assert info is not None
+        ref = args.get("variablesReference")
+        if isinstance(ref, int):
+            key = self._refs.get(ref)
+            if key is None:
+                raise Refusal(ErrorCode.BAD_REQUEST, f"There is no variablesReference {ref}.")
+            if key[0] == "path":
+                node = info.resolve(key[1])
+                return {"variables": self._listing(session, info, info.children(node))}
+            frame, _ = self._frame(session, info, int(key[1]))
+            instance, pou = frame["instance"], frame["pou"]
+            named: List[Tuple[str, Optional[Node]]] = []
+            for name in key[3:]:
+                try:
+                    named.append((name, info.resolve(name, instance, pou)))
+                except Refusal:
+                    named.append((name, None))  # a function local: no __dbg_locals table yet
+            return {"variables": self._listing(session, info, named)}
+        path = args.get("path")
+        if not isinstance(path, str):
+            raise Refusal(ErrorCode.BAD_REQUEST, "variables needs a variablesReference or a path.")
+        instance, pou = None, None
+        if isinstance(args.get("frameId"), int):
+            frame, _ = self._frame(session, info, _int(args["frameId"]))
+            instance, pou = frame["instance"], frame["pou"]
+            if instance is None and pou is not None and any(
+                n.upper() == path.split(".")[0].split("[")[0].upper() for n, _t, _s in pou.locals
+            ):
+                raise Refusal(
+                    ErrorCode.UNSUPPORTED,
+                    f"'{path}' is a local of the function {pou.name}; function locals are not "
+                    f"readable yet (STruCpp emits no __dbg_locals tables).",
+                )
+        node = info.resolve(path, instance, pou)
+        if info.is_elementary(node.type_id):
+            value = self._read(info, session, [node])[0]
+            return {"path": node.path, "type": info.type_name(node.type_id), "value": value}
+        return {
+            "path": node.path,
+            "type": info.type_name(node.type_id),
+            "variablesReference": self._ref("path", node.path),
+            "children": self._listing(session, info, info.children(node), native=True),
+        }
 
     # ------------------------------------------------------------------ session end
 

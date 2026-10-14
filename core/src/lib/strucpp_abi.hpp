@@ -107,6 +107,20 @@ struct strucpp_dbg_frame {
     uint32_t    gen;
     uint8_t     linked;
 };
+
+/* One leaf of the program's debug table (mirror of debug_table.hpp's strucpp::debug::Entry, in
+ * generated_debug.cpp). The core reads values through strucpp_debug_read; it uses the leaf
+ * addresses only to map a frame's `self` to its instance (see debug_agent_leaf_of). */
+struct strucpp_debug_entry {
+    void   *ptr;
+    uint8_t tag;
+    uint8_t flags;
+};
 }
+
+/* `strucpp::debug::debug_arrays` (const Entry* const[]), declared extern in debug_table.hpp so it
+ * has external linkage. Interim: STruCpp does not emit ADR-002's strucpp_dbg_instances[] yet, so
+ * the core finds a frame's instance through the leaf addresses instead. */
+#define STRUCPP_DEBUG_ARRAYS_SYMBOL "_ZN7strucpp5debug12debug_arraysE"
 
 #endif  // OPENPLC_STRUCPP_ABI_HPP

@@ -69,6 +69,29 @@ MARKER = re.compile(r"^@[A-Za-z0-9_]+$")
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
 ACTIONS = ("request", "event", "noEvent", "plant", "wait", "observe", "inspect", "inject", "loop")
 MAIN = "main"  # the stream a step without `client` acts on
+# Keys whose values are IEC identifiers or paths of them, compared case-insensitively (IEC 61131-3
+# 6.1.2): the oracle names the source spelling, STruCpp's debug info its upper case
+# (docs/DEBUG_CORE_LINK.md, pm rulings 12 and 13).
+IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
+
+
+def _fold_identifiers(expected: Json, observed: Observed) -> Observed:
+    """`observed` with each identifier-valued string that equals the oracle's but for case
+    replaced by the oracle's spelling, so the matchers compare everything else exactly."""
+    if isinstance(expected, dict) and isinstance(observed, dict) and not is_matcher(expected):
+        out = dict(observed)
+        for k, want in expected.items():
+            if k not in out:
+                continue
+            got = out[k]
+            if k in IDENTIFIER_KEYS and isinstance(want, str) and isinstance(got, str):
+                out[k] = want if got.casefold() == want.casefold() else got
+            else:
+                out[k] = _fold_identifiers(want, got)
+        return out
+    if isinstance(expected, list) and isinstance(observed, list):
+        return [_fold_identifiers(w, g) for w, g in zip(expected, observed)] + observed[len(expected):]
+    return observed
 # stopped/event expectation key -> body key (ADR-003 D4 names the virtual time `vt`).
 EVENT_KEYS = {
     "reason": "reason",
@@ -384,7 +407,7 @@ class _Run:
         if "body" in expect:
             body = _obj(resp.get("body"))
             observed: JsonObj = body if success else {**error, **body}
-            self._check(expect["body"], observed, f"{where}.body")
+            self._check(expect["body"], _fold_identifiers(expect["body"], observed), f"{where}.body")
 
     def _wait_event(self, client: str, name: str, deadline: float) -> Optional[JsonObj]:
         stream = self._stream(client)
@@ -464,15 +487,22 @@ class _Run:
         for i, (want, got) in enumerate(zip(expected, frames)):
             want_obj = dict(_obj(want))
             scopes = _obj(want_obj.pop("scopes", None))
-            self._check(want_obj, got, f"stack[{i}]")
+            self._check(want_obj, _fold_identifiers(want_obj, got), f"stack[{i}]")
+            frame_id = _obj(got).get("id")
             for scope, paths in scopes.items():
                 for path, m in _obj(paths).items():
+                    # A scope's names are relative to the frame (its instance, its externals).
                     self._check(
-                        m, self._read_variable(client, path), f"stack[{i}].scopes.{scope}.{path}"
+                        m,
+                        self._read_variable(client, path, frame_id),
+                        f"stack[{i}].scopes.{scope}.{path}",
                     )
 
-    def _read_variable(self, client: str, path: str) -> Observed:
-        resp = self._request(client, "variables", {"path": path})
+    def _read_variable(self, client: str, path: str, frame_id: Json = None) -> Observed:
+        args: JsonObj = {"path": path}
+        if isinstance(frame_id, int):
+            args["frameId"] = frame_id
+        resp = self._request(client, "variables", args)
         if resp.get("success") is not True:
             error = _obj(resp.get("error"))
             if error.get("code") == "UNSUPPORTED":

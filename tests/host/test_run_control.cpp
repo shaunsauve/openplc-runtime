@@ -120,7 +120,9 @@ static const int64_t kTaskNs   = 20 * kMs;
 static const int64_t kDwellNs  = 150 * kMs;  /* under the 10-period stuck limit */
 /* Probes the program reaches; the flag array is larger so the table can be filled (A032). */
 static const uint32_t kProbes  = 2048;
-enum : uint32_t { P_WITNESS = 0, P_K = 1, P_OUT = 2, P_DWELL = 3, P_L = 4 };
+enum : uint32_t { P_WITNESS = 0, P_K = 1, P_OUT = 2, P_DWELL = 3, P_L = 4, P_SUB = 5 };
+/* POU IDs (a POU's entry probe in debug-info.json): the program and the FB it calls. */
+enum : uint32_t { POU_PROG = 0, POU_SUB = 5 };
 
 static volatile uint8_t g_flags[kProbes];
 static uint8_t          g_active = 0;
@@ -152,13 +154,13 @@ static inline void probe(uint32_t id)
 /* strucpp::dbg::Frame. */
 struct Frame : strucpp_dbg_frame
 {
-    explicit Frame(const void *s)
+    Frame(uint32_t pou_id, const void *s)
     {
         linked = 0;
         at     = 0;
         if (*static_cast<volatile uint8_t *>(&g_active) & 1u)
         {
-            pou    = 0;
+            pou    = pou_id;
             self   = s;
             locals = nullptr;
             strucpp_dbg_frame_link(this);
@@ -177,11 +179,24 @@ static std::atomic<int> g_witness_st{0}, g_counter_st{0};
 static std::atomic<long> g_scans{0};
 static std::atomic<bool> g_dwell{false}, g_in_dwell{false};
 
+/* An FB instance the program calls after L: a second frame for the stack walk and stepping. */
+struct Sub
+{
+    uint16_t speed = 0;
+    void     run()
+    {
+        Frame f(POU_SUB, this);
+        probe(P_SUB);
+        speed = (uint16_t)(speed + 1);
+    }
+};
+
 struct Prog : strucpp::ProgramBase
 {
+    Sub sub;
     void run() override
     {
-        Frame f(this);
+        Frame f(POU_PROG, this);
         probe(P_WITNESS);
         m_witness   = (uint16_t)(m_witness + 1);
         g_witness_st = m_witness;
@@ -197,6 +212,8 @@ struct Prog : strucpp::ProgramBase
             g_in_dwell = false;
         }
         probe(P_L);
+        f.at = P_L; /* STRUCPP_AT: the statement making the call */
+        sub.run();
         g_scans++;
     }
     void located_range(uint32_t *o, uint32_t *c) const override
@@ -234,11 +251,20 @@ static void fk_set_time(int64_t) {}
 static strucpp::ConfigurationInstance *fk_config(void) { return &g_cfg; }
 static const strucpp::LocatedVar *fk_lv(void) { return g_lv; }
 static uint32_t fk_lv_count(void) { return 2; }
-static uint8_t  fk_arr_count(void) { return 0; }
-static uint16_t fk_elem_count(uint8_t) { return 0; }
-static uint16_t fk_size(uint8_t, uint16_t) { return 0; }
+/* The program's debug table (generated_debug.cpp): leaves 0 witness, 1 counter, 2 sub.speed. */
+static strucpp_debug_entry g_leaf_arr[3] = {
+    {&m_witness, 3, 0}, {&m_counter, 3, 0}, {&g_prog.sub.speed, 3, 0}};
+static const strucpp_debug_entry *g_leaf_arrays[1] = {g_leaf_arr};
+static uint8_t  fk_arr_count(void) { return 1; }
+static uint16_t fk_elem_count(uint8_t a) { return a == 0 ? 3 : 0; }
+static uint16_t fk_size(uint8_t a, uint16_t e) { return a == 0 && e < 3 ? 2 : 0; }
 static uint8_t  fk_set(uint8_t, uint16_t, bool, const uint8_t *, uint16_t) { return 0; }
-static uint16_t fk_read(uint8_t, uint16_t, uint8_t *) { return 0; }
+static uint16_t fk_read(uint8_t a, uint16_t e, uint8_t *dest)
+{
+    if (a != 0 || e >= 3) return 0;
+    std::memcpy(dest, g_leaf_arr[e].ptr, 2);
+    return 2;
+}
 static uint8_t  fk_write(uint8_t, uint16_t, const uint8_t *, uint16_t) { return 0; }
 
 static char g_pm_storage[16];
@@ -278,6 +304,7 @@ void *plugin_manager_try_get_symbol(PluginManager *, const char *n)
         {"strucpp_dbg_probe_count", (void *)fk_probe_count},
         {"strucpp_dbg_abi_version", (void *)fk_abi_version},
         {"strucpp_dbg_lock_depth", (void *)fk_lock_depth},
+        {STRUCPP_DEBUG_ARRAYS_SYMBOL, (void *)g_leaf_arrays},
     };
     for (auto &e : t)
         if (std::strcmp(e.name, n) == 0) return e.fn;
@@ -537,6 +564,13 @@ static std::string body_str(cJSON *m, const char *key)
     return v && cJSON_IsString(v) ? v->valuestring : "";
 }
 
+static int frame_field(cJSON *frames, int i, const char *key)
+{
+    cJSON *f = frames ? cJSON_GetArrayItem(frames, i) : nullptr;
+    cJSON *v = f ? cJSON_GetObjectItem(f, key) : nullptr;
+    return v && cJSON_IsNumber(v) ? v->valueint : -1;
+}
+
 static std::function<bool(cJSON *)> stopped_at(const char *reason, int probe_id)
 {
     return [=](cJSON *b) {
@@ -688,6 +722,47 @@ static void case_before_statement(void)
     CHECK(plc_get_state() == PLC_STATE_RUNNING, "PLC state %d after a park past the stuck limit",
           (int)plc_get_state());
 
+    /* A034, A088 (the core's part): the halted task's frames, innermost first, each with its POU,
+     * its location probe and its instance's first leaf; and leaf values read while halted. */
+    g_case = "A088 stack";
+    r      = g_link.call("stackTrace", "{\"task\":\"Main\"}");
+    cJSON *fr = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "frames");
+    CHECK(ok(r) && cJSON_GetArraySize(fr) == 1 &&
+              frame_field(fr, 0, "pou") == (int)POU_PROG && frame_field(fr, 0, "at") == (int)P_L,
+          "stackTrace at L: %s", r ? cJSON_PrintUnformatted(r) : "no response");
+    m = g_link.mark();
+    r = g_link.call("stepIn");
+    CHECK(ok(r), "stepIn refused: %s", err_code(r));
+    Msg in{};
+    CHECK(g_link.event(m, "stopped", &in, 1000, stopped_at("step", P_SUB)), "stepIn did not land in the FB");
+    CHECK(body_int(in.j, "depth") == 2, "depth %d in the FB, want 2", body_int(in.j, "depth"));
+    r  = g_link.call("stackTrace");
+    fr = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "frames");
+    cJSON *trunc = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "truncated");
+    CHECK(ok(r) && cJSON_GetArraySize(fr) == 2 && frame_field(fr, 0, "pou") == (int)POU_SUB &&
+              frame_field(fr, 0, "at") == (int)P_SUB && frame_field(fr, 0, "leaf") == 2 &&
+              frame_field(fr, 1, "pou") == (int)POU_PROG && frame_field(fr, 1, "at") == (int)P_L &&
+              cJSON_IsFalse(trunc),
+          "stackTrace in the FB: %s", r ? cJSON_PrintUnformatted(r) : "no response");
+    g_case = "A034 read";
+    r = g_link.call("readLeaves", "{\"leaves\":[1,2,99]}");
+    cJSON *vals = cJSON_GetObjectItem(cJSON_GetObjectItem(r, "body"), "values");
+    char want_c[8], want_s[8];
+    const uint16_t c_now = (uint16_t)g_counter_st.load(), s_now = g_prog.sub.speed;
+    std::snprintf(want_c, sizeof want_c, "%02x%02x", c_now & 0xFF, c_now >> 8);
+    std::snprintf(want_s, sizeof want_s, "%02x%02x", s_now & 0xFF, s_now >> 8);
+    CHECK(ok(r) && cJSON_GetArraySize(vals) == 3 &&
+              !std::strcmp(cJSON_GetArrayItem(vals, 0)->valuestring ? cJSON_GetArrayItem(vals, 0)->valuestring : "", want_c) &&
+              !std::strcmp(cJSON_GetArrayItem(vals, 1)->valuestring ? cJSON_GetArrayItem(vals, 1)->valuestring : "", want_s) &&
+              cJSON_IsNull(cJSON_GetArrayItem(vals, 2)),
+          "readLeaves %s, want [%s, %s, null]", r ? cJSON_PrintUnformatted(r) : "none", want_c, want_s);
+    g_case = "A035 step out";
+    m = g_link.mark();
+    r = g_link.call("stepOut");
+    CHECK(ok(r), "stepOut refused: %s", err_code(r));
+    CHECK(g_link.event(m, "stopped", nullptr, 1000, stopped_at("step", P_WITNESS)),
+          "stepOut of the FB, the program's last call, did not land on the next scan's first statement");
+
     /* The scan completes on continue: the next stop at K sees its outputs in the plant. */
     m = g_link.mark();
     cont();
@@ -700,6 +775,10 @@ static void case_before_statement(void)
     m = g_link.mark();
     cont();
     CHECK(g_link.event(m, "runState", nullptr, 500, state_is("RUNNING")), "no RUNNING runState");
+    g_case = "A088 running";
+    r = g_link.call("stackTrace", "{\"task\":0}");
+    CHECK(!ok(r) && !std::strcmp(err_code(r), "NOT_HALTED"), "stackTrace of a running task answered '%s'",
+          err_code(r));
 }
 
 /* A031(b): set L while the scan is in the dwell before it; the stop is in that scan, judged by

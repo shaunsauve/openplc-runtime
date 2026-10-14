@@ -369,6 +369,7 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
     t->stop.hits     = hits;
     t->stop.depth    = tl_depth;
     t->stop.since_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
+    t->stop.head     = tl_head;
     t->stop_pending.store(true, std::memory_order_release);
     if (g_host.park(tl_idx) == DBG_PARK_ABANDON) throw plc_dbg::Abandon{};
 }
@@ -550,6 +551,61 @@ extern "C" void debug_agent_clear_trap(void)
         const uint8_t v = flag_load(p);
         if (v & DBG_FLAG_TRAP) flag_store(p, (uint8_t)(v & ~DBG_FLAG_TRAP));
     }
+}
+
+extern "C" size_t debug_agent_frames(const dbg_stop_t *stop, dbg_frame_t *out, size_t max,
+                                     bool *truncated)
+{
+    *truncated = false;
+    const strucpp_dbg_frame *f = stop ? stop->head : nullptr;
+    if (!f) return 0;
+    const uint32_t gen = f->gen;
+    size_t         n   = 0;
+    for (; f && n < max; f = f->prev)
+    {
+        /* N4: frames of an earlier attach may have holes between them and the newer ones. */
+        if (f->gen != gen)
+        {
+            *truncated = true;
+            break;
+        }
+        out[n].pou  = f->pou;
+        out[n].at   = n == 0 ? stop->probe : f->at;
+        out[n].self = f->self;
+        n++;
+    }
+    if (f && n == max) *truncated = true;
+    return n;
+}
+
+namespace {
+std::mutex               g_leaf_mu;
+std::vector<const void *> g_leaf_addrs;
+}  // namespace
+
+extern "C" void debug_agent_set_leaves(const void *const *addrs, size_t count)
+{
+    std::lock_guard<std::mutex> g(g_leaf_mu);
+    g_leaf_addrs.assign(addrs, addrs + (addrs ? count : 0));
+}
+
+extern "C" long debug_agent_leaf_of(const void *self)
+{
+    std::lock_guard<std::mutex> g(g_leaf_mu);
+    if (!self) return -1;
+    long        best = -1;
+    uintptr_t   best_addr = UINTPTR_MAX;
+    const auto  s = (uintptr_t)self;
+    for (size_t i = 0; i < g_leaf_addrs.size(); ++i)
+    {
+        const auto a = (uintptr_t)g_leaf_addrs[i];
+        if (a >= s && a < best_addr)
+        {
+            best      = (long)i;
+            best_addr = a;
+        }
+    }
+    return best;
 }
 
 extern "C" bool debug_agent_take_stop(size_t task_idx, dbg_stop_t *out)

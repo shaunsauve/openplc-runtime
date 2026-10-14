@@ -86,6 +86,7 @@ TaskState    = {task: str, taskId: int, state: str, reason?: str, probe?: int, h
 Location     = {task: str, taskId: int, probe?: int}
 RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, location?: Location, since?: num}
 BpResult     = {id: int|null, probe: int, verified: bool, error?: Error}
+Frame        = {pou: int, at: int, leaf: int|null}
 
 hello                   evt {link: str, engineAbi: int, capabilities: Caps, probes: int, image: Image, params?: Params}
 beat                    evt {t: num}
@@ -114,6 +115,8 @@ runToCursor             req {session: str, probe: int, task?: TaskRef} -> {}
 stop                    req {session: str} -> {}
 restart                 req {session: str, kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {session: str, mode: str} -> {mode: str}
+stackTrace              req {session: str, task?: TaskRef} -> {task: str, taskId: int, frames: [Frame], truncated: bool}
+readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]}
 ```
 
 ### Requests, in words
@@ -131,7 +134,23 @@ setHaltMode             req {session: str, mode: str} -> {mode: str}
 | `pause` | Halts `task`, or every task when absent; the `stopped` events follow | `NOT_RUNNING`, `BAD_REQUEST` (no such task) |
 | `next`, `stepIn`, `stepOut` | Resumes only `task` (absent: the task of the most recent stop) to its next statement, over / into / out of calls; a `stopped` with reason `step` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
 | `stop` | Stops the program as STOP does; the session stays attached | `NOT_RUNNING`, `BUSY` |
+| `stackTrace` | The halted `task`'s frames (absent: the task of the most recent stop), innermost first (ADR-001 D3). `pou` is the frame's POU by its entry probe (`debug-info.json` `pous[].entryProbe`); `at` its location probe: the stop probe for the innermost frame, the calling statement's probe for the others; `leaf` the flat index of the lowest-addressed debug-table leaf at or above the frame's instance, `null` for a function or a program without the table (see "Interim instance binding"). `truncated` is true when the walk stopped at a frame of an earlier attach (N4). A task held at its scan boundary has `frames: []` (D2.5) | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
+| `readLeaves` | Each leaf's value, by flat leaf index (the `DebugMapV2` leaf order: array 0's elements, then array 1's, …, the numbering of `instances.leafBase`), as lowercase hex of the bytes `strucpp_debug_read` writes (little-endian scalars; STRING 1+126 and WSTRING 1+252 byte windows). An index the program does not have reads `null`. At most 1024 per request. Read without stopping the program, as the legacy `0x44` read is | `BAD_REQUEST` |
 | `setExceptionBreakpoints`, `cycleStep`, `runScans`, `runToCursor`, `restart`, `setHaltMode` | Defined by the link; the real core does not implement them yet and answers `UNSUPPORTED` (their capabilities are `false` in `hello`) | `UNSUPPORTED` |
+
+Function locals (VAR_INPUT, VAR_TEMP and VAR_IN_OUT of a function or method) are not readable over
+the link: STruCpp does not emit the `__dbg_locals` `offsetof` tables yet (`pous[].locals[]
+.localsSlot` is `null`), so a function frame lists its locals with no value.
+
+#### Interim instance binding
+
+ADR-002 D3 maps a frame's `this` to an instance through `strucpp_dbg_instances[]`, which STruCpp
+does not emit yet. Until it does, the core reads the program's debug table
+(`strucpp::debug::debug_arrays`, exported with external linkage by `generated_debug.cpp`) at load
+and reports, per frame, the lowest-addressed leaf at or above `this`: an instance's members
+follow its `this`, so that is the first leaf of the instance or of its first nested FB. The
+gateway picks the instance whose type is the frame POU's type and whose `leafBase` is the greatest
+at or below that leaf. Remove when STruCpp emits the instance table.
 
 Breakpoints survive a stop and are re-armed when the same program (same probe count) starts
 again. The limit (`maxBreakpoints`, 1024) counts breakpoints, one per probe; an item past it is
@@ -195,9 +214,14 @@ pm: please fold them into ADR-003 D1.3.
     name as the program's configuration gives it, which STruCpp upper-cases (`TASK Main` runs as
     `MAIN`); the core matches a request's `task` name case-insensitively, and so does the harness.
     Showing the source spelling needs STruCpp to record task names in `debug-info.json`.
+13. **POU, instance and variable names are IEC identifiers too.** `debug-info.json` carries them
+    upper-cased (`PLANTIO`, `PROG0.MOTOR1`), so the gateway reports them so, resolves variable
+    paths case-insensitively, and the harness compares `pou`, `instance`, `name` and `path`
+    case-insensitively against the oracle's source spelling. Showing the source spelling needs
+    STruCpp to record it in `debug-info.json`.
 
 ## Not built here
 
 The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), the P2 timer
-(ADR-005), forces, variables and stack frames over the link, exception breakpoints, `cycleStep`,
+(ADR-005), forces, writes, function locals over the link, exception breakpoints, `cycleStep`,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).

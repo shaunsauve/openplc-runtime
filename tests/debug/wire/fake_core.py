@@ -73,6 +73,17 @@ def debug_info(major: int = 1, minor: int = 0, build_id: str = BUILD_ID) -> Json
             "col": [c for _, c in PROBES],
         },
         "lines": {"0": sorted({ln for ln, _ in PROBES})},
+        # One program POU (entry probe 0) whose instance PROG0 has one leaf: the scan witness.
+        "pous": [{"id": 0, "name": "WIRE", "kind": "program", "entryProbe": 0, "typeId": 0,
+                  "locals": []}],
+        "types": [
+            {"id": 0, "kind": "fb", "name": "WIRE",
+             "members": [{"name": "WITNESS", "typeId": 1, "section": "VAR"}]},
+            {"id": 1, "kind": "elementary", "name": "DINT"},
+        ],
+        "instances": {"path": ["PROG0"], "typeId": [0], "leafBase": [0], "leafBaseExt": [None]},
+        "globals": [],
+        "externals": [],
     }
 
 
@@ -427,6 +438,14 @@ class FakeCore:
             self.breakpoints.clear()
             self.bp_file.clear()
             return {"removed": removed}
+        if command == "stackTrace":
+            self._need_halted()
+            frame: JsonObj = {"pou": 0, "at": self.pc, "leaf": 0}
+            return {"task": TASK, "taskId": TASK_ID, "frames": [frame], "truncated": False}
+        if command == "readLeaves":
+            # Leaf 0 is the witness, a DINT; the program has no other leaf.
+            return {"values": [struct.pack("<i", self.scan).hex() if leaf == 0 else None
+                               for leaf in _list(args.get("leaves"))]}
         if command == "setExceptionBreakpoints":
             self.exception_filters = [str(f) for f in _list(args.get("filters"))]
             return {"filters": list(self.exception_filters)}

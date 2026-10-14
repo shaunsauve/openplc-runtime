@@ -3,9 +3,19 @@
 
 """Loads the program's `debug-info.json` (ADR-002 D3) and resolves source lines to probe IDs and
 probe IDs back to source locations, the gateway's half of symbolic resolution (ADR-003 D1.3).
+It also resolves variable paths to debug-table leaves and decodes their bytes (ADR-002 D3
+"Addressing"), and maps a core frame to its POU and instance.
+
+WHY leaves are counted here: `debug-info.json` gives each instance's first leaf (`leafBase`) and
+each type's members, not each member's leaf, so a member's leaf is its instance's `leafBase` plus
+the leaves of the members before it, in STruCpp's pass-1 walk order (`debug-table-gen.ts`). The
+count is checked against every instance the table lists, and every value read is checked against
+its type's byte size, so a walk that drifts from STruCpp's is refused rather than shown.
 
 See also:
-  webserver/debug_gateway/gateway.py - uses it for setBreakpoints, runToCursor and stop events.
+  webserver/debug_gateway/gateway.py - uses it for setBreakpoints, runToCursor, stop events,
+    stackTrace, scopes and variables.
+  docs/DEBUG_CORE_LINK.md - readLeaves and stackTrace, the core's half.
   docs/DEBUG_PROTOCOL.md - "Session protocol v1", the location fields in requests and events.
 """
 
@@ -13,7 +23,9 @@ from __future__ import annotations
 
 import bisect
 import json
-from dataclasses import dataclass
+import re
+import struct
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -40,6 +52,66 @@ class Location:
         return {"file": self.file, "line": self.line, "col": self.col}
 
 
+# Elementary IEC types: struct format of the bytes strucpp_debug_read writes (little-endian).
+_FORMATS: Dict[str, str] = {
+    "BOOL": "<B", "SINT": "<b", "USINT": "<B", "BYTE": "<B",
+    "INT": "<h", "UINT": "<H", "WORD": "<H",
+    "DINT": "<i", "UDINT": "<I", "DWORD": "<I",
+    "LINT": "<q", "ULINT": "<Q", "LWORD": "<Q", "__XWORD": "<Q",
+    "REAL": "<f", "LREAL": "<d",
+    "TIME": "<q", "LTIME": "<q", "DATE": "<q", "LDATE": "<q", "TOD": "<q", "TIME_OF_DAY": "<q",
+    "LTOD": "<q", "DT": "<q", "DATE_AND_TIME": "<q", "LDT": "<q",
+}
+# STRING/WSTRING leaves are fixed windows: a length byte, then 126 UTF-8 bytes or 252 UTF-16LE.
+_STRING_SIZES = {"STRING": 127, "WSTRING": 253}
+# The only string capacity the debug table registers (debug-table-gen.ts DISPATCH_STRING_CAPACITY).
+_DISPATCH_STRING_CAPACITY = 254
+# Scope names by declaration section (ADR-002 F074).
+SCOPE_OF_SECTION = {
+    "VAR_INPUT": "inputs", "VAR_OUTPUT": "outputs", "VAR_IN_OUT": "inOuts", "VAR": "members",
+    "VAR_TEMP": "temps", "VAR_EXTERNAL": "externals",
+}
+# Sections the pass-1 leaf walk covers in an FB, and in a program (no VAR_IN_OUT there).
+_FB_SECTIONS = ("VAR", "VAR_INPUT", "VAR_OUTPUT", "VAR_IN_OUT")
+_PROGRAM_SECTIONS = ("VAR", "VAR_INPUT", "VAR_OUTPUT")
+_SUBSCRIPT = re.compile(r"\[([^\]]*)\]")
+
+
+@dataclass
+class TypeInfo:
+    id: int
+    kind: str
+    name: Optional[str]
+    members: List[JsonObj] = field(default_factory=list)
+    dims: List[Tuple[int, int]] = field(default_factory=list)
+    elem: Optional[int] = None
+    values: List[Tuple[str, int]] = field(default_factory=list)
+    base: Optional[int] = None
+    length: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class Pou:
+    id: int
+    name: str
+    kind: str
+    entry_probe: int
+    type_id: Optional[int]
+    locals: Tuple[Tuple[str, Optional[int], str], ...]  # (name, typeId, section)
+
+
+@dataclass(frozen=True)
+class Node:
+    """A resolved variable: its display path, type and first leaf. `program` marks a program
+    instance's root, whose leaf walk omits VAR_IN_OUT."""
+
+    path: str
+    type_id: int
+    leaf: int
+    program: bool = False
+    pou: Optional[int] = None  # the POU whose VAR_EXTERNALs are reachable from this node
+
+
 class DebugInfo:
     def __init__(self, doc: JsonObj) -> None:
         self.major = doc.get("major") if isinstance(doc.get("major"), int) else None
@@ -60,10 +132,65 @@ class DebugInfo:
         self.p_file = _ints(probes.get("file"))
         self.p_line = _ints(probes.get("line"))
         self.p_col = _ints(probes.get("col"))
+        self.p_pou = _ints(probes.get("pou"))
         self.lines: Dict[int, List[int]] = {}
         for key, lines in _obj(doc.get("lines")).items():
             if key.isdigit():
                 self.lines[int(key)] = sorted(_ints(lines))
+        self.types: Dict[int, TypeInfo] = {}
+        for t in doc.get("types") or []:
+            t_obj = _obj(t)
+            tid = t_obj.get("id")
+            if not isinstance(tid, int):
+                continue
+            name = t_obj.get("name")
+            self.types[tid] = TypeInfo(
+                tid,
+                str(t_obj.get("kind") or ""),
+                name if isinstance(name, str) else None,
+                [_obj(m) for m in t_obj.get("members") or []],
+                [(d[0], d[1]) for d in t_obj.get("dims") or [] if isinstance(d, list) and len(d) == 2],
+                t_obj.get("elem") if isinstance(t_obj.get("elem"), int) else None,
+                [(str(v[0]), int(v[1])) for v in t_obj.get("values") or [] if isinstance(v, list) and len(v) == 2],
+                t_obj.get("base") if isinstance(t_obj.get("base"), int) else None,
+                t_obj.get("length") if isinstance(t_obj.get("length"), int) else None,
+            )
+        self.pous: Dict[int, Pou] = {}
+        self.pou_by_entry: Dict[int, Pou] = {}
+        for p in doc.get("pous") or []:
+            p_obj = _obj(p)
+            if not isinstance(p_obj.get("id"), int) or not isinstance(p_obj.get("entryProbe"), int):
+                continue
+            pou = Pou(
+                p_obj["id"], str(p_obj.get("name")), str(p_obj.get("kind")), p_obj["entryProbe"],
+                p_obj.get("typeId") if isinstance(p_obj.get("typeId"), int) else None,
+                tuple(
+                    (str(_obj(v).get("name")), _obj(v).get("typeId") if isinstance(_obj(v).get("typeId"), int) else None,
+                     str(_obj(v).get("kind")))
+                    for v in p_obj.get("locals") or []
+                ),
+            )
+            self.pous[pou.id] = pou
+            self.pou_by_entry[pou.entry_probe] = pou
+        inst = _obj(doc.get("instances"))
+        paths = inst.get("path") if isinstance(inst.get("path"), list) else []
+        self.instances: List[Tuple[str, int, int]] = [
+            (str(path), tid, base)
+            for path, tid, base in zip(paths, inst.get("typeId") or [], inst.get("leafBase") or [])
+            if isinstance(tid, int) and isinstance(base, int)
+        ]
+        self.globals: Dict[str, Tuple[str, int, int]] = {}
+        for g in doc.get("globals") or []:
+            g_obj = _obj(g)
+            if isinstance(g_obj.get("typeId"), int) and isinstance(g_obj.get("leafBase"), int):
+                name = str(g_obj.get("name"))
+                self.globals[name.upper()] = (name, g_obj["typeId"], g_obj["leafBase"])
+        self.externals: Dict[int, List[str]] = {}
+        for e in doc.get("externals") or []:
+            e_obj = _obj(e)
+            if isinstance(e_obj.get("pou"), int) and isinstance(e_obj.get("name"), str):
+                self.externals.setdefault(e_obj["pou"], []).append(e_obj["name"])
+        self._leaf_counts: Dict[Tuple[int, bool], int] = {}
 
     @classmethod
     def load(cls, path: Path) -> Optional["DebugInfo"]:
@@ -130,3 +257,244 @@ class DebugInfo:
             return None
         col = self.p_col[probe] if probe < len(self.p_col) else 0
         return Location(path, self.p_line[probe], col)
+
+    # ------------------------------------------------------------------ frames and variables
+
+    def pou_of_type(self, type_id: int) -> Optional[Pou]:
+        return next((p for p in self.pous.values() if p.type_id == type_id), None)
+
+    def instance_of(self, leaf: Optional[int], pou: Pou) -> Optional[str]:
+        """The instance of `pou` whose `this` the core mapped to `leaf` (DEBUG_CORE_LINK.md,
+        "Interim instance binding"): the same type, the greatest leafBase at or below the leaf."""
+        if leaf is None or pou.type_id is None:
+            return None
+        best: Optional[Tuple[int, str]] = None
+        for path, tid, base in self.instances:
+            if tid == pou.type_id and base <= leaf and (best is None or base > best[0]):
+                best = (base, path)
+        return best[1] if best else None
+
+    def leaf_count(self, type_id: int, program: bool = False) -> int:
+        """Leaves of one value of the type in STruCpp's pass-1 walk."""
+        key = (type_id, program)
+        if key in self._leaf_counts:
+            return self._leaf_counts[key]
+        self._leaf_counts[key] = 0  # a recursive type has no leaves rather than no end
+        t = self.types.get(type_id)
+        n = 0
+        if t is None:
+            n = 0
+        elif t.kind == "elementary":
+            n = 1 if (t.name or "").upper() in _FORMATS or (t.name or "").upper() in _STRING_SIZES else 0
+        elif t.kind == "string":
+            n = 1 if t.length in (None, _DISPATCH_STRING_CAPACITY) else 0
+        elif t.kind in ("enum", "subrange"):
+            n = 1
+        elif t.kind in ("struct", "fb"):
+            sections = _PROGRAM_SECTIONS if program else _FB_SECTIONS
+            for m in t.members:
+                if t.kind == "fb" and m.get("section") not in sections:
+                    continue
+                if isinstance(m.get("typeId"), int):
+                    n += self.leaf_count(m["typeId"])
+        elif t.kind == "array" and t.elem is not None:
+            count = 1
+            for lo, hi in t.dims:
+                count *= max(0, hi - lo + 1)
+            n = count * self.leaf_count(t.elem)
+        self._leaf_counts[key] = n
+        return n
+
+    def type_name(self, type_id: Optional[int]) -> str:
+        t = self.types.get(type_id) if type_id is not None else None
+        if t is None:
+            return "?"
+        if t.kind == "array":
+            dims = ", ".join(f"{lo}..{hi}" for lo, hi in t.dims)
+            return f"ARRAY[{dims}] OF {self.type_name(t.elem)}"
+        if t.kind == "string" and t.length is not None:
+            return f"STRING({t.length})"
+        return t.name or t.kind
+
+    def _member_leaf(self, node: Node, name: str) -> Optional[Node]:
+        t = self.types.get(node.type_id)
+        if t is None or t.kind not in ("struct", "fb"):
+            return None
+        sections = _PROGRAM_SECTIONS if node.program else _FB_SECTIONS
+        leaf = node.leaf
+        for m in t.members:
+            tid = m.get("typeId")
+            if t.kind == "fb" and m.get("section") not in sections:
+                continue
+            if not isinstance(tid, int):
+                continue
+            if str(m.get("name")).upper() == name.upper():
+                path = f"{node.path}.{m.get('name')}"
+                sub_pou = self.pou_of_type(tid) if self.types.get(tid, TypeInfo(0, "", None)).kind == "fb" else None
+                return Node(path, tid, self._instance_leaf(path, leaf), pou=sub_pou.id if sub_pou else None)
+            leaf += self.leaf_count(tid)
+        return None
+
+    def _instance_leaf(self, path: str, computed: int) -> int:
+        """The instance table's leafBase where it lists the path; it must agree with the walk."""
+        for p, _tid, base in self.instances:
+            if p.upper() == path.upper():
+                if base != computed:
+                    raise Refusal(
+                        ErrorCode.INTERNAL,
+                        f"The debug information's leaf count for '{path}' ({computed}) disagrees "
+                        f"with its instance table ({base}).",
+                    )
+                return base
+        return computed
+
+    def resolve(self, path: str, frame_instance: Optional[str] = None,
+                frame_pou: Optional[Pou] = None) -> Node:
+        """A variable path (`PROG0.motor1.pid.out`, `G_SEG.a.x`, `PROG0.arr[4]`; case-insensitive),
+        or a name relative to a frame's instance or its POU's externals."""
+        tokens = self._tokens(path)
+        if not tokens:
+            raise Refusal(ErrorCode.BAD_REQUEST, "A variable path must not be empty.")
+        node = self._root(tokens[0])
+        if node is None and frame_instance is not None:
+            node = self._root(frame_instance.split(".")[0])
+            if node is not None:
+                tokens = self._tokens(frame_instance) + tokens
+        if node is None and frame_pou is not None:
+            for ext in self.externals.get(frame_pou.id, []):
+                if ext.upper() == tokens[0].upper():
+                    node = self._root(ext)
+        if node is None:
+            raise self._no_such(path)
+        for tok in tokens[1:]:
+            nxt = self._step(node, tok)
+            if nxt is None:
+                raise self._no_such(path)
+            node = nxt
+        return node
+
+    @staticmethod
+    def _tokens(path: str) -> List[str]:
+        out: List[str] = []
+        for part in path.split("."):
+            m = re.match(r"^([^\[]*)((?:\[[^\]]*\])*)$", part.strip())
+            if m is None:
+                raise Refusal(ErrorCode.BAD_REQUEST, f"'{path}' is not a variable path.")
+            if m.group(1):
+                out.append(m.group(1))
+            out.extend(f"[{s}]" for s in _SUBSCRIPT.findall(m.group(2)))
+        return out
+
+    def _no_such(self, path: str) -> Refusal:
+        return Refusal(ErrorCode.INVALID_LOCATION, f"The running program has no variable '{path}'.",
+                       {"path": path})
+
+    def _root(self, name: str) -> Optional[Node]:
+        for path, tid, base in self.instances:
+            if "." not in path and path.upper() == name.upper():
+                pou = self.pou_of_type(tid)
+                return Node(path, tid, base, program=True, pou=pou.id if pou else None)
+        g = self.globals.get(name.upper())
+        if g is not None:
+            return Node(g[0], g[1], g[2])
+        return None
+
+    def _step(self, node: Node, tok: str) -> Optional[Node]:
+        t = self.types.get(node.type_id)
+        if t is None:
+            return None
+        if tok.startswith("["):
+            if t.kind != "array" or t.elem is None:
+                return None
+            try:
+                idx = [int(x) for x in tok[1:-1].split(",")]
+            except ValueError:
+                return None
+            if len(idx) != len(t.dims):
+                return None
+            flat = 0
+            for i, (lo, hi) in zip(idx, t.dims):
+                if not lo <= i <= hi:
+                    return None
+                flat = flat * (hi - lo + 1) + (i - lo)
+            return Node(f"{node.path}{tok}", t.elem, node.leaf + flat * self.leaf_count(t.elem))
+        found = self._member_leaf(node, tok)
+        if found is None and node.pou is not None:
+            for ext in self.externals.get(node.pou, []):
+                if ext.upper() == tok.upper():
+                    found = self._root(ext)
+        return found
+
+    def children(self, node: Node) -> List[Tuple[str, Node]]:
+        """The immediate children of a composite value, one level (A089)."""
+        t = self.types.get(node.type_id)
+        if t is None:
+            return []
+        out: List[Tuple[str, Node]] = []
+        if t.kind == "array" and t.elem is not None:
+            ranges = [list(range(lo, hi + 1)) for lo, hi in t.dims]
+            combos: List[List[int]] = [[]]
+            for r in ranges:
+                combos = [c + [i] for c in combos for i in r]
+            for c in combos:
+                tok = "[" + ",".join(str(i) for i in c) + "]"
+                child = self._step(node, tok)
+                if child is not None:
+                    out.append((tok, child))
+            return out
+        if t.kind in ("struct", "fb"):
+            for m in t.members:
+                if t.kind == "fb" and m.get("section") not in (_PROGRAM_SECTIONS if node.program else _FB_SECTIONS):
+                    continue
+                child = self._member_leaf(node, str(m.get("name")))
+                if child is not None:
+                    out.append((str(m.get("name")), child))
+            for ext in self.externals.get(node.pou, []) if node.pou is not None else []:
+                g = self._root(ext)
+                if g is not None:
+                    out.append((ext, g))
+        return out
+
+    def is_elementary(self, type_id: int) -> bool:
+        t = self.types.get(type_id)
+        return t is not None and t.kind in ("elementary", "enum", "subrange", "string")
+
+    def decode(self, type_id: int, hex_value: Optional[str], leaf: int) -> Json:
+        """A leaf's bytes as a JSON value; an enum as its name. Refuses a size that is not the
+        type's: the debug information then does not describe the running program."""
+        t = self.types.get(type_id)
+        if t is None or hex_value is None:
+            return None
+        if t.kind in ("enum", "subrange") and t.base is not None:
+            raw = self.decode(t.base, hex_value, leaf)
+            if t.kind == "enum":
+                return next((n for n, v in t.values if v == raw), raw)
+            return raw
+        name = (t.name or "").upper() if t.kind == "elementary" else "STRING"
+        data = bytes.fromhex(hex_value)
+        if name in _STRING_SIZES:
+            if len(data) != _STRING_SIZES[name] or not data:
+                raise self._size_mismatch(leaf, name, len(data))
+            n = data[0]
+            body = data[1:]
+            if name == "STRING":
+                return body[:n].decode("utf-8", errors="replace")
+            return body[: 2 * n].decode("utf-16-le", errors="replace")
+        fmt = _FORMATS.get(name)
+        if fmt is None:
+            return None
+        if len(data) != struct.calcsize(fmt):
+            raise self._size_mismatch(leaf, name, len(data))
+        value = struct.unpack(fmt, data)[0]
+        if name == "BOOL":
+            return value != 0
+        return value
+
+    @staticmethod
+    def _size_mismatch(leaf: int, name: str, got: int) -> Refusal:
+        return Refusal(
+            ErrorCode.STALE_BUILD,
+            f"Leaf {leaf} of the running program is {got} bytes, not a {name}: the debug "
+            f"information does not describe the running program.",
+            {"reason": "debugInfo", "leaf": leaf},
+        )

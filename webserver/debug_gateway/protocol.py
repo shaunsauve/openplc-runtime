@@ -195,6 +195,27 @@ COMMANDS: Mapping[str, Command] = {
             local=True,
         ),
         _cmd("stop", Kind.CONTROL, ("control",)),
+        # Inspection of a halted task (ADR-001 D3, ADR-002 D3): answered by the gateway from the
+        # core's stackTrace and readLeaves and the program's debug-info.json.
+        _cmd(
+            "stackTrace",
+            Kind.READ,
+            ("probes",),
+            {**_TASK, "startFrame": Arg("int", minimum=0), "levels": Arg("int", minimum=0)},
+            probe_dependent=True,
+            local=True,
+        ),
+        _cmd("scopes", Kind.READ, ("probes",), {"frameId": Arg("int", True, minimum=0)},
+             probe_dependent=True, local=True),
+        _cmd(
+            "variables",
+            Kind.READ,
+            ("probes",),
+            {"variablesReference": Arg("int", minimum=1), "path": Arg("str"),
+             "frameId": Arg("int", minimum=0)},
+            probe_dependent=True,
+            local=True,
+        ),
         _cmd(
             "restart",
             Kind.CONTROL,
