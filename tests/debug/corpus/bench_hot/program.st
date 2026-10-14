@@ -1,5 +1,5 @@
 (* corpus: bench_hot
-   criteria: A010 A027
+   criteria: A010 A027 A220
    fc: FC-TST-1 FC-PERF-1
    tags: bench
    witness: Main PROG0.witness %QD0

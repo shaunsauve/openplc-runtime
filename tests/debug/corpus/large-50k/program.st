@@ -1,5 +1,5 @@
 (* corpus: large-50k
-   criteria: A021
+   criteria: A021 A218 A219
    fc: FC-TST-1 FC-DI-12
    witness: Main PROG0.witness %QD0
    ASSUMED: "50,000 leaf variables (generated)" is met by declarations that

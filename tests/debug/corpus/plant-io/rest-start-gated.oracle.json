@@ -6,7 +6,7 @@
   "kind": "runtime",
   "criteria": ["A208"],
   "title": "With the start gate set in SAFE_STOPPED, STOPPED and ERROR, a REST start without control is refused and one with control runs",
-  "notes": "The audit log's content (refused entry naming the user, grant naming the granter) is fetched but not matched: the format has no contains-matcher over a log. ASSUMED: test users `control` (holds the control right) and `nocontrol` exist on the runtime; a refused REST start answers a non-200 status. `plugin` injections drive the corpus test plugin (`request_plc_start`, `segv_in_cycle_start`) and the VPP switch plugin (`run`, `stop`).",
+  "notes": "ASSUMED: GET /api/debug/audit answers {entries: [{time, user, action, target, outcome}]} as auditRead does. ASSUMED: test users `control` (holds the control right) and `nocontrol` exist on the runtime; a refused REST start answers a non-200 status. `plugin` injections drive the corpus test plugin (`request_plc_start`, `segv_in_cycle_start`) and the VPP switch plugin (`run`, `stop`).",
   "setup": {"session": "controller", "params": {"P1_s": 2, "P2_s": 15}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true, "%IX0.1": true, "%IW0": 1234, "%ID0": 99999}}},
   "steps": [
     {"request": "initialize", "expect": {"success": true}},
@@ -63,6 +63,7 @@
     {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 3}}}},
     {"observe": "status", "expect": {"state": "RUNNING", "fields": {"safeStop": {"~absent": true}}}},
     {"observe": "plant", "throughout": true, "note": "from ERROR: held values, never 0", "expect": {"outputs": {"%QX0.0": true, "%QW0": 1234, "%QD2": 99999, "%QD3": {"~approx": [617.0, 0.001]}, "%QW100": 1235, "%QW1": 1234, "%QW2": 1234, "%QW3": 2468}}},
-    {"inject": "rest", "args": {"method": "GET", "path": "/api/debug/audit", "user": "admin"}, "expect": {"status": 200, "body": {"~any": true}}, "note": "the refused entries name nocontrol and the grants name control; read by the audit criterion"}
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/debug/audit", "user": "admin"}, "expect": {"status": 200, "body": {"entries": {"~contains": {"user": "nocontrol", "action": "start", "outcome": {"~ne": "ok"}}}}}, "note": "a refused start names nocontrol"},
+    {"inject": "rest", "args": {"method": "GET", "path": "/api/debug/audit", "user": "admin"}, "expect": {"status": 200, "body": {"entries": {"~contains": {"user": "control", "action": "start", "outcome": "ok"}}}}, "note": "the grant names control"}
   ]
 }
