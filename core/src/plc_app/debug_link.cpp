@@ -61,6 +61,8 @@ const int   kMaxLeaves   = 1024;
 const int   kMaxLeafSize = 512;
 const int   kTickMs = 10;
 const int   kBeatMs = 250;
+/* ADR-005 D4.2: P2, the heartbeat timeout, when attach names none; and its allowed range. */
+const double kP2DefaultS = 15, kP2MinS = 5, kP2MaxS = 600;
 
 std::mutex       g_send_mu;
 int              g_client_fd = -1;
@@ -90,6 +92,10 @@ struct Session
 {
     std::string user;
     bool        controller = false;
+    /* ADR-005 D4.4: the core owns the P2 timer, so a gateway that dies still loses the session.
+     * Any request naming the session (beatClient included) is a heartbeat. */
+    int64_t     last_beat_ns = 0;
+    int64_t     p2_ns        = 0;
 };
 /* A breakpoint the link armed: its DAP id and the file whose setBreakpoints owns it. */
 struct Bp
@@ -398,10 +404,13 @@ bool cycle_on_hold_locked(size_t i, const char *name, int64_t since)
     return true;
 }
 
-/* One agent pass: hello, stops, boundary holds, resumes, counters, run state. */
+void expire_sessions_locked(void);
+
+/* One agent pass: P2 expiry, hello, stops, boundary holds, resumes, counters, run state. */
 void agent_pass(void)
 {
     std::lock_guard<std::mutex> g(g_mu);
+    expire_sessions_locked();
     push_hello_locked();
     char   names[DBG_MAX_TASKS][32];
     size_t n = plc_get_state() == PLC_STATE_RUNNING ? task_count(names) : 0;
@@ -682,6 +691,51 @@ void end_session_locked(const std::string &id, bool running)
     }
 }
 
+/* ADR-005 D4.6: a session lost past P2. A lost controller with a task halted safe-stops (outputs
+ * held) instead of resuming; anything else ends as a detach. True if a safe-stop was requested. */
+bool lose_session_locked(const std::string &id, bool running)
+{
+    auto it = g_sessions.find(id);
+    if (it == g_sessions.end()) return false;
+    bool halted = g_pausing;
+    for (const auto &v : g_view) halted = halted || v.halted;
+    const bool safe_stop = running && halted && it->second.controller;
+    if (!safe_stop)
+    {
+        end_session_locked(id, running);
+        return false;
+    }
+    g_sessions.erase(it);
+    if (g_sessions.empty()) debug_agent_set_attached(false);
+    clear_breakpoints_locked();
+    g_pausing = false;
+    debug_agent_clear_trap();
+    const bool requested = plc_request_safe_stop("heartbeat_timeout");
+    log_warn("Debug controller lost past P2 while halted: safe-stop %s",
+             requested ? "requested" : "refused (no dispatcher)");
+    return requested;
+}
+
+/* The core's P2 timer, on the agent's tick: whether or not a gateway is connected. */
+void expire_sessions_locked(void)
+{
+    const int64_t now = mono_ns();
+    std::vector<std::string> lost;
+    for (const auto &s : g_sessions)
+        if (now - s.second.last_beat_ns > s.second.p2_ns) lost.push_back(s.first);
+    if (lost.empty()) return;
+    const bool running = plc_get_state() == PLC_STATE_RUNNING;
+    for (const auto &id : lost)
+    {
+        log_warn("[debug] session %s timed out after P2 on the core", id.c_str());
+        lose_session_locked(id, running);
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddStringToObject(b, "session", id.c_str());
+        cJSON_AddStringToObject(b, "reason", "heartbeat_timeout");
+        send_event("sessionEnded", b);
+    }
+}
+
 /* The parked task's frames (ADR-001 D3), innermost first. A task held at its scan boundary has
  * reached no probe: an empty stack (D2.5). Under g_mu, so no step or continue can resume the task
  * during the walk. */
@@ -788,14 +842,18 @@ Reply handle(const char *command, cJSON *args)
     if (!std::strcmp(command, "status")) return success(run_state_locked());
     if (!std::strcmp(command, "attach"))
     {
-        cJSON *user = arg(args, "user"), *role = arg(args, "role");
+        cJSON *user = arg(args, "user"), *role = arg(args, "role"), *p2 = arg(args, "p2");
         if (!cJSON_IsString(user) || !cJSON_IsString(role))
             return fail("BAD_REQUEST", "attach needs a user and a role");
+        if (p2 && (!cJSON_IsNumber(p2) || p2->valuedouble < kP2MinS || p2->valuedouble > kP2MaxS))
+            return fail("BAD_REQUEST", "attach p2 must be a number of seconds from 5 to 600");
         char id[24];
         std::snprintf(id, sizeof id, "s%d", g_next_session++);
         Session s;
         s.user       = user->valuestring;
         s.controller = !std::strcmp(role->valuestring, "controller");
+        s.last_beat_ns = mono_ns();
+        s.p2_ns        = (int64_t)((p2 ? p2->valuedouble : kP2DefaultS) * 1e9);
         g_sessions[id] = s;
         debug_agent_set_attached(true);
         cJSON *b = cJSON_CreateObject();
@@ -816,6 +874,7 @@ Reply handle(const char *command, cJSON *args)
     if (!cJSON_IsString(sid)) return fail("BAD_REQUEST", "the request needs a session");
     if (!g_sessions.count(sid->valuestring)) return fail("SESSION_ENDED", "no such session on the core");
     const std::string session = sid->valuestring;
+    g_sessions[session].last_beat_ns = mono_ns();
 
     if (!std::strcmp(command, "beatClient")) return success();
     if (!std::strcmp(command, "detach"))
@@ -824,22 +883,11 @@ Reply handle(const char *command, cJSON *args)
          * (outputs held) instead of resuming; otherwise it is a plain detach. */
         cJSON     *why  = arg(args, "reason");
         const bool lost = cJSON_IsString(why) && !std::strcmp(why->valuestring, "heartbeat_timeout");
-        bool halted = g_pausing;
-        for (const auto &v : g_view) halted = halted || v.halted;
-        const bool safe_stop = lost && running && halted && g_sessions[session].controller;
-        if (safe_stop)
-        {
-            g_sessions.erase(session);
-            if (g_sessions.empty()) debug_agent_set_attached(false);
-            clear_breakpoints_locked();
-            g_pausing = false;
-            debug_agent_clear_trap();
-        }
+        bool safe_stopped = false;
+        if (lost)
+            safe_stopped = lose_session_locked(session, running);
         else
             end_session_locked(session, running);
-        const bool safe_stopped = safe_stop && plc_request_safe_stop("heartbeat_timeout");
-        if (safe_stop) log_warn("Debug controller lost past P2 while halted: safe-stop %s",
-                                safe_stopped ? "requested" : "refused (no dispatcher)");
         cJSON *b = cJSON_CreateObject();
         cJSON_AddItemToObject(b, "forces", cJSON_CreateArray());
         cJSON_AddBoolToObject(b, "safeStopped", safe_stopped);

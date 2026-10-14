@@ -497,6 +497,44 @@ def main() -> int:
         not VIOLATIONS,
         f"every gateway frame matches docs/DEBUG_PROTOCOL.md sessionspec ({'; '.join(VIOLATIONS[:5]) or 'no violations'})",
     )
+    # ---- A057 / R6: the gateway dies while halted; the core's own P2 timer safe-stops ----
+    # Last, because it kills the gateway. The timer runs from the core's last beat (ADR-005
+    # D4.4), which the heartbeat put at most P1 before the kill.
+    gw_pid = int(os.environ.get("GW_PID", "0"))
+    c = Client(url, token)
+    c.initialize()
+    c.heartbeat_every(p1)
+    c.request("setBreakpoints", {"file": "program.st", "lines": [m["K"]]})
+    check("A057", c.event("stopped") is not None and gw_pid > 0, f"halted at K (gateway pid {gw_pid})")
+    time.sleep(0.5)
+    held = plant.sample()
+    t_kill = now_ms()
+    os.kill(gw_pid, 9)
+    c.beat_stop.set()
+    time.sleep(P2 - p1 - 0.3)
+    check(
+        "A057",
+        core("STATUS") == "STATUS:RUNNING",
+        f"gateway killed: no safe-stop within P2 - P1 ({core('STATUS')})",
+    )
+    safe = wait_status("SAFE_STOPPED", 3.0)
+    lost_s = (now_ms() - t_kill) / 1000.0
+    check(
+        "A057",
+        safe and lost_s <= P2 + 1.0 + 0.2,
+        f"gateway killed: {'SAFE_STOPPED' if safe else 'still ' + core('STATUS')} {lost_s:.2f} s after "
+        f"(P2 {P2:g} s from the last beat, bound P2 + 1 s)",
+    )
+    time.sleep(1.0)
+    after = plant.history(t_kill)
+    frozen = {s.witness["Main"] for s in after}
+    changed = sorted({k for s in after for k, v in s.outputs.items() if held.outputs.get(k) != v})
+    check(
+        "A057",
+        len(frozen) == 1 and not changed and any(v not in (0, False) for v in held.outputs.values()),
+        f"gateway killed: scan frozen and every output held, none zeroed (scans {sorted(frozen)[:3]}, changed: {changed})",
+    )
+
     print(f"sec e2e: {len(FAILS)} failed" if FAILS else "sec e2e: all checks passed", flush=True)
     return 1 if FAILS else 0
 

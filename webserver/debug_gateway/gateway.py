@@ -105,6 +105,8 @@ class ClientSession:
     resume_hash: str = ""
     # Any message from the session's client is a heartbeat (ADR-005 D4.3).
     last_seen: float = field(default_factory=time.monotonic)
+    # When a beat last reached the core's own P2 timer (ADR-005 D4.4).
+    core_beat: float = field(default_factory=time.monotonic)
 
 
 class DebugGateway:
@@ -177,6 +179,19 @@ class DebugGateway:
                 session.last_seen = max(session.last_seen, time.monotonic())
             logger.info("Debug session of %s lost its transport (%s)", session.user, reason)
 
+    def _beat_core(self, session: ClientSession) -> None:
+        """ADR-005 D4.3/D4.4: any client message is a heartbeat, and the core runs the timer that
+        survives this process. Requests answered here never reach the core, so a beat is forwarded
+        at most once per P1 for whatever the client sends."""
+        now = time.monotonic()
+        if session.core_session is None or now - session.core_beat < self.params.p1_s:
+            return
+        session.core_beat = now
+        try:
+            self._core("beatClient", {"session": session.core_session})
+        except (Refusal, CoreUnavailable):
+            pass  # a lost or ended core session is reported by its own sessionEnded
+
     def _watch(self) -> None:
         while not self._closed.wait(WATCH_TICK_S):
             now = time.monotonic()
@@ -211,6 +226,8 @@ class DebugGateway:
             live = self.sessions.get(sid)
             if live is not None:
                 live.last_seen = time.monotonic()
+        if live is not None:
+            self._beat_core(live)
         try:
             msg, size = self._parse(raw)
             seq = msg.get("seq")
@@ -406,7 +423,9 @@ class DebugGateway:
             self.sessions[sid] = session  # reserves the slot while the core attaches
             self.ended.pop(sid, None)
         try:
-            session.core_session = self._core("attach", {"user": user, "role": role}).get("session")
+            session.core_session = self._core(
+                "attach", {"user": user, "role": role, "p2": self.params.p2_s}
+            ).get("session")
         except (Refusal, CoreUnavailable):
             with self.lock:
                 self.sessions.pop(sid, None)

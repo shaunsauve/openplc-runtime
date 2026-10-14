@@ -96,7 +96,7 @@ runState                evt RunState
 output                  evt {category: str, kind?: str, count?: int, task?: str, taskId?: int, scan?: int, text?: str}
 sessionEnded            evt {session: str, reason: str}
 
-attach                  req {user: str, role: str} -> {session: str}
+attach                  req {user: str, role: str, p2?: num} -> {session: str}
 detach                  req {session: str, reason?: str} -> {forces: list, safeStopped?: bool}
 terminate               req {session: str} -> {}
 beatClient              req {session: str} -> {}
@@ -123,10 +123,10 @@ readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]
 
 | Command | Semantics | Errors |
 |---|---|---|
-| `attach` | Opens a core session for a gateway client; `role` is `controller` or `observer`. The first session sets the program's session byte, so probed clones run; `by` in halted states is the controller's `user` | `BAD_REQUEST` |
+| `attach` | Opens a core session for a gateway client; `role` is `controller` or `observer`; `p2` is the session's heartbeat timeout in seconds (5 to 600, default 15; the gateway sends its `debug.conf` P2). The first session sets the program's session byte, so probed clones run; `by` in halted states is the controller's `user` | `BAD_REQUEST` |
 | `detach` | Ends the session. Ending the controller's session clears its breakpoints and the trap and resumes every halted task; the last session clears the session byte. With `reason: "heartbeat_timeout"` (the gateway's P2 expiry, ADR-005 D4.6) the controller's session ends the same way except that, if any task is halted, the core safe-stops (`plc_request_safe_stop`, outputs held) instead of resuming, and answers `safeStopped: true` | `SESSION_ENDED` |
 | `terminate` | As `detach`, then stops the program (DAP `terminate`) | `SESSION_ENDED`, `BUSY` |
-| `beatClient` | The client's heartbeat (ADR-005 D4), forwarded by the gateway; the core keeps no P2 timer yet (see "Not built here") | `SESSION_ENDED` |
+| `beatClient` | The client's heartbeat (ADR-005 D4), forwarded by the gateway at least once per P1 while its client sends anything. Any request naming a session is a heartbeat; `beatClient` is one with no other effect. **The core owns the P2 timer** (ADR-005 D4.4), checked on the agent's 10 ms tick whether or not a gateway is connected: a session silent past its P2 ends as `detach {reason: "heartbeat_timeout"}` does (a lost controller with a task halted safe-stops, outputs held) and the core sends `sessionEnded {session, reason: "heartbeat_timeout"}`. A gateway that dies therefore cannot leave a halt in place (R6) | `SESSION_ENDED` |
 | `status` | The `runState` body, answered at once. `sessions` lists the session IDs the core holds | — |
 | `setBreakpoints` | Replaces the breakpoints of file `fileId` with `probes`. An item is a probe ID, or `{probe, condition?, hitCount?}` (`condition`: base64 bytecode ≤ 512 B, see below; `hitCount`: stop from the n-th hit). The result lists one `BpResult` per item, in order; one failing item (`INVALID_LOCATION`, `LIMIT_EXCEEDED`, `BAD_REQUEST`) does not fail the others. A breakpoint keeps its `id` while its probe stays armed | `NO_PROBES` |
 | `clearAllBreakpoints` | Every file's breakpoints; `removed` counts them | `NO_PROBES` |
@@ -171,7 +171,7 @@ stack. It has no variable loads, so `capabilities.conditional` is `false`.
 | `continued` | On `continue` (`allThreadsContinued`) and on each step (`task`, `taskId`) |
 | `runState` | On every change, and once to a newly connected peer. `state` is one of `RUNNING PAUSED HALTED_AT_BP STOPPED ERROR SAFE_STOPPED EMPTY INIT TRANSITIONING`: `HALTED_AT_BP` when any task is parked at a breakpoint, `PAUSED` when any task is otherwise halted. A task's `state` is `running held parked abandoning` |
 | `output` | `category: "runtime"` with `kind` (`conditionError`, `breakpointSkippedLocked`) and `count`; `category: "print"` with `task`, `taskId`, `scan` and `text` |
-| `sessionEnded` | The core ended `session` on its own (not sent by the real core yet) |
+| `sessionEnded` | The core ended `session` on its own: `reason` `heartbeat_timeout` when its P2 expired |
 
 An event whose body has `session` goes only to that session's client; otherwise it is broadcast.
 
@@ -233,9 +233,6 @@ same way) serves the block.
 
 ## Not built here
 
-The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), the core's own P2
-timer (ADR-005 D4.4: the P2 timer runs in the gateway for now and ends a lost session with
-`detach {reason: "heartbeat_timeout"}`, so a gateway that dies while a task is halted leaves the
-halt in place until the core timer exists), forces, writes, function locals over the link,
-exception breakpoints,
+The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), forces, writes,
+function locals over the link, exception breakpoints,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).

@@ -57,7 +57,7 @@ for _ in $(seq 1 300); do [ -s /tmp/token ] && break; sleep 0.1; done
 sleep 1
 
 echo "### session security, client loss and wire checks"
-"$PY" tests/debug/plant/sec_e2e.py https://127.0.0.1:8443 /tmp/token /tmp/plant.sock "$P2" \
+GW_PID=$GW "$PY" tests/debug/plant/sec_e2e.py https://127.0.0.1:8443 /tmp/token /tmp/plant.sock "$P2" \
   /out/plc_main.log | tee /out/sec.txt
 RC=${PIPESTATUS[0]}
 kill "$GW" 2>/dev/null
