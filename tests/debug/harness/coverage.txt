@@ -100,6 +100,7 @@ A145 tests/debug/harness/runner.py::online-change-pair/halted-apply
 A146 tests/debug/harness/runner.py::online-change-pair/rebind-breakpoints
 A147 tests/debug/harness/runner.py::plant-io/interval-change
 A148 tests/debug/harness/runner.py::online-change-pair/full-download-session
+A152 tests/debug/harness/runner.py::ton-timer/plant-baseline tests/debug/harness/runner.py::ton-timer/plant-schedule-halt  # partial: the two-log comparison by virtual time is tests/debug/plant/e2e.sh (compare_logs.py); halts are 2 s and 0.3 s, not 5 s and 50 s
 A165 tests/debug/harness/runner.py::nested-fb-loop/j1-break-inspect-step
 A167 tests/debug/harness/runner.py::nested-fb-loop/j1-break-inspect-step
 A169 tests/debug/harness/runner.py::ton-timer/halt-mid-timing
@@ -137,7 +138,6 @@ A221 tests/debug/harness/runner.py::online-change-pair/forces-unregistered
 # A149 -- harness self-check: build_all.sh (FC tags, STruCpp build) and validate.py (witness contract); the 100-scan run per program has no scenario
 # A150 -- harness self-check: validate.py over every oracle and test_validate.py's mutated-oracle red-proof
 # A151 -- harness self-check: run_all.sh against a real runtime and test_runner.py's seeded defects; not an oracle
-# A152 -- compares the plant output logs of two runs by virtual time; an oracle judges one run
 
 # Core criteria with no scenario (inexpressible as an oracle, or not a scenario's job):
 # A022 -- the comparison of a local checkout against the debug info's hashes is the client library's and the DAP adapter's (as A017); the format has no local-checkout construct

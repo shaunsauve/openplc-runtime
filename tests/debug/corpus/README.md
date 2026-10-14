@@ -78,11 +78,16 @@ One JSON file per scenario, `<name>/<id>.oracle.json`, `scenario` = `<name>/<id>
     "haltPolicy": "hold|safe", "safeValues": {"%QW0": 5}, "haltMode": "allStop|nonStop",
     "startHalted": false, "session": "none|controller|observer",
     "tasks": {"Main": {"intervalMs": 500}}, "params": {"P2_s": 15},
-    "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true}}
+    "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": true},
+              "schedule": [{"atMs": 1000, "set": {"%IX0.0": true}}]}
   },
   "steps": [ ... ]                    // executed in order
 }
 ```
+
+`setup.plant.schedule` is the plant's scripted input schedule: each entry's inputs are set when
+the plant clock, the fastest task's PLC virtual time (ADR-004 D4.3), reaches `atMs` after the
+scenario starts, so a halt delays the schedule by exactly the halt (A152).
 
 A **major** bump is incompatible; a **minor** bump only adds optional fields (as ADR-002 D2).
 1.1 adds `client`, `loop`, argument symbols, the `inspect` views, `inject` results and
@@ -109,7 +114,7 @@ Each step has exactly one action key, plus optional `note`, and on `request`, `e
 | `{"wait": {"wallMs": t} \| {"vtMs": t} \| {"scans": n}}` | Wait on the harness wall clock, on PLC virtual time, or for n plant-counted scans |
 | `{"observe": "plant\|status\|session\|log", "expect": {…}, "throughout": b}` | Read back through an independent path. `throughout: true` (plant) means the expectation held for every plant sample since the previous plant observation, or since the scenario started |
 | `{"inspect": "debugInfo\|debugMap\|generatedCpp\|objectCode", "expect": <match>}` | Read the program's compiler outputs (ADR-002 D1 files), in a build or a runtime scenario; matched against the view of § Inspect views |
-| `{"inject": <kind>, "args": {…}, "expect": <match>}` | Fault injection (F154) and drives from outside the session. `killClient` drops the step's stream with no detach. `dropNetwork`, `restoreNetwork`, `delayNetwork` (`rttMs`), `rawFrame` (`frame`: `truncated`, `invalid`, `oversize`, `garbage`, with `bytes`/`count`), `sigstopRuntime`, `sigcontRuntime`, `killRuntime`, `restartRuntime` act on the transport or the process; `upload` (`build`, `debugInfo` patch, `conf`), `rest` (`method`, `path`, `user`), `socket` (`command`: a legacy core-socket line), `plugin` (`name`, `action`) drive the runtime the way its other clients do. `writeFile` (`path` under the runtime's data directory, `content`) replaces a runtime file between a stop and a start, as an operator or a crash would leave it (A216's unreadable retain record) `expect` matches what the injection answered: the response envelope, the HTTP `{status, body}`, or the socket reply line |
+| `{"inject": <kind>, "args": {…}, "expect": <match>}` | Fault injection (F154) and drives from outside the session. `killClient` drops the step's stream with no detach. `dropNetwork`, `restoreNetwork`, `delayNetwork` (`rttMs`), `rawFrame` (`frame`: `truncated`, `invalid`, `oversize`, `garbage`, with `bytes`/`count`), `sigstopRuntime`, `sigcontRuntime`, `killRuntime`, `restartRuntime` act on the transport or the process; `upload` (`build`, `debugInfo` patch, `conf`), `rest` (`method`, `path`, `user`), `socket` (`command`: a legacy core-socket line), `plugin` (`name`, `action`) drive the runtime the way its other clients do. `writeFile` (`path` under the runtime's data directory, `content`) replaces a runtime file between a stop and a start, as an operator or a crash would leave it (A216's unreadable retain record). Until run control exists, `plugin` with `{"name": "reference-plant", "action": "hold"|"resume", "task": <task name>}` halts and resumes tasks through the reference plant's test hook (`plc_run_control_hold`); it answers `true` when applied. `expect` matches what the injection answered: the response envelope, the HTTP `{status, body}`, or the socket reply line |
 
 ### Expectations
 

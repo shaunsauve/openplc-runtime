@@ -1,0 +1,21 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "ton-timer/plant-baseline",
+  "corpus": "ton-timer",
+  "kind": "runtime",
+  "criteria": ["A152"],
+  "title": "No debugger: the reference plant drives the TON's input, sees the program's TIME() as its own virtual time, and sees Q at 5 s of virtual time",
+  "notes": "Plant drive and observation only, so it runs against plc_main with the reference plant and no debug endpoint (tests/debug/plant/e2e.sh). The halt half of A152 is plant-schedule-halt.",
+  "setup": {"plant": {"inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"wait": {"scans": 3}},
+    {"observe": "plant", "note": "the program's TIME() (%QD2) and the plant's virtual time agree within one interval", "expect": {
+      "vtMs": {"Main": {"~capture": "vt0"}}, "outputs": {"%QD2": {"~ref": "vt0", "~tol": 100}, "%QX0.0": false, "%QD1": 0}}},
+    {"plant": {"set": {"%IX0.0": true}}},
+    {"wait": {"vtMs": 4500}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false, "%QD1": {"~range": [4200, 4900]}}}},
+    {"wait": {"vtMs": 800}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": true, "%QD1": 5000}, "scanDelta": {"Main": {"~range": [7, 10]}}}}
+  ]
+}

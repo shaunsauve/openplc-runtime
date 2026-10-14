@@ -1,0 +1,26 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "ton-timer/plant-schedule-halt",
+  "corpus": "ton-timer",
+  "kind": "runtime",
+  "criteria": ["A152"],
+  "title": "The plant's scripted input schedule runs on PLC virtual time: a 2 s halt before the scheduled rising edge delays it by the halt, so the TON times exactly as without one",
+  "notes": "No debugger: the halt is run control through the reference plant's test hook (inject plugin). The schedule sets IN at 1000 ms of plant clock after the start; the halt covers wall 500-2500 ms. A plant on wall time sets IN during the halt, so the TON starts at resume and ET is about 1000 ms where this oracle expects 500. A152's two-log comparison (2 s against 0.3 s) is tests/debug/plant/e2e.sh.",
+  "setup": {"plant": {"inputs": {"%IX0.0": false}, "schedule": [{"atMs": 1000, "set": {"%IX0.0": true}}]}},
+  "steps": [
+    {"wait": {"vtMs": 500}},
+    {"inject": "plugin", "args": {"name": "reference-plant", "action": "hold", "task": "Main"}, "expect": true},
+    {"observe": "plant", "expect": {"vtMs": {"Main": {"~capture": "vh"}}, "witness": {"Main": {"~capture": "wh"}}}},
+    {"wait": {"wallMs": 2000}},
+    {"observe": "plant", "throughout": true, "note": "the clock, the scan count and the schedule all wait for the halt", "expect": {
+      "vtMs": {"Main": {"~ref": "vh"}}, "witness": {"Main": {"~ref": "wh"}}, "outputs": {"%QX0.0": false, "%QD1": 0}}},
+    {"inject": "plugin", "args": {"name": "reference-plant", "action": "resume", "task": "Main"}, "expect": true},
+    {"wait": {"vtMs": 1000}},
+    {"observe": "plant", "note": "IN rose at 1000 ms of virtual time, about 500 ms ago", "expect": {"outputs": {"%QX0.0": false, "%QD1": {"~range": [300, 700]}}}},
+    {"wait": {"vtMs": 4000}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false, "%QD1": {"~range": [4300, 4700]}}}},
+    {"wait": {"vtMs": 600}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": true, "%QD1": 5000}}}
+  ]
+}
