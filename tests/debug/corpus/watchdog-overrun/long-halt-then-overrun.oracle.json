@@ -1,0 +1,28 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "watchdog-overrun/long-halt-then-overrun",
+  "corpus": "watchdog-overrun",
+  "kind": "runtime",
+  "criteria": ["A050"],
+  "title": "The watchdog stands down for a 5 min halt and re-arms on resume: the first post-resume overrun trips it",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@OVR_IF"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"wait": {"wallMs": 300000}},
+    {"observe": "status", "throughout": true, "note": "no watchdog trip during the halt", "expect": {"state": "HALTED_AT_BP"}},
+    {"observe": "log", "expect": {"fields": {"watchdog": {"~absent": true}}}},
+    {"plant": {"set": {"%IX0.0": true}}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "note": "completes the halted scan; the next scan copies in the overrun input", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"wallMs": 3000}},
+    {"observe": "status", "expect": {"state": "ERROR", "fields": {"reason": "watchdog"}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"wait": {"wallMs": 1000}},
+    {"observe": "plant", "throughout": true, "note": "the overrunning scan never completed", "expect": {"witness": {"Main": {"~ref": "w"}}}}
+  ]
+}

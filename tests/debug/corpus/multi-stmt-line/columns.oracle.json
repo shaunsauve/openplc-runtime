@@ -1,0 +1,28 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "multi-stmt-line/columns",
+  "corpus": "multi-stmt-line",
+  "kind": "runtime",
+  "criteria": ["A015"],
+  "title": "A line breakpoint stops before the first of three statements; each step reports the next column range; the four-line statement stops once",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 5}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@THREE"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@THREE", "col": 3},
+      "variables": {"PROG0.a": 0, "PROG0.b": 0}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@THREE", "col": 14}, "variables": {"PROG0.a": 5, "PROG0.b": 0}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@THREE", "col": 26}, "variables": {"PROG0.b": 6, "PROG0.c": 0}}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@SPAN_START", "col": 3, "endLine": "@SPAN_END"}, "variables": {"PROG0.c": 7}}},
+    {"request": "next", "note": "one stop for the whole spanning statement, then the next scan", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@WITNESS"}, "variables": {"PROG0.total": 19}}},
+    {"observe": "plant", "expect": {"witness": {"Main": 1}, "outputs": {"%QD1": 19, "%QW2": 7}}}
+  ]
+}

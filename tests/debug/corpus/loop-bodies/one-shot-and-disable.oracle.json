@@ -1,0 +1,30 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "loop-bodies/one-shot-and-disable",
+  "corpus": "loop-bodies",
+  "kind": "runtime",
+  "criteria": ["A108", "A104"],
+  "title": "A one-shot clears itself on its first hit; a disabled breakpoint stays listed with its ID and stops again once re-enabled",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_BODY", "oneShot": true}]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@FOR_BODY"}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 5},
+    {"observe": "status", "expect": {"fields": {"breakpoints": {"~len": 0}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@WHILE_BODY"}]},
+     "expect": {"success": true, "body": {"breakpoints": [{"id": {"~capture": "bp"}}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WHILE_BODY"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@WHILE_BODY", "enabled": false}]},
+     "expect": {"success": true, "body": {"breakpoints": [{"id": {"~ref": "bp"}, "enabled": false}]}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 17, "note": "3 hits per scan: about 50 passes while disabled"},
+    {"observe": "status", "expect": {"fields": {"breakpoints": {"~len": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@WHILE_BODY", "enabled": true}]},
+     "expect": {"success": true, "body": {"breakpoints": [{"id": {"~ref": "bp"}, "enabled": true}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WHILE_BODY"}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 17}}}}
+  ]
+}

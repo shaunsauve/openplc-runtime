@@ -1,0 +1,16 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "bench_call/probe-site-shape",
+  "corpus": "bench_call",
+  "kind": "build",
+  "criteria": ["A027"],
+  "title": "Every probe site's not-taken path is at most one load, one compare and one conditional branch",
+  "notes": "The timing half of A027 and A010 (ON / OFF <= 1.05 under ADR-001 D10's protocol) is a bench run, reported in bench/RESULTS.md, not an oracle.",
+  "setup": {"build": {"probes": true, "path": "library"}},
+  "steps": [
+    {"inspect": "debugInfo", "expect": {"build": {"probes": true}, "probeCount": {"~capture": "n", "~gt": 0}}},
+    {"inspect": "objectCode", "note": "count of sites checked = count of probes; RED build fails this step",
+     "expect": {"probeSites": {"checked": {"~ref": "n"}, "maxNotTakenInstructions": {"~le": 3}, "outOfLineCalls": 0}}}
+  ]
+}

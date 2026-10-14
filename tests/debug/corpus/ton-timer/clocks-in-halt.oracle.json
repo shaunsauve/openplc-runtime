@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "ton-timer/clocks-in-halt",
+  "corpus": "ton-timer",
+  "kind": "runtime",
+  "criteria": ["A054"],
+  "title": "CURRENT_DT() stays live inside a halt while the RTC FB and TIME() freeze; the halt offset adds up",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 100}}, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 3}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@NOW_V"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "variables": {"PROG0.clock.CDT": {"~capture": "rtc0"}}}},
+    {"request": "evaluate", "args": {"expression": "CURRENT_DT()"}, "expect": {"success": true, "body": {"value": {"~capture": "w0"}}}},
+    {"wait": {"wallMs": 1000}},
+    {"request": "evaluate", "args": {"expression": "CURRENT_DT()"}, "note": "advances by 1 s +/- 1 interval inside the halt",
+     "expect": {"success": true, "body": {"value": {"~ref": "w0", "~add": 1000, "~tol": 100}}}},
+    {"wait": {"wallMs": 1000}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "next", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "variables": {"PROG0.now_v": {"~ref": "rtc0"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "time", "withinMs": 1500, "note": "2 s halt: offset grew by 2000 ms +/- 1 interval", "expect": {"body": {"offset": {"~approx": [2000, 100]}}}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 0}}}}
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "ton-timer/halt-mid-timing",
+  "corpus": "ton-timer",
+  "kind": "runtime",
+  "criteria": ["A053", "A169", "A052"],
+  "title": "J3: halt a 5 s TON at ET = 2 s for 20 s; ET and virtual time freeze; one cycle step adds one interval; Q rises at 5 s of virtual time",
+  "setup": {"session": "controller", "haltPolicy": "hold", "tasks": {"Main": {"intervalMs": 100}}, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"vtMs": {"Main": {"~capture": "t0"}}, "outputs": {"%QX0.0": false}}},
+    {"plant": {"set": {"%IX0.0": true}}},
+    {"wait": {"vtMs": 2000}},
+    {"request": "pause", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 600, "expect": {"reason": "pause"}},
+    {"observe": "session", "expect": {"variables": {"PROG0.t5.ET": {"~capture": "et", "~range": [1800, 2300]}}}},
+    {"observe": "plant", "expect": {"vtMs": {"Main": {"~capture": "vh"}}, "outputs": {"%QD1": {"~capture": "etPlant"}}}},
+    {"wait": {"wallMs": 20000}},
+    {"observe": "plant", "throughout": true, "note": "ET and virtual time frozen; outputs held; the TON's Q still FALSE",
+     "expect": {"vtMs": {"Main": {"~ref": "vh"}}, "outputs": {"%QD1": {"~ref": "etPlant"}, "%QX0.0": false}}},
+    {"observe": "status", "expect": {"state": "PAUSED", "fields": {"watchdogTrips": 0}}},
+    {"request": "cycleStep", "args": {"task": "Main"}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step"}},
+    {"observe": "plant", "expect": {"vtMs": {"Main": {"~ref": "vh", "~add": 100}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"vtMs": 2700}},
+    {"observe": "plant", "note": "Q at 5 s +/- 1 interval of virtual time after IN, about 5 s + 20 s of wall time",
+     "expect": {"outputs": {"%QX0.0": true, "%QD1": 5000}}},
+    {"observe": "status", "expect": {"fields": {"tasks": {"Main": {"maxScanMs": {"~lt": 100}}}}}}
+  ]
+}

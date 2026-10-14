@@ -82,7 +82,7 @@ Each step has exactly one action key, plus optional `note`.
 | Step | Meaning |
 |---|---|
 | `{"request": <command>, "args": {…}, "expect": {"success": b, "error": <code>, "body": <match>}, "repeat": n}` | Send an ADR-003 D4 request (`initialize`, `setBreakpoints`, `continue`, `next`, `cycleStep`, `force`, …). `error` is an ADR-003 D2 code. Lines in `args` may be markers |
-| `{"event": <name>, "withinMs": t, "expect": {…}, "count": <match>, "repeat": n}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches |
+| `{"event": <name>, "withinMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches; `count` is the number of client streams that receive it (observers); `thenContinue` sends `continue` after each repetition (loop hit counts) |
 | `{"noEvent": <name>, "forMs": t \| "forScans": n, "task": …}` | No such event in the window (scans counted by the plant) |
 | `{"plant": {"set": {addr: v}, "sequence": [{…}, …], "failExchanges": n}}` | Drive plant inputs: one write, or successive writes (latest-wins tests, A055) |
 | `{"wait": {"wallMs": t} \| {"vtMs": t} \| {"scans": n}}` | Wait on the harness wall clock, on PLC virtual time, or for n plant-counted scans |
@@ -138,10 +138,14 @@ listed are ignored). Otherwise an object whose keys start with `~`:
 | `~approx: [v, tol]` | `|x − v| ≤ tol` (REAL, times) |
 | `~oneOf: [...]` | equals one of |
 | `~display: "T#1s200ms"` | the value's IEC display string (A090) |
-| `~capture: "name"` | always; binds the value for later steps (combinable with one other key) |
-| `~ref: "name"`, `~add: n` | equals the captured value (+ n) |
+| `~capture: "name"` | always; binds the value for later steps (combinable with other keys) |
+| `~ref: "name"`, `~add: n`, `~tol: t` | equals the captured value (+ n), within ± t when `~tol` is given |
 | `~any`, `~absent` | present with any value / not present |
 | `~len`, `~maxLen` | array or string length |
+
+**Value encoding.** BOOL as JSON boolean; integers, REAL and bit strings as numbers; STRING
+and WSTRING as JSON strings; enums by member name; TIME as integer milliseconds; DATE, DT
+and TOD as integer milliseconds since their epoch. `~display` compares the IEC text instead.
 
 `~ref` must follow its `~capture` in step order (validated). Captures are how an oracle says
 "unchanged since the halt" or "k − 1" without knowing k in advance.

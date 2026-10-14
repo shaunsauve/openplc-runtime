@@ -353,6 +353,10 @@
         "repeat": {
           "type": "integer",
           "minimum": 1
+        },
+        "thenContinue": {
+          "type": "boolean",
+          "description": "after each matched repetition the harness sends continue"
         }
       }
     },
@@ -738,7 +742,7 @@
     "matcher": {
       "type": "object",
       "minProperties": 1,
-      "maxProperties": 2,
+      "maxProperties": 3,
       "additionalProperties": false,
       "properties": {
         "~eq": {
@@ -808,6 +812,10 @@
         },
         "~maxLen": {
           "type": "integer",
+          "minimum": 0
+        },
+        "~tol": {
+          "type": "number",
           "minimum": 0
         }
       }

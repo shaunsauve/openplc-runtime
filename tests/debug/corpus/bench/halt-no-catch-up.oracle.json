@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "bench/halt-no-catch-up",
+  "corpus": "bench",
+  "kind": "runtime",
+  "criteria": ["A051"],
+  "title": "A 10 s halt never enters scan statistics, and the resume runs no catch-up burst (run once per bench member)",
+  "setup": {"session": "controller", "tasks": {"Main": {"intervalMs": 100}}, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"wait": {"scans": 20}},
+    {"observe": "status", "expect": {"fields": {"tasks": {"Main": {"overruns": {"~capture": "ovr"}}}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"wait": {"wallMs": 10000}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"wallMs": 200}},
+    {"observe": "plant", "note": "at most 2 scan starts in the first 2 intervals after resume", "expect": {"scanDelta": {"Main": {"~le": 2}}}},
+    {"wait": {"scans": 10}},
+    {"observe": "status", "expect": {"fields": {"tasks": {"Main": {"maxScanMs": {"~lt": 100}, "overruns": {"~ref": "ovr"}}}}}}
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "sparse-lines/placement",
+  "corpus": "sparse-lines",
+  "kind": "runtime",
+  "criteria": ["A018"],
+  "title": "Listed lines bind where asked; comment and declaration lines move to the next probe line in the POU; a line after the last statement is NO_CODE",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"inspect": "debugInfo", "note": "the per-file line list, read without the runtime",
+     "expect": {"lines": {"program.st": {"~any": true}}}},
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@CMT2", "@LC", "@DECL", "@TAIL", "@B"]},
+     "expect": {"success": true, "body": {"breakpoints": [
+       {"verified": true, "line": "@A"}, {"verified": true, "line": "@CALL_H"}, {"verified": true, "line": "@HELPER_FIRST"},
+       {"verified": false, "reason": "NO_CODE"}, {"verified": true, "line": "@B"}]}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@A", "col": 3}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@CALL_H", "col": 3}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@HELPER_FIRST", "col": 3},
+      "stack": [{"pou": "Helper", "kind": "fb", "instance": "PROG0.h"}, {"pou": "SparseLines", "kind": "program", "instance": "PROG0"}]}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@B", "col": 3}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 10, "note": "the NO_CODE breakpoint never stops"},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 10}}}}
+  ]
+}

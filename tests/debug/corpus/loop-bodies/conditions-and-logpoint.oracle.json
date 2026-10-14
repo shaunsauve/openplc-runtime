@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "loop-bodies/conditions-and-logpoint",
+  "corpus": "loop-bodies",
+  "kind": "runtime",
+  "criteria": ["A103", "A179", "A099"],
+  "title": "Condition i = 7 and a logpoint {i} on one loop line, a hit count of 4 on another, a side-effecting condition refused",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [
+       {"line": "@FOR_BODY", "condition": "i = 7"}, {"line": "@FOR_BODY", "logMessage": "{i}"}, {"line": "@WHILE_BODY", "condition": "n := 1"}]},
+     "expect": {"success": true, "body": {"breakpoints": [{"verified": true}, {"verified": true}, {"verified": false, "reason": "EXPR_SIDE_EFFECT"}]}}},
+    {"event": "output", "repeat": 6, "withinMs": 1000, "expect": {"body": {"category": "logpoint", "text": {"~oneOf": ["1", "2", "3", "4", "5", "6"]}}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@FOR_BODY"},
+      "variables": {"PROG0.i": 7, "PROG0.witness": {"~capture": "k"}}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "output", "repeat": 3, "withinMs": 1000, "expect": {"body": {"category": "logpoint", "text": {"~oneOf": ["7", "8", "9", "10"]}, "scan": {"~ref": "k"}}}},
+    {"event": "stopped", "withinMs": 1000, "note": "one stop per scan", "expect": {"reason": "breakpoint", "variables": {"PROG0.i": 7, "PROG0.witness": {"~ref": "k", "~add": 1}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_LAST", "hitCondition": "4"}]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@FOR_LAST"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 20},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": {"~ge": 20}}}}
+  ]
+}

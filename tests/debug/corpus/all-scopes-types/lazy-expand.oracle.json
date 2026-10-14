@@ -1,0 +1,21 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "all-scopes-types/lazy-expand",
+  "corpus": "all-scopes-types",
+  "kind": "runtime",
+  "criteria": ["A089"],
+  "title": "Nested structs, arrays of structs and FB instances expand one level per request",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 3}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LAST"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "variables", "args": {"path": "PROG0.segs"}, "expect": {"success": true, "body": {"children": {"~len": 2}, "grandchildren": {"~absent": true}}}},
+    {"request": "variables", "args": {"path": "PROG0.segs[1]"}, "expect": {"success": true, "body": {"children": {"~len": 3}}}},
+    {"request": "variables", "args": {"path": "PROG0.segs[1].b"}, "expect": {"success": true, "body": {"children": [{"name": "x", "value": 0}, {"name": "y", "value": 3}]}}},
+    {"request": "variables", "args": {"path": "G_SEG"}, "expect": {"success": true, "body": {"children": {"~len": 3}}}},
+    {"request": "variables", "args": {"path": "PROG0.h"}, "note": "FB instance: in1, out1, io, G_COUNT, G_SEG, state", "expect": {"success": true, "body": {"children": {"~len": 6}}}},
+    {"observe": "plant", "throughout": true, "expect": {"scanDelta": {"Main": 0}}}
+  ]
+}

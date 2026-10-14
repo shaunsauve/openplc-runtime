@@ -1,0 +1,25 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "iec-display/display",
+  "corpus": "iec-display",
+  "kind": "runtime",
+  "criteria": ["A090"],
+  "title": "TIME, DATE, DT, TOD, enum, STRING and bit strings display in IEC form; TON and CTUD expand to named fields",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false, "%IX0.1": false, "%IX0.2": false}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LAST"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "variables": {
+      "PROG0.t": {"~display": "T#1s200ms"}, "PROG0.d": {"~display": "D#2026-10-13"},
+      "PROG0.dt1": {"~display": "DT#2026-10-13-12:30:00"}, "PROG0.tod1": {"~display": "TOD#12:30:15"},
+      "PROG0.col": {"~display": "GREEN"}, "PROG0.name": {"~display": "'pump'"},
+      "PROG0.by": {"~display": "16#0F"}, "PROG0.wo": {"~display": "16#00FF"},
+      "PROG0.dw": {"~display": "16#DEADBEEF"}, "PROG0.lw": {"~display": "16#0123456789ABCDEF"},
+      "PROG0.tmr.PT": {"~display": "T#5s"}, "PROG0.tmr.ET": {"~display": "T#0s"}, "PROG0.tmr.Q": false}}},
+    {"observe": "session", "note": "named fields, read through the FB instance's children",
+     "expect": {"variables": {"PROG0.tmr.IN": false, "PROG0.cnt.CU": false, "PROG0.cnt.CD": false, "PROG0.cnt.PV": 10,
+                              "PROG0.cnt.CV": 0, "PROG0.cnt.QU": false, "PROG0.cnt.QD": true}}},
+    {"observe": "plant", "expect": {"outputs": {"%QX0.0": false, "%QW0": 0}}}
+  ]
+}

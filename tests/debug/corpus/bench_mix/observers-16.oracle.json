@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "bench_mix/observers-16",
+  "corpus": "bench_mix",
+  "kind": "runtime",
+  "criteria": ["A211"],
+  "title": "A controller and 16 observers each receive every event; a 17th observer is refused naming the limit",
+  "notes": "The jitter and latency budgets of A211 (N012, N018) are measured by the bench instrument over this same sequence.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "args": {"role": "controller"}, "expect": {"success": true}},
+    {"request": "initialize", "args": {"role": "observer", "client": "new"}, "repeat": 16, "expect": {"success": true}},
+    {"request": "subscribe", "args": {"paths": "1000 leaves of PROG0", "rateHz": 10, "clients": "all observers"}, "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "count": 17, "note": "one per client stream", "expect": {"reason": "breakpoint"}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "continued", "withinMs": 500, "count": 17},
+    {"request": "initialize", "args": {"role": "observer", "client": "new"},
+     "expect": {"success": false, "error": "LIMIT_EXCEEDED", "body": {"details": {"limit": 16}}}},
+    {"event": "control", "withinMs": 1000, "expect": {"body": {"observers": {"~len": 16}}}},
+    {"wait": {"scans": 10}},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 10}}}}
+  ]
+}

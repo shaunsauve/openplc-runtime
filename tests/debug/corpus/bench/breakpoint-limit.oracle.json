@@ -1,0 +1,21 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "bench/breakpoint-limit",
+  "corpus": "bench",
+  "kind": "runtime",
+  "criteria": ["A032"],
+  "title": "The declared breakpoint maximum (>= 256) is honoured and one more is refused LIMIT_EXCEEDED",
+  "notes": "args.count 'max' / 'max+1' are harness directives: spread that many line breakpoints over distinct probe lines of the member program.",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true, "body": {"capabilities": {"maxBreakpoints": {"~capture": "max", "~ge": 256}}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "count": "max"}, "expect": {"success": true, "body": {"verified": {"~ref": "max"}}}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "breakpoint"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "count": "max+1"}, "expect": {"success": false, "error": "LIMIT_EXCEEDED"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@WITNESS"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@WITNESS", "col": 3}}},
+    {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
+  ]
+}

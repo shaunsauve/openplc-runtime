@@ -1,0 +1,27 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "rich-types/describe",
+  "corpus": "rich-types",
+  "kind": "runtime",
+  "criteria": ["A016"],
+  "title": "Strings, multi-dimensional arrays, subranges, unions and REF_TO are described with their types and read correctly",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@LAST"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@LAST", "col": 3},
+      "variables": {"PROG0.s": "hello", "PROG0.ws": "wide", "PROG0.p": 50, "PROG0.target": 8, "PROG0.m2[1, 3]": 8, "PROG0.m2[0, 1]": 0,
+                    "PROG0.u.w": 4660, "PROG0.u.b[0]": {"~oneOf": [52, 18]}, "PROG0.r^": 8}}},
+    {"request": "variables", "args": {"path": "PROG0.s", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "string", "length": 16, "wide": false}}}},
+    {"request": "variables", "args": {"path": "PROG0.ws", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "string", "length": 8, "wide": true}}}},
+    {"request": "variables", "args": {"path": "PROG0.m2", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "array", "dims": [[0, 1], [1, 3]]}}}},
+    {"request": "variables", "args": {"path": "PROG0.p", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "subrange", "name": "Pct", "range": [0, 100]}}}},
+    {"request": "variables", "args": {"path": "PROG0.u", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "union", "name": "Word2", "members": {"~len": 2}}}}},
+    {"request": "variables", "args": {"path": "PROG0.r", "types": true}, "expect": {"success": true, "body": {"type": {"kind": "ref", "target": "INT"}}}},
+    {"observe": "plant", "expect": {"witness": {"Main": 0}}}
+  ]
+}

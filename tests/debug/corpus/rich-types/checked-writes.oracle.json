@@ -1,0 +1,29 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "rich-types/checked-writes",
+  "corpus": "rich-types",
+  "kind": "runtime",
+  "criteria": ["A112"],
+  "title": "Out-of-subrange, invalid-enum, over-length and wrong-type writes and forces are refused naming the constraint; values unchanged",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@OUT_P"]}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}},
+    {"request": "setVariable", "args": {"path": "PROG0.p", "value": 101}, "expect": {"success": false, "error": "RANGE_ERROR", "body": {"details": {"range": [0, 100]}}}},
+    {"request": "setVariable", "args": {"path": "PROG0.lv", "value": "HUGE"}, "expect": {"success": false, "error": "TYPE_ERROR"}},
+    {"request": "setVariable", "args": {"path": "PROG0.s", "value": "seventeen chars!!"}, "expect": {"success": false, "error": "RANGE_ERROR", "body": {"details": {"length": 16}}}},
+    {"request": "setVariable", "args": {"path": "PROG0.target", "value": "abc"}, "expect": {"success": false, "error": "TYPE_ERROR"}},
+    {"request": "force", "args": {"path": "PROG0.p", "value": 101, "reason": "range check"}, "expect": {"success": false, "error": "RANGE_ERROR"}},
+    {"request": "force", "args": {"path": "PROG0.lv", "value": "HUGE", "reason": "enum check"}, "expect": {"success": false, "error": "TYPE_ERROR"}},
+    {"request": "force", "args": {"path": "PROG0.s", "value": "seventeen chars!!", "reason": "length check"}, "expect": {"success": false, "error": "RANGE_ERROR"}},
+    {"request": "force", "args": {"path": "PROG0.target", "value": "abc", "reason": "type check"}, "expect": {"success": false, "error": "TYPE_ERROR"}},
+    {"observe": "session", "expect": {"variables": {"PROG0.p": 50, "PROG0.lv": "MID", "PROG0.s": "hello"}}},
+    {"request": "listForces", "expect": {"success": true, "body": {"forces": {"~len": 0}}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"wait": {"scans": 2}},
+    {"observe": "plant", "expect": {"outputs": {"%QW0": 50}}}
+  ]
+}
