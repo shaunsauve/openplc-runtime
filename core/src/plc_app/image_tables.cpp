@@ -5,6 +5,7 @@
 // buffer pointers by walking strucpp::locatedVars[]. Plugins read/write
 // through the buffer pointers under the image-tables mutex.
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -656,7 +657,58 @@ void image_tables_fill_null_pointers(void)
         if (!dint_memory[i]) { temp_dint_memory[i] = 0; dint_memory[i] = &temp_dint_memory[i]; ++filled; }
         if (!lint_memory[i]) { temp_lint_memory[i] = 0; lint_memory[i] = &temp_lint_memory[i]; ++filled; }
     }
+    /* A reload keeps what the plugins last wrote: the device's registers outlive the controller
+     * that reads them (F037 restarts the program, it does not re-read the device). */
+    image_tables_restore_inputs();
     log_info("[image_tables] filled %d NULL slots with backing buffers", filled);
+}
+
+// ---- The input image across a reload ----
+
+namespace
+{
+
+// Values, not pointers: the pointer tables are rebuilt on every load.
+struct HeldInputs
+{
+    uint8_t  bool_i[BUFFER_SIZE][8];
+    uint8_t  byte_i[BUFFER_SIZE];
+    uint16_t int_i[BUFFER_SIZE];
+    uint32_t dint_i[BUFFER_SIZE];
+    uint64_t lint_i[BUFFER_SIZE];
+};
+
+HeldInputs       g_held_inputs;
+std::atomic<bool> g_held_inputs_valid{false};
+
+}  // namespace
+
+void image_tables_capture_inputs(void)
+{
+    for (int i = 0; i < BUFFER_SIZE; ++i)
+    {
+        for (int b = 0; b < 8; ++b)
+            g_held_inputs.bool_i[i][b] = bool_input[i][b] ? *bool_input[i][b] : 0;
+        g_held_inputs.byte_i[i]  = byte_input[i]  ? *byte_input[i]  : 0;
+        g_held_inputs.int_i[i]   = int_input[i]   ? *int_input[i]   : 0;
+        g_held_inputs.dint_i[i]  = dint_input[i]  ? *dint_input[i]  : 0;
+        g_held_inputs.lint_i[i]  = lint_input[i]  ? *lint_input[i]  : 0;
+    }
+    g_held_inputs_valid.store(true, std::memory_order_release);
+}
+
+void image_tables_restore_inputs(void)
+{
+    if (!g_held_inputs_valid.load(std::memory_order_acquire)) return;
+    for (int i = 0; i < BUFFER_SIZE; ++i)
+    {
+        for (int b = 0; b < 8; ++b)
+            if (bool_input[i][b]) *bool_input[i][b] = g_held_inputs.bool_i[i][b];
+        if (byte_input[i]) *byte_input[i] = g_held_inputs.byte_i[i];
+        if (int_input[i])  *int_input[i]  = g_held_inputs.int_i[i];
+        if (dint_input[i]) *dint_input[i] = g_held_inputs.dint_i[i];
+        if (lint_input[i]) *lint_input[i] = g_held_inputs.lint_i[i];
+    }
 }
 
 void image_tables_zero_outputs(void)

@@ -647,6 +647,12 @@ static std::atomic<bool> g_run_requests_pending{false};
  * publish by microseconds, so a caller that armed it after the landing would be one scan too
  * late (A041's red-proof: the plant would count 1 scan). */
 static std::atomic<bool> g_start_halted{false};
+/* plc_main --start-halted: the boot start holds every task before its first release. Same ask as
+ * g_start_halted, a different lever, because the entry trap is armed through the probe fast path,
+ * which is closed until a session attaches (debug_agent_set_attached): opening it at boot would
+ * change real-time behaviour with no debugger attached (N001). A boundary hold is the dispatcher's
+ * own "do not release this task", so nothing runs and nothing about a probe changes. */
+static std::atomic<bool> g_boot_halt{false};
 /* A cold restart re-initialises every variable, the RETAIN ones included (F037): the next load
  * writes the fresh values instead of restoring the store, so a later warm restart cannot bring
  * back what this one discarded. */
@@ -1212,6 +1218,16 @@ void *plc_cycle_thread(void *arg)
     }
     log_info("Spawned %zu PLC task thread(s)", plc_task_count);
 
+    /* plc_main --start-halted: hold every task at its scan boundary before the dispatcher exists,
+     * so the first release never comes. The program is loaded and started, and a debugger that
+     * attaches finds it halted with no scan run (F037's startHalted for the boot start). */
+    if (g_boot_halt.exchange(false, std::memory_order_acq_rel))
+    {
+        const int64_t now = monotonic_ns();
+        for (size_t i = 0; i < plc_task_count; ++i) hold_at_boundary(&plc_tasks[i], now);
+        log_info("[debug] start halted: every task is held before its first scan");
+    }
+
     /* Publish RUNNING only while OUR start is still the claimed
      * transition. Erasing a watchdog-ERROR or shutdown-TRANSITIONING_TO_STOP
      * would hang the join below. The crash and stop paths each publish
@@ -1681,6 +1697,12 @@ static int unload_plc_program_locked(PluginManager *pm, bool restart)
 
         pthread_mutex_t *itm = image_tables_mutex();
         pthread_mutex_lock(itm);
+        /* The device's registers outlive the controller that read them: plugin_driver_stop above
+         * rebuilt them, so the input image is the only copy left. The next load restores it
+         * (image_tables_fill_null_pointers), and every plugin overwrites its own inputs within a
+         * frame of starting again. Outputs are not restored here: an explicit stop is today's
+         * STOP, which drives them to 0 (ADR-004 D7.2, row m). */
+        image_tables_capture_inputs();
         /* The dispatcher died before it could snapshot the held image: take it now. */
         if (g_hold_outputs.load(std::memory_order_acquire) && !output_hold_valid())
             output_hold_capture();
@@ -1858,6 +1880,13 @@ static bool wait_for_landing(void)
         nanosleep(&poll, nullptr);
     }
     return true;
+}
+
+extern "C" void plc_boot_start_halted(void)
+{
+    /* Read inside the next start by plc_cycle_thread, after RUNNING is published and before the
+     * dispatcher's first tick, so no task is ever released. */
+    g_boot_halt.store(true, std::memory_order_release);
 }
 
 extern "C" int plc_restart_program(bool cold, bool start_halted)

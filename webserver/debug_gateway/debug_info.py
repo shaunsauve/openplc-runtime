@@ -354,7 +354,17 @@ class DebugInfo:
             return f"ARRAY[{dims}] OF {self.type_name(t.elem)}"
         if t.kind == "string" and t.length is not None:
             return f"STRING({t.length})"
-        return t.name or t.kind
+        name = t.name
+        # A declared name, not the symbol table's: IEC identifiers are case-insensitive, and a
+        # type shown as `Seg` where it was declared `Seg` reads as a different type to whoever
+        # wrote the program. Elementary types have no declaration to spell, so they stay as the
+        # symbol table writes them (`INT`, `DINT`, `STRING`).
+        if name and t.kind in ("struct", "fb", "enum"):
+            for pou in self.pous.values():
+                for declared in getattr(pou, "declared", ()) or ():
+                    if str(declared).casefold() == name.casefold():
+                        return str(declared)
+        return name or t.kind
 
     def _member_leaf(self, node: Node, name: str) -> Optional[Node]:
         t = self.types.get(node.type_id)

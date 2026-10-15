@@ -73,6 +73,23 @@ MAIN = "main"  # the stream a step without `client` acts on
 # 6.1.2): the oracle names the source spelling, STruCpp's debug info its upper case
 # (docs/DEBUG_CORE_LINK.md, pm rulings 12 and 13).
 IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
+# A `type` is an IEC identifier too, and a compound one is several of them (`ARRAY[0..1] OF Seg`),
+# so it folds token by token rather than as one name.
+TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _fold_type(expected: str, observed: str) -> str:
+    """`observed` with the oracle's spelling when the two name the same type.
+
+    Every identifier token has to match case-insensitively and the token counts have to agree, so
+    this never makes two different types equal: `INT` and `DINT` are not, `STRING` and `STRING[8]`
+    are not, `Seg` and `Point` are not."""
+    if expected == observed or expected.casefold() == observed.casefold():
+        return expected
+    want, got = TYPE_TOKEN.findall(expected), TYPE_TOKEN.findall(observed)
+    if len(want) == len(got) and all(a.casefold() == b.casefold() for a, b in zip(want, got)):
+        return expected
+    return observed
 
 
 def _fold_identifiers(expected: Json, observed: Observed) -> Observed:
@@ -86,6 +103,8 @@ def _fold_identifiers(expected: Json, observed: Observed) -> Observed:
             got = out[k]
             if k in IDENTIFIER_KEYS and isinstance(want, str) and isinstance(got, str):
                 out[k] = want if got.casefold() == want.casefold() else got
+            elif k == "type" and isinstance(want, str) and isinstance(got, str):
+                out[k] = _fold_type(want, got)
             else:
                 out[k] = _fold_identifiers(want, got)
         return out
@@ -101,6 +120,12 @@ EVENT_KEYS = {
     "scan": "scan",
     "vtMs": "vt",
 }
+
+
+def _composite(node: JsonObj) -> bool:
+    """A variable with children: a non-zero variablesReference (DEBUG_PROTOCOL's `variables`)."""
+    ref = node.get("variablesReference")
+    return isinstance(ref, int) and not isinstance(ref, bool) and ref > 0
 
 
 class Diverge(Exception):
@@ -319,9 +344,12 @@ class _Run:
 
     # -- setup
 
-    def start(self) -> None:
+    def start(self) -> str:
+        """Apply the declared setup. Returns what the endpoint deployed, for the trace."""
         if self.doc.get("kind") != "runtime":
-            return  # build scenarios read compiler outputs; no endpoint or plant involved
+            return ""  # build scenarios read compiler outputs; no endpoint or plant involved
+        # The endpoint first: a setup.startHalted deploy is a restart, and the plant's history
+        # (the `throughout` window) must not contain the scans that ran before it.
         self.endpoint.prepare(self.setup)
         self.plant.prepare(_obj(self.setup.get("plant")))
         inputs = _obj(_obj(self.setup.get("plant")).get("inputs"))
@@ -330,6 +358,12 @@ class _Run:
         if self._uses_plant():
             self.last_witness = dict(self._sample().witness)
         self.last_plant_ms = self.clock.now_ms()
+        deployed = []
+        if self.setup.get("startHalted") is True:
+            deployed.append("verified setup.startHalted (every task held, no scan run)")
+        if inputs:
+            deployed.append(f"plant inputs {sorted(inputs)}")
+        return "; ".join(deployed)
 
     def _uses_plant(self) -> bool:
         return any(
@@ -498,7 +532,9 @@ class _Run:
                         f"stack[{i}].scopes.{scope}.{path}",
                     )
 
-    def _read_variable(self, client: str, path: str, frame_id: Json = None) -> Observed:
+    def _read_variable(
+        self, client: str, path: str, frame_id: Json = None, depth: int = 0
+    ) -> Observed:
         args: JsonObj = {"path": path}
         if isinstance(frame_id, int):
             args["frameId"] = frame_id
@@ -509,7 +545,28 @@ class _Run:
                 raise Blocked(f"variables {path}: UNSUPPORTED")
             raise Diverge(f"variables {path} refused: {error.get('code')}")
         body = _obj(resp.get("body"))
-        return body["value"] if "value" in body else MISSING
+        # A composite answers with its immediate children, a non-zero variablesReference and a
+        # `value` that is only its type name (DEBUG_PROTOCOL's `variables`), while an oracle names
+        # the whole value. So the harness walks it: a child without a variablesReference is a leaf,
+        # a child with one is read again at its own path. Identifiers are case-insensitive
+        # (DEBUG_PROTOCOL's `variables`), so each name is keyed by the spelling the runtime uses
+        # and by its folded one, which is how an oracle writes it.
+        if not _composite(body):
+            return body["value"] if "value" in body else MISSING
+        children = cast(List[JsonObj], body.get("children") or [])
+        if not children or depth >= 8:
+            return MISSING
+        out: JsonObj = {}
+        for child in children:
+            name = str(child.get("name"))
+            if _composite(child):
+                sep = "" if name.startswith("[") else "."
+                out[name] = self._read_variable(client, f"{path}{sep}{name}", frame_id, depth + 1)
+            else:
+                out[name] = child.get("value")
+            if name.casefold() != name:
+                out[name.casefold()] = out[name]
+        return out
 
     def _step_no_event(self, step: JsonObj) -> str:
         name = str(step["noEvent"])
@@ -734,7 +791,11 @@ def run_scenario(
         return result
     index: Optional[int] = None
     try:
-        run.start()
+        t0 = clock.now_ms()
+        detail = run.start()
+        if detail:
+            result.trace.append(StepTrace(-1, "setup", "match", detail, clock.now_ms() - t0))
+        done = 0
         for index, raw in enumerate(cast(List[JsonObj], doc["steps"])):
             action = next((a for a in ACTIONS if a in raw), "?")
             t0 = clock.now_ms()
@@ -748,7 +809,8 @@ def run_scenario(
                 result.verdict = Verdict(status, index, f"step {index} ({action}): {exc.reason}")
                 return result
             result.trace.append(StepTrace(index, action, "match", detail, clock.now_ms() - t0))
-        result.verdict = Verdict("PASS", None, f"all {len(result.trace)} steps matched")
+            done = index + 1
+        result.verdict = Verdict("PASS", None, f"all {done} steps matched")
     except Blocked as b:
         where = "setup" if index is None else f"step {index}"
         result.verdict = Verdict("BLOCKED", index, f"{where}: {b.reason}")

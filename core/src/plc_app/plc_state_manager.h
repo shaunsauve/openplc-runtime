@@ -335,6 +335,19 @@ bool plc_run_control_pause(size_t task_idx);
 int plc_restart_program(bool cold, bool start_halted);
 
 /**
+ * @brief Arm the boot auto-start halted at the first statement (`plc_main --start-halted`).
+ *
+ * The same entry trap `restart {startHalted}` arms, asked for before the program is loaded rather
+ * than by a restart: a scenario that needs a program that has not run attaches to a runtime that
+ * boots this way. A boot that is not asked for is unchanged.
+ *
+ * Must be called before the start is claimed (plc_main.c, before plc_begin_transition(RUNNING));
+ * the flag is consumed inside the next start, so a start that never happens leaves it set for the
+ * next one, exactly as plc_restart_program's flags do.
+ */
+void plc_boot_start_halted(void);
+
+/**
  * @brief Apply the halt policy to a task that has just halted (ADR-004 D1.3).
  *
  * Under a safe policy, saves the outputs in the task's scope and journals their safe values.

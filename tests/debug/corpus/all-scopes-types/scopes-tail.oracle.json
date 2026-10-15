@@ -1,0 +1,30 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "scenario": "all-scopes-types/scopes-tail",
+  "corpus": "all-scopes-types",
+  "kind": "runtime",
+  "criteria": ["A088"],
+  "title": "Diagnostic: scopes.oracle.json without its three `types: true` steps and its force/unforce pair, to show what A088's own evidence covers on its own",
+  "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 3}}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "restart", "args": {"kind": "cold", "startHalted": true}, "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 2000, "expect": {"reason": "entry"}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@HOLDER_FIRST", "@SCALE_FIRST", "@LAST"]}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@HOLDER_FIRST", "col": 3},
+      "stack": [
+        {"pou": "Holder", "kind": "fb", "instance": "PROG0.h",
+         "scopes": {"inputs": {"in1": 3}, "outputs": {"out1": 0}, "inOuts": {"io": 0}, "temps": {"tmp": 0},
+                    "members": {"state": "IDLE"}, "externals": {"G_COUNT": 0, "G_SEG": {"a": {"x": 0, "y": 0}, "b": {"x": 0, "y": 0}, "tag": "IDLE"}}}},
+        {"pou": "Scopes", "kind": "program", "instance": "PROG0",
+         "scopes": {"members": {"witness": 1, "in_v": 3, "out_v": 0, "shared": 0, "m": "IDLE", "i": 0}, "externals": {"G_COUNT": 0}}}]}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@SCALE_FIRST", "col": 3},
+      "stack": [
+        {"pou": "Scale", "kind": "function", "instance": null, "scopes": {"inputs": {"v": 4}, "inOuts": {"acc": 4}, "temps": {"t": 0}}},
+        {"pou": "Scopes", "kind": "program", "instance": "PROG0", "scopes": {"members": {"shared": 4}}}]}},
+    {"observe": "plant", "expect": {"witness": {"Main": 0}}}
+  ]
+}

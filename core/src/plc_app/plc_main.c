@@ -55,6 +55,7 @@ int main(int argc, char *argv[])
     bool print_debug = false;
     bool safe_mode   = false;
     bool after_fault = false;
+    bool start_halted = false;
 
     // Check for command line arguments
     for (int i = 1; i < argc; i++)
@@ -74,6 +75,13 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--fault") == 0)
         {
             after_fault = true;
+        }
+        else if (strcmp(argv[i], "--start-halted") == 0)
+        {
+            // F037's startHalted for the boot start: the program is loaded and started, and
+            // every task stops before the first statement of its first scan, so a debugger
+            // that attaches sees a program that has not run. Off unless asked for.
+            start_halted = true;
         }
     }
 
@@ -227,6 +235,13 @@ int main(int argc, char *argv[])
     // the default (RUN) when no plugin has reported yet — a VPP that
     // owns the switch is initialised DURING the start transition, so
     // a device in STOP will start and movement-reconciliation stops it.
+    // --start-halted arms the entry trap for this start (F037); it has to be set before the
+    // claim, because the trap is read inside the start, before the first release.
+    if (start_halted)
+    {
+        plc_boot_start_halted();
+        log_info("--start-halted: the program will stop before its first statement");
+    }
     if (!safe_mode && !plc_switch_allows_run())
     {
         log_info("Hardware mode switch is in STOP - PLC left stopped");

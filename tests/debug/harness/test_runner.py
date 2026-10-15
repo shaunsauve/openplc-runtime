@@ -94,8 +94,10 @@ class RunnerTest(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 result = _run_fake(scenario)
                 self.assertEqual(result.verdict.status, "PASS", runner.format_trace(result))
+                # Index -1 is the setup row (what the harness deployed), not an oracle step.
                 self.assertEqual(
-                    len(result.trace), len(json.loads(_oracle(scenario).read_text())["steps"])
+                    len([t for t in result.trace if t.index >= 0]),
+                    len(json.loads(_oracle(scenario).read_text())["steps"]),
                 )
 
     def test_each_seeded_defect_diverges_on_its_step(self) -> None:

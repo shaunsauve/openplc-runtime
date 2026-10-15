@@ -53,9 +53,10 @@ class SocketIOEndpoint:
         self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self.token = token
         self.insecure = insecure
-        # `setup.startHalted` states that the scenario needs a start-halted start
-        # (`restart {startHalted}`). Nothing deploys one: the scenario's own restart asks for
-        # it, and the handshake is where the runtime says whether it can. Set by prepare().
+        # `setup.startHalted` states that the scenario needs a program that has not run when
+        # the harness attaches. The driver deploys it (plc_main --start-halted) and prepare()
+        # refuses the scenario when it is not in place; the handshake is where the runtime says
+        # whether it can serve it at all.
         self.requires_start_halted = False
         self.description = f"endpoint {self.host}:{self.port}"
 
@@ -80,10 +81,10 @@ class SocketIOEndpoint:
 
     def prepare(self, setup: JsonObj) -> None:
         self._probe()
-        # Nothing deploys a build or rewrites halt configuration for a run yet; a scenario that
-        # needs one cannot be judged against whatever happens to be loaded. Task intervals are
-        # deployed by the caller (tests/debug/plant/session_e2e.sh) and declared here, and
-        # `startHalted` is a capability the handshake declares (checked in request()).
+        # No deploy step rewrites a build or the halt configuration for a run yet; a scenario
+        # that needs one cannot be judged against whatever happens to be loaded, so it is
+        # refused. Task intervals are deployed by the caller (tests/debug/plant/session_e2e.sh)
+        # and declared here.
         self.requires_start_halted = setup.get("startHalted") is True
         needs = [
             k
@@ -93,6 +94,40 @@ class SocketIOEndpoint:
         if needs:
             raise Blocked(
                 f"setup {', '.join(needs)} needs a deploy step the harness does not have yet"
+            )
+        if self.requires_start_halted:
+            self._require_start_halted()
+
+    def _require_start_halted(self) -> None:
+        """Refuse `setup.startHalted` unless the program really is halted, having not run.
+
+        The harness cannot deploy this one. `restart {startHalted}` parks every task at the entry
+        trap, but a session that restarts and then detaches gives the halt back: ADR-005 D4.6
+        resumes on a clean detach, and only a controller lost past P2 keeps it, as a safe-stop. So
+        a deploy on a session of the harness's own cannot survive to the scenario's first step.
+
+        It is deployed by the driver instead — `plc_main --start-halted`, from the oracles' own
+        setup.startHalted (tests/debug/plant/session_e2e.sh) — and checked here, so a run that did
+        not ask for it says so instead of counting the scans that ran before the harness attached.
+        """
+        status = self.status()
+        tasks = status.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise Blocked(
+                f"setup startHalted, but the runtime reports no task: state {status.get('state')!r}"
+            )
+        running = [
+            f"{t.get('task', t.get('name', '?'))} is {t.get('state', 'unknown')}"
+            for t in cast(List[Json], tasks)
+            if isinstance(t, dict) and t.get("state") == "running"
+        ]
+        if running:
+            raise Blocked(
+                "setup startHalted, but the program is running ("
+                + "; ".join(running)
+                + "). Start the runtime with --start-halted: a session that restarts startHalted "
+                "and detaches resumes the program, so the harness cannot deploy this itself "
+                "(tests/debug/plant/session_e2e.sh deploys it from the oracles)."
             )
 
     def open_session(self) -> "SocketIOSession":

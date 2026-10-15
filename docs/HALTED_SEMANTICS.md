@@ -43,6 +43,13 @@ dispatcher; `PLCState` stays RUNNING. Halts come from the debugger's breakpoints
 | T4 | Plugins read the clocks through `get_task_virtual_time_ns(task)` and `get_plc_virtual_time_ns()` (the fastest task); both agree with the program within one interval. Tasks are still released on the wall schedule. `CURRENT_DT` stays wall time. | `host:D4.1 no halt`, `host:A052 all-stop 1 s` |
 | T5 | The first scan after a resume records no cycle-time or latency sample, and its expected start is re-anchored, so a halt never enters STATS and never counts as an overrun. A park's duration is taken out of its scan's time. Resume releases at the next due tick with no catch-up burst. | `host:A051 statistics`; `corpus:bench/halt-no-catch-up` |
 
+## Inputs
+
+| # | Statement | Scenario |
+|---|---|---|
+| I1 | The input image survives a program reload — a restart (`warm`, `cold` or `reset`), an upload or an online change. `image_tables_fill_null_pointers` gives every slot fresh backing storage, which used to zero the inputs as a side effect of allocating it; the values are now captured at the unload and restored after the bind, before the plugins start, so a controller that reloads its program causes a re-read rather than resetting the device. F037's `cold` re-initialises the program's own variables, not the device's registers. Every plugin overwrites its own inputs within a frame of starting again, so a value that belongs to a program that is no longer loaded is stale for that one frame. | `corpus:all-scopes-types/scopes` (step 5: `in1` is the `%IW0` the setup set, across a cold start-halted restart); `corpus:multi-stmt-line/columns` (`PROG0.a` is the `%IW0`, across a cold start-halted restart) |
+| I2 | The boot leaves the program halted before its first statement with `plc_main --start-halted`, so a debugger that attaches finds a program that has not run. It is the same ask as `restart {startHalted}`, held at the scan boundary rather than at the entry probe, because the probe fast path is closed until a session attaches and opening it would change real-time behaviour with no debugger attached (N001). Off unless asked for: a boot without it runs as it always did. | `corpus:nested-fb-loop/step-sequence` (step 20: `observe plant throughout` with the witness at 0) |
+
 ## Safe-stop
 
 | # | Statement | Scenario |
@@ -67,5 +74,5 @@ dispatcher; `PLCState` stays RUNNING. Halts come from the debugger's breakpoints
 
 ## Not yet specified here
 
-Input buffering, halt-one shared data (pause and breakpoints are all-stop for now) and the halt
-offset (ADR-004 D4.4). T5's mid-scan subtraction is built but not yet checked by a scenario.
+Input buffering while halted (F049) and the halt offset (ADR-004 D4.4); T5's mid-scan subtraction
+is built but not yet checked by a scenario.

@@ -87,6 +87,15 @@ extern "C"
     /* Caller must hold the image-tables mutex. */
     void image_tables_fill_null_pointers(void);
 
+    /* The input image across a program reload: capture before the pointers are cleared, restore
+     * after they are filled (plc_state_manager's unload/load). An input slot is written by a
+     * plugin, never by the controller, and the plugin is rebuilt on every load (ADR-004 D7.3
+     * open item 2), so this image is the only place the device's value can live across a reload.
+     * Copying the values into fresh buffers here would keep a program's own %IW.. storage out of
+     * it, which is not what these are. Caller must hold the image-tables mutex. */
+    void image_tables_capture_inputs(void);
+    void image_tables_restore_inputs(void);
+
     /* Reset all image-table pointers to NULL before unloading a program.
      * Caller must hold the image-tables mutex. */
     void image_tables_clear_null_pointers(void);

@@ -94,7 +94,10 @@ sleep 0.3
     | sed 's/^AT /output=/; s/^output=%Q\([0-9]\)/output=%QX\1/' | sort -u
 } >/tmp/plant.conf
 echo "reference-plant,./build/plugins/libreference_plant.so,1,1,/tmp/plant.conf," >plugins.conf
-./build/plc_main --print-logs >/out/plc_main.log 2>&1 &
+# START_HALTED (session_e2e.sh, from the oracles' setup.startHalted) boots the program halted at
+# its first statement: the harness attaches to a program that has not run. Nothing else does
+# this — a session that restarts start-halted and then detaches releases the halt.
+./build/plc_main --print-logs ${START_HALTED:+--start-halted} >/out/plc_main.log 2>&1 &
 PLC=$!
 for _ in $(seq 1 300); do
   [ -S /tmp/plant.sock ] && [ -S /run/runtime/plc_debug.socket ] && break

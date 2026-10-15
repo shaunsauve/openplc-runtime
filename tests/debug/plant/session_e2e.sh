@@ -64,6 +64,17 @@ mkdir -p "$OUT/src"
 DEPLOYED=$(python3 "$HERE/deploy_tasks.py" "$REPO/$C/program.st" "$OUT/src/program.st" "${ORACLES[@]/#/$REPO/}") \
   || { echo "FAIL: the oracles state different task intervals; run them separately"; exit 2; }
 echo "### deployed tasks: $(echo $DEPLOYED)"
+# A scenario that declares setup.startHalted needs a program that has not run when the harness
+# attaches. The harness cannot deploy that: a session that deploys it and then detaches releases
+# the halt (ADR-005 D4.6 resumes on a clean detach), so the runtime boots halted instead. Off
+# unless an oracle asks, so a run without the declaration boots exactly as before.
+START_HALTED=$(python3 - "$@" <<'PY'
+import json, sys
+print("1" if any(json.load(open(p)).get("setup", {}).get("startHalted") is True
+                for p in sys.argv[1:]) else "")
+PY
+) || { echo "FAIL: cannot read setup.startHalted from the oracles"; exit 2; }
+[ -n "$START_HALTED" ] && echo "### boot start halted: $START_HALTED (an oracle declares setup.startHalted)"
 node "$HERE/gen_payload.mjs" "$STRUCPP" "$OUT/src/program.st" "$OUT/payload"
 grep -q 'STRUCPP_PROBE' "$OUT"/payload/pou_*.cpp || { echo "FAIL: the payload has no probes"; exit 1; }
 [ -f "$OUT/payload/debug-info.json" ] || { echo "FAIL: the payload has no debug-info.json"; exit 1; }
@@ -77,4 +88,5 @@ fi
 docker run --rm --cap-add SYS_NICE --ulimit rtprio=99 --entrypoint bash \
   -v "$REPO":/src:ro -v "$OUT/payload":/payload:ro -v "$OUT":/out ${RUNS_MOUNT[@]+"${RUNS_MOUNT[@]}"} \
   -e SEED="$SEED" -e RESULTS="$RESULTS_IN" -e HARNESS_COMMIT="$COMMIT" -e CORPUS="$C" -e DEPLOYED="$(echo $DEPLOYED)" \
+  -e START_HALTED="$START_HALTED" \
   "$IMAGE" /src/tests/debug/plant/session_inner.sh "${ORACLES[@]}"
