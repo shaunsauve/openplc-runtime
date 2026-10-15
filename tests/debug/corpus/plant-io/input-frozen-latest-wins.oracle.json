@@ -26,7 +26,7 @@
     {"wait": {"wallMs": 300}},
     {"request": "variables", "args": {"path": "PROG0.in_value"}, "expect": {"success": true, "body": {"value": 3, "pending": 6}}},
     {"request": "cycleStep", "args": {"task": "Main"}, "expect": {"success": true}},
-    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "step", "location": {"file": "program.st", "line": "@K"}}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
     {"request": "variables", "args": {"path": "PROG0.in_value"}, "expect": {"success": true, "body": {"value": 6}}, "note": "a cycle step copies in the latest write"},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
     {"request": "continue", "expect": {"success": true}},

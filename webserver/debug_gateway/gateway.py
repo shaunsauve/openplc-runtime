@@ -741,17 +741,31 @@ class DebugGateway:
                 return str(m.get("section") or "VAR")
         return "VAR_EXTERNAL"
 
-    def _read(self, info: DebugInfo, session: ClientSession, nodes: List[Node]) -> List[Json]:
+    def _read(self, info: DebugInfo, session: ClientSession, nodes: List[Node]
+              ) -> Tuple[List[Json], List[Json]]:
+        """Decoded values per node, and the core's `pending` per leaf alongside them.
+
+        `pending` is what the image slot a located %I leaf will next copy in, while
+        the program member stays frozen at what the halted scan took (ADR-004
+        D5.2). The core has always returned it; this is where it was being
+        dropped, which is why A055's oracle saw the field absent rather than
+        wrong. A non-input leaf, or one with no pending write, yields None and the
+        field is omitted — an output is not 'pending', the copy-out decides it.
+        """
         leaves = [n.leaf for n in nodes]
         values: List[Json] = []
+        pending: List[Json] = []
         for i in range(0, len(leaves), _MAX_LEAVES):
             body = self._core("readLeaves", {"session": session.core_session,
                                              "leaves": leaves[i: i + _MAX_LEAVES]})
             values.extend(_list(body.get("values")))
-        return [
+            pending.extend(_list(body.get("pending")))
+        decoded = [
             info.decode(n.type_id, v if isinstance(v, str) else None, n.leaf)
             for n, v in zip(nodes, values)
         ]
+        # zip, not index: a short reply must not shift one leaf's pending onto another's
+        return decoded, pending[: len(nodes)] + [None] * max(0, len(nodes) - len(pending))
 
     def _listing(
         self, session: ClientSession, info: DebugInfo, named: List[Tuple[str, Optional[Node]]],
@@ -762,7 +776,9 @@ class DebugGateway:
         DAP's `value` is display text, with the JSON value in `data`; `native` (the by-path form)
         puts the JSON value in `value`."""
         readable = [n for _, n in named if n is not None and info.is_elementary(n.type_id)]
-        values = dict(zip((n.path for n in readable), self._read(info, session, readable)))
+        raw_values, raw_pending = self._read(info, session, readable)
+        values = dict(zip((n.path for n in readable), raw_values))
+        pendings = dict(zip((n.path for n in readable), raw_pending))
         out: List[JsonObj] = []
         for name, node in named:
             item: JsonObj = {"name": name, "variablesReference": 0}
@@ -773,6 +789,11 @@ class DebugGateway:
                 text = data if isinstance(data, str) or native else json.dumps(data)
                 item.update({"value": text, "data": data, "type": info.type_name(node.type_id),
                              "evaluateName": node.path})
+                pend = pendings.get(node.path)
+                if pend is not None:
+                    # Omitted rather than null when nothing is pending: an absent field
+                    # means "no next copy-in", which null would blur into "unknown".
+                    item["pending"] = info.decode(node.type_id, pend, node.leaf)
             else:
                 item.update({"value": info.type_name(node.type_id), "type": info.type_name(node.type_id),
                              "evaluateName": node.path, "variablesReference": self._ref("path", node.path),
@@ -816,8 +837,15 @@ class DebugGateway:
                 )
         node = info.resolve(path, instance, pou)
         if info.is_elementary(node.type_id):
-            value = self._read(info, session, [node])[0]
-            return {"path": node.path, "type": info.type_name(node.type_id), "value": value}
+            value, pending = self._read(info, session, [node])
+            out: JsonObj = {"path": node.path, "type": info.type_name(node.type_id),
+                            "value": value[0]}
+            if pending[0] is not None:
+                # The by-path form carries it too: a client asking for one variable by
+                # path wants the same facts the listing gives (ADR-004 D5.2), and an
+                # absent field means "no next copy-in", not "unknown".
+                out["pending"] = info.decode(node.type_id, pending[0], node.leaf)
+            return out
         return {
             "path": node.path,
             "type": info.type_name(node.type_id),
