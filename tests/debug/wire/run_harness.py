@@ -79,8 +79,12 @@ def run(
     plant: Optional[Plant] = None,
     build: Optional[BuildOutputs] = None,
     deployed_tasks: Optional[Dict[str, float]] = None,
+    deployed_params: Optional[Dict[str, float]] = None,
 ) -> List[runner.RunResult]:
-    endpoint = WssEndpoint(url, token=token, insecure=insecure, deployed_tasks=deployed_tasks)
+    endpoint = WssEndpoint(
+        url, token=token, insecure=insecure, deployed_tasks=deployed_tasks,
+        deployed_params=deployed_params,
+    )
     return [
         runner.run_scenario(
             p, endpoint, plant or UnavailablePlant(), WallClock(), build or UnavailableBuild()
@@ -101,6 +105,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ran-on", default="", help="where the run happened, for --results rows")
     ap.add_argument("--deployed-task", action="append", default=[], metavar="NAME=MS",
                     help="a task of the deployed program and its interval (repeatable)")
+    ap.add_argument("--deployed-param", action="append", default=[], metavar="KEY=SEC",
+                    help="a gateway heartbeat param the driver deployed, as the oracle's "
+                         "setup.params names it (P1_s=2 or P2_s=15; repeatable)")
     opts = ap.parse_args(argv)
     plant = ReferencePlant(opts.plant) if opts.plant else None
     build = build_views.DirectoryBuild(opts.build_dir) if opts.build_dir else None
@@ -108,7 +115,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     for item in opts.deployed_task:
         name, _, ms = item.partition("=")
         deployed[name] = float(ms)
-    results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed)
+    deployed_params: Dict[str, float] = {}
+    for item in opts.deployed_param:
+        key, _, seconds = item.partition("=")
+        deployed_params[key] = float(seconds)
+    results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed,
+                  deployed_params)
     rows = []
     for result in results:
         print(runner.format_trace(result), flush=True)

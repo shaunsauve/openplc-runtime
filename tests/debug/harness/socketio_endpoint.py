@@ -40,11 +40,15 @@ class SocketIOEndpoint:
         insecure: bool,
         user_tokens: Optional[Dict[str, str]] = None,
         deployed_tasks: Optional[Dict[str, float]] = None,
+        deployed_params: Optional[Dict[str, float]] = None,
     ) -> None:
         parsed = urlparse(url)
         # The task intervals (ms) of the program the caller deployed (T-VER-TASKDEPLOY): a
         # scenario's setup.tasks is met when it names these intervals, and refused otherwise.
         self.deployed_tasks = {k.casefold(): v for k, v in (deployed_tasks or {}).items()}
+        # The gateway's heartbeat params the caller deployed (T-VER-PARAMDEPLOY), as the
+        # oracle's setup.params names them (`P1_s`/`P2_s`, seconds).
+        self.deployed_params = dict(deployed_params or {})
         # Named test users' JWTs (`~token: "user:<name>"`): permission, lock and hand-over
         # scenarios need several identities, and the harness cannot mint them.
         self.user_tokens = dict(user_tokens or {})
@@ -58,6 +62,8 @@ class SocketIOEndpoint:
         # refuses the scenario when it is not in place; the handshake is where the runtime says
         # whether it can serve it at all.
         self.requires_start_halted = False
+        # Set by prepare() when the scenario's setup.params names the deployed heartbeat params.
+        self.requires_params = False
         self.description = f"endpoint {self.host}:{self.port}"
 
     def _probe(self) -> None:
@@ -79,17 +85,40 @@ class SocketIOEndpoint:
                 return False
         return True
 
+    def _params_deployed(self, params: Json) -> bool:
+        """True when the heartbeat params deployed are the ones setup.params states.
+
+        The P1/P2 a session runs against is the gateway's own, and it reports them in the
+        handshake; the driver deploys the oracles' setup.params (T-VER-PARAMDEPLOY) and this
+        says whether the declaration matches what was deployed, so a scenario cannot be judged
+        against a P2 it did not ask for.
+        """
+        if not isinstance(params, dict) or not self.deployed_params:
+            return False
+        for key, want in params.items():
+            if key not in ("P1_s", "P2_s"):
+                return False
+            got = self.deployed_params.get(key)
+            if got is None or float(got) != float(want):
+                return False
+        return True
+
     def prepare(self, setup: JsonObj) -> None:
         self._probe()
         # No deploy step rewrites a build or the halt configuration for a run yet; a scenario
         # that needs one cannot be judged against whatever happens to be loaded, so it is
-        # refused. Task intervals are deployed by the caller (tests/debug/plant/session_e2e.sh)
-        # and declared here.
+        # refused. Task intervals (setup.tasks) and the heartbeat params (setup.params) are
+        # deployed by the caller (tests/debug/plant/session_e2e.sh) and checked here.
         self.requires_start_halted = setup.get("startHalted") is True
+        self.requires_params = self._params_deployed(setup["params"]) if "params" in setup else False
         needs = [
             k
             for k in ("build", "tasks", "params", "haltPolicy", "safeValues", "haltMode")
-            if k in setup and not (k == "tasks" and self._tasks_deployed(setup[k]))
+            if k in setup
+            and not (
+                (k == "tasks" and self._tasks_deployed(setup[k]))
+                or (k == "params" and self.requires_params)
+            )
         ]
         if needs:
             raise Blocked(
@@ -249,11 +278,14 @@ class SocketIOSession:
         return resp
 
     def _check_capabilities(self, resp: JsonObj) -> None:
-        """A scenario whose setup asks for `startHalted` needs a runtime that serves it.
+        """A scenario whose setup asks for `startHalted` needs a runtime that serves it, and one
+        whose setup.params names P1/P2 needs a gateway running at them.
 
         The refusal belongs here, at the handshake that declares the capability, and not at
         setup: the runtime's own advertisement is the evidence, so a scenario that cannot run
         here says which runtime would run it."""
+        if self.endpoint.requires_params:
+            self._check_params(resp)
         if not self.endpoint.requires_start_halted:
             return
         body = resp.get("body")
@@ -263,6 +295,23 @@ class SocketIOSession:
                 "setup startHalted: this runtime does not advertise the startHalted "
                 "capability, so it cannot restart the program halted at its first statement"
             )
+
+    def _check_params(self, resp: JsonObj) -> None:
+        """The gateway reports the P1/P2 it runs the heartbeat and the safe-stop timer on."""
+        body = resp.get("body")
+        params = body.get("params") if isinstance(body, dict) else None
+        if not isinstance(params, dict):
+            raise Blocked("setup params: this runtime reports no heartbeat params")
+        want = self.endpoint.deployed_params
+        for key, name in (("P1_s", "P1"), ("P2_s", "P2")):
+            if key not in want:
+                continue
+            got = params.get(name)
+            if not isinstance(got, (int, float)) or float(got) != float(want[key]):
+                raise Blocked(
+                    f"setup params: {name} is deployed at {want[key]:g} s but the runtime runs "
+                    f"at {got!r}, so the scenario is not the one it was written for"
+                )
 
     def _start_heartbeat(self, resp: JsonObj) -> None:
         # ADR-005 D4.3: an idle controller sends `heartbeat` every P1, or P2 expiry safe-stops a halt.

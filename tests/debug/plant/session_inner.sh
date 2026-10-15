@@ -106,7 +106,9 @@ done
 sleep 2
 
 echo "### start the gateway (webserver/debug_gateway) on https://127.0.0.1:8443, linked to plc_main"
-"$PY" tests/debug/wire/serve.py 127.0.0.1 8443 /tmp/token \
+# PARAMS (session_e2e.sh, from the oracles' setup.params) deploys the gateway's P1/P2; absent, the
+# gateway reads <data dir>/debug.conf as the runtime does, which is the run before any.
+OPENPLC_DEBUG_PARAMS="$PARAMS" "$PY" tests/debug/wire/serve.py 127.0.0.1 8443 /tmp/token \
   /run/runtime/plc_debug.socket /work/core/generated/debug-info.json >/out/gateway.log 2>&1 &
 GW=$!
 for _ in $(seq 1 300); do [ -s /tmp/token ] && break; sleep 0.1; done
@@ -115,9 +117,19 @@ sleep 1
 
 echo "### harness over WSS"
 ARCH=$(uname -m)
+# The heartbeat params the oracles state are what PARAMS deployed (T-VER-PARAMDEPLOY); the harness
+# refuses setup.params that names anything else, and the handshake confirms the gateway's own.
+PARAM_ARGS=()
+while IFS= read -r line; do
+  case "$line" in
+    P1\ *) PARAM_ARGS+=(--deployed-param "P1_s=${line#*= }") ;;
+    P2\ *) PARAM_ARGS+=(--deployed-param "P2_s=${line#*= }") ;;
+  esac
+done <<<"${PARAMS:-}"
 "$PY" tests/debug/wire/run_harness.py --endpoint https://127.0.0.1:8443 --insecure \
   --token "$(cat /tmp/token)" --plant /tmp/plant.sock --build-dir /out/build \
   ${RESULTS:+--results "$RESULTS"} $(for t in $DEPLOYED; do printf -- '--deployed-task %s ' "$t"; done) \
+  ${PARAM_ARGS[@]+"${PARAM_ARGS[@]}"} \
   --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
   "$@" | tee /out/harness.txt
 RC=${PIPESTATUS[0]}

@@ -8,6 +8,11 @@ With CORE_SOCKET and DEBUG_INFO the gateway links to a real core (plc_main's
 /run/runtime/plc_debug.socket) and reads that program's debug-info.json, as webserver/app.py
 wires it; without them it serves the fake core.
 
+Env:   OPENPLC_DEBUG_PARAMS  deploys the gateway's P1/P2, as `P1 = <s>` `P2 = <s>` (the same
+        text debug.conf holds, from an oracle's setup.params). Absent, the gateway reads
+        <data dir>/debug.conf as the runtime does. This is the deploy step for a scenario's
+        setup.params; tests/debug/harness/socketio_endpoint.py checks the gateway reports it.
+
 See also:
   tests/debug/wire/wire_server.py - the stack being served.
   tests/debug/wire/netns.sh - the caller.
@@ -37,7 +42,33 @@ os.environ.setdefault("PEPPER", secrets.token_hex(32))
 from flask_jwt_extended import create_access_token  # noqa: E402
 
 from webserver import restapi  # noqa: E402
+from webserver.debug_gateway.session_guard import HeartbeatParams  # noqa: E402
 from wire_server import WireServer  # noqa: E402
+
+
+def _deployed_params() -> HeartbeatParams | None:
+    """OPENPLC_DEBUG_PARAMS (`P1 = <s>` `P2 = <s>` lines) as the gateway's heartbeat params.
+
+    A scenario's setup.params states the P1/P2 it is written against; this is the deploy step
+    for it (T-VER-PARAMDEPLOY, the sibling of the task intervals and of --start-halted). Absent
+    the env var, params is None and the gateway reads debug.conf, as the runtime does.
+    """
+    text = os.environ.get("OPENPLC_DEBUG_PARAMS")
+    if not text:
+        return None
+    values = {}
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            raise SystemExit(f"OPENPLC_DEBUG_PARAMS: {raw!r} is not `key = value`")
+        values[key.strip()] = float(value.strip())
+    unknown = set(values) - {"P1", "P2"}
+    if unknown:
+        raise SystemExit(f"OPENPLC_DEBUG_PARAMS: unknown key(s) {sorted(unknown)}")
+    return HeartbeatParams(values.get("P1", 2.0), values.get("P2", 15.0))
 
 
 def main() -> None:
@@ -63,7 +94,8 @@ def main() -> None:
         host=host,
         port=port,
         core_path=real[0] if real else None,
-        info_path=Path(real[1]) if real else None,
+        info_path=Path(real[1]) if len(real) > 1 else None,
+        params=_deployed_params(),
     )
     # GET /api/status's `debug` block (ADR-003 D9), as the webserver's status handler adds it
     # from the gateway (webserver/app.py handle_status; this server does not import app.py,

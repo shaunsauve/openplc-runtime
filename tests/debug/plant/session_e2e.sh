@@ -75,6 +75,28 @@ print("1" if any(json.load(open(p)).get("setup", {}).get("startHalted") is True
 PY
 ) || { echo "FAIL: cannot read setup.startHalted from the oracles"; exit 2; }
 [ -n "$START_HALTED" ] && echo "### boot start halted: $START_HALTED (an oracle declares setup.startHalted)"
+# T-VER-PARAMDEPLOY: a scenario that declares setup.params needs the gateway running at that
+# P1/P2. Nothing in the container does that itself, so the driver deploys it — debug.conf text
+# read by serve.py (OPENPLC_DEBUG_PARAMS) — and the harness's prepare() refuses the scenario
+# unless what was deployed is what the oracle states, and the handshake confirms the gateway's
+# own P1/P2. Off unless an oracle asks, so a run without the declaration is unchanged.
+PARAMS=$(python3 - "$@" <<'PY'
+import json, sys
+sets = []
+for p in sys.argv[1:]:
+    params = json.load(open(p)).get("setup", {}).get("params")
+    if params is not None:
+        sets.append((p, params))
+if not sets:
+    sys.exit(0)
+first = sets[0][1]
+for path, params in sets[1:]:
+    if params != first:
+        sys.exit(f"oracles state different heartbeat params ({path} vs {sets[0][0]})")
+print("\n".join(f"{k.replace('_s', '')} = {v:g}" for k, v in sorted(first.items())))
+PY
+) || { echo "FAIL: cannot read setup.params from the oracles"; exit 2; }
+[ -n "$PARAMS" ] && echo "### deployed heartbeat params: $(echo $PARAMS | tr '\n' ' ') (an oracle declares setup.params)"
 node "$HERE/gen_payload.mjs" "$STRUCPP" "$OUT/src/program.st" "$OUT/payload"
 grep -q 'STRUCPP_PROBE' "$OUT"/payload/pou_*.cpp || { echo "FAIL: the payload has no probes"; exit 1; }
 [ -f "$OUT/payload/debug-info.json" ] || { echo "FAIL: the payload has no debug-info.json"; exit 1; }
@@ -88,5 +110,5 @@ fi
 docker run --rm --cap-add SYS_NICE --ulimit rtprio=99 --entrypoint bash \
   -v "$REPO":/src:ro -v "$OUT/payload":/payload:ro -v "$OUT":/out ${RUNS_MOUNT[@]+"${RUNS_MOUNT[@]}"} \
   -e SEED="$SEED" -e RESULTS="$RESULTS_IN" -e HARNESS_COMMIT="$COMMIT" -e CORPUS="$C" -e DEPLOYED="$(echo $DEPLOYED)" \
-  -e START_HALTED="$START_HALTED" \
+  -e START_HALTED="$START_HALTED" -e PARAMS="$PARAMS" \
   "$IMAGE" /src/tests/debug/plant/session_inner.sh "${ORACLES[@]}"
