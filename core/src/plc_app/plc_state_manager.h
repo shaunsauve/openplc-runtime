@@ -312,6 +312,28 @@ bool plc_run_control_run_scans(size_t task_idx, long scans, int timeout_ms);
  */
 bool plc_run_control_pause(size_t task_idx);
 
+/* plc_restart_program's outcomes (F037). */
+#define PLC_RESTART_OK      0
+#define PLC_RESTART_BUSY    1 /* a state change is already in flight */
+#define PLC_RESTART_REFUSED 2 /* safe-stopped, or the mode switch forbids running */
+#define PLC_RESTART_FAILED  3 /* the stop or the start did not land */
+
+/**
+ * @brief Stop the program and start it again, for the debugger's `restart` (F037).
+ *
+ * Runs both transitions on the calling thread (the core link's socket thread, which is not a scan
+ * thread) and returns once the landing is published, so the caller can answer the request with a
+ * state that is true. The debug session lives in the link, not in the program, so it survives
+ * (ADR-005 D8); the agent re-arms the breakpoints for the same probe space on the bind.
+ *
+ * @param cold        true re-initialises every variable, the retained ones included; false keeps
+ *                    the retained values the stop committed
+ * @param start_halted true parks every task before the first statement of its first scan; the entry
+ *                    trap is armed inside the start, before the first release
+ * @return PLC_RESTART_OK, or one of the codes above
+ */
+int plc_restart_program(bool cold, bool start_halted);
+
 /**
  * @brief Apply the halt policy to a task that has just halted (ADR-004 D1.3).
  *

@@ -190,6 +190,8 @@ const char *reason_name(dbg_stop_reason_t r)
     case DBG_STOP_BREAKPOINT: return "breakpoint";
     case DBG_STOP_PAUSE: return "pause";
     case DBG_STOP_STEP: return "step";
+    /* F037's start-halted restart: parked before the first statement of the first scan. */
+    case DBG_STOP_ENTRY: return "entry";
     default: return "pause";
     }
 }
@@ -246,6 +248,8 @@ cJSON *hello_locked(void)
     cJSON_AddBoolToObject(caps, "conditional", false);
     cJSON_AddBoolToObject(caps, "control", true);
     cJSON_AddBoolToObject(caps, "cycleStep", true);
+    /* F037: this core restarts the program and can arm the halt at its first statement. */
+    cJSON_AddBoolToObject(caps, "startHalted", true);
     cJSON_AddItemToObject(b, "capabilities", caps);
     cJSON_AddNumberToObject(b, "probes", probes);
     cJSON *img = cJSON_CreateObject();
@@ -443,8 +447,9 @@ void agent_pass(void)
             add_vt(b, i);
             send_event("stopped", b);
             plc_run_control_halted(i);
-            /* D4.11: a step that landed clears the trap; a breakpoint starts the all-stop. */
-            if (s.reason == DBG_STOP_STEP) debug_agent_clear_trap();
+            /* D4.11: a step that landed clears the trap, and so does a start-halted entry stop:
+             * it is one shot, and every task has its own (the agent arms one per task). */
+            if (s.reason == DBG_STOP_STEP || s.reason == DBG_STOP_ENTRY) debug_agent_clear_trap();
             if (s.reason == DBG_STOP_BREAKPOINT) all_stop_locked();
             continue;
         }
@@ -909,7 +914,7 @@ Reply handle(const char *command, cJSON *args)
     const bool known = is_command(command, {"detach", "terminate", "beatClient", "setBreakpoints",
                                             "clearAllBreakpoints", "continue", "pause", "next",
                                             "stepIn", "stepOut", "stop", "stackTrace",
-                                            "readLeaves", "cycleStep"});
+                                            "readLeaves", "cycleStep", "restart"});
     if (!known)
         return fail("UNSUPPORTED", std::string("this runtime core does not implement ") + command);
 
@@ -946,6 +951,46 @@ Reply handle(const char *command, cJSON *args)
             debug_agent_clear_trap();
             if (!plc_begin_transition(PLC_STATE_STOPPED)) return fail("BUSY", "a state change is in flight");
         }
+        return success();
+    }
+    if (!std::strcmp(command, "restart"))
+    {
+        /* F037. The program goes away and comes back, so the request answers only once the new
+         * program is RUNNING: the stop and the start both run here, on the link's socket thread,
+         * which is not a scan thread and may wait (as `stop` already does). */
+        cJSON     *kind = arg(args, "kind"), *halt = arg(args, "startHalted");
+        const bool named = kind && cJSON_IsString(kind);
+        if (kind && (!named || (std::strcmp(kind->valuestring, "warm") &&
+                                 std::strcmp(kind->valuestring, "cold") &&
+                                 std::strcmp(kind->valuestring, "reset"))))
+            return fail("BAD_REQUEST", "restart kind must be warm, cold or reset");
+        if (named && !std::strcmp(kind->valuestring, "reset"))
+            return fail("UNSUPPORTED",
+                        "a reset-to-origin restart clears the retained store, which this core "
+                        "cannot do; use warm or cold");
+        if (halt && !cJSON_IsBool(halt) && !cJSON_IsNumber(halt))
+            return fail("BAD_REQUEST", "startHalted must be a boolean");
+        const bool start_halted = cJSON_IsTrue(halt);
+        if (start_halted && running && debug_agent_probe_count() == 0)
+            return fail("NO_PROBES", "the running program was built without probes");
+
+        /* No stop, step or breakpoint survives the reload: the task indices and the probe space
+         * belong to the program that is going away. */
+        g_pausing = false;
+        debug_agent_clear_trap();
+        for (auto &v : g_view) v = TaskView{};
+        for (auto &c : g_cycle) c = Cycle{};
+        g_last_stop_task = -1;
+
+        const int rc = plc_restart_program(named && !std::strcmp(kind->valuestring, "cold"),
+                                           start_halted);
+        if (rc == PLC_RESTART_BUSY) return fail("BUSY", "a state change is in flight");
+        if (rc == PLC_RESTART_REFUSED)
+            return fail("SAFE_STOPPED",
+                        "the PLC is safe-stopped, or its mode switch forbids running; a user with "
+                        "control must start it");
+        if (rc != PLC_RESTART_OK)
+            return fail("INTERNAL", "the program did not restart; the PLC log has the reason");
         return success();
     }
 

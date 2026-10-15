@@ -116,7 +116,16 @@ class ReferencePlant:
     # -- polling
 
     def _poll_once(self) -> None:
-        rows = self.client.ask(f"SAMPLES {self.seq}", until="END")
+        try:
+            rows = self.client.ask(f"SAMPLES {self.seq}", until="END")
+        except Blocked:
+            # A debugger restart stops the program and starts it again, and a start re-initialises
+            # the plugins: the plant is a NEW instance whose socket is a new file and whose
+            # samples are numbered from 1 again. Reconnect and ask from the start, or the old
+            # cursor would wait out every sample the new instance will ever take.
+            self.client.close()
+            self.seq = 0
+            rows = self.client.ask("SAMPLES 0", until="END")
         fresh: List[PlantSample] = []
         for row in rows:
             doc = cast(JsonObj, json.loads(row))

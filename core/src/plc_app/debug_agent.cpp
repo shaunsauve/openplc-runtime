@@ -88,6 +88,9 @@ TaskSlot g_tasks[DBG_MAX_TASKS];
  * or a probe ID for AT_PROBE, so it takes the 32-bit half. */
 std::atomic<uint64_t> g_trap{0};
 std::atomic<uint32_t> g_attach_gen{0};
+/* F037's start-halted restart: one entry stop armed per task, cleared by the task that takes it.
+ * A separate flag per task, not one trap, so a sibling task cannot spend another's entry stop. */
+std::atomic<uint8_t> g_entry[DBG_MAX_TASKS];
 
 std::atomic<uint64_t> g_condition_errors{0};
 std::atomic<uint64_t> g_skipped_locked{0};
@@ -198,6 +201,9 @@ bool trap_matches(uint64_t trap, size_t task, uint32_t probe)
     case DBG_TRAP_STEP_OVER: return tl_depth <= bound;
     case DBG_TRAP_STEP_OUT: return tl_depth < bound;
     case DBG_TRAP_AT_PROBE: return probe == bound;
+    /* One shot per task: the task that took its entry stop returns at once until the agent
+     * clears the trap, which it does as soon as the first entry stop lands (D4.11). */
+    case DBG_TRAP_ENTRY: return task < DBG_MAX_TASKS && g_entry[task].load(std::memory_order_relaxed);
     default: return false;
     }
 }
@@ -305,6 +311,23 @@ dbg_status_t set_locked(uint32_t probe, const uint8_t *cond, size_t cond_len, ui
     return DBG_OK;
 }
 
+/* Trap publication (D6.3). The predicate first, then TRAP in every flag byte: a probe that sees
+ * TRAP reaches the slow path, whose acquire fence pairs with the release fence here. Under g_mu. */
+void set_trap_locked(dbg_trap_kind_t kind, uint32_t task, uint32_t bound)
+{
+    const uint64_t pred = (uint64_t)(kind & 0xFF) | (uint64_t)(task & 0xFF) << 8 |
+                          (uint64_t)(++g_trap_gen & 0xFFFF) << 16 | (uint64_t)bound << 32;
+    g_trap.store(pred, std::memory_order_relaxed);
+    /* Pairs with the slow path's fence through the flag byte: a probe that sees TRAP reads pred. */
+    std::atomic_thread_fence(std::memory_order_release);
+    for (uint32_t p = 0; g_flags && p < g_count; ++p)
+    {
+        const uint8_t v = flag_load(p);
+        if (!(v & DBG_FLAG_TRAP)) flag_store(p, (uint8_t)(v | DBG_FLAG_TRAP));
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+}
+
 bool clear_locked(uint32_t probe)
 {
     if (!g_bp || probe >= g_count || g_cur[probe] < 0) return false;
@@ -332,7 +355,9 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
     const uint64_t q = t->qs.fetch_add(1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_seq_cst); /* ③; also D2.1's acquire */
 
-    const bool trap_wants = trap_matches(g_trap.load(std::memory_order_relaxed), tl_idx, id);
+    const uint64_t trap        = g_trap.load(std::memory_order_relaxed);
+    const bool     trap_wants  = trap_matches(trap, tl_idx, id);
+    const bool     entry_wants = trap_wants && (uint32_t)(trap & 0xFF) == DBG_TRAP_ENTRY;
 
     bool     bp_wants = false;
     uint32_t hits     = 0;
@@ -361,10 +386,14 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
         return;
     }
     if (!g_host.park) return;
+    /* The entry stop belongs to this task alone and is spent here, before the park: a task
+     * resumed from it finishes that scan and every scan after without stopping at entry again. */
+    if (entry_wants) g_entry[tl_idx].store(0, std::memory_order_relaxed);
 
     timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     t->stop.reason   = bp_wants ? DBG_STOP_BREAKPOINT
+                     : entry_wants ? DBG_STOP_ENTRY
                      : ((g_trap.load(std::memory_order_relaxed) & 0xFF) == DBG_TRAP_PAUSE ? DBG_STOP_PAUSE
                                                                                           : DBG_STOP_STEP);
     t->stop.probe    = id;
@@ -440,6 +469,7 @@ extern "C" void debug_agent_bind(volatile uint8_t *flags, uint32_t probe_count, 
     reset_pools_locked();
     for (size_t t = 0; t < DBG_MAX_TASKS; ++t) g_tasks[t].stop_pending.store(false);
     g_trap.store(0, std::memory_order_relaxed);
+    for (size_t t = 0; t < DBG_MAX_TASKS; ++t) g_entry[t].store(0, std::memory_order_relaxed);
     for (uint32_t p = 0; p < probe_count; ++p) flag_store(p, 0);
 
     /* Breakpoints kept across a stop: re-armed only for the same probe space. */
@@ -464,6 +494,7 @@ extern "C" void debug_agent_unbind(void)
     g_cur.clear();
     reset_pools_locked();
     g_trap.store(0, std::memory_order_relaxed);
+    for (size_t t = 0; t < DBG_MAX_TASKS; ++t) g_entry[t].store(0, std::memory_order_relaxed);
 }
 
 extern "C" uint32_t debug_agent_probe_count(void)
@@ -530,17 +561,7 @@ extern "C" void debug_agent_reclaim(void)
 extern "C" void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t bound)
 {
     std::lock_guard<std::mutex> g(g_mu);
-    const uint64_t pred = (uint64_t)(kind & 0xFF) | (uint64_t)(task & 0xFF) << 8 |
-                          (uint64_t)(++g_trap_gen & 0xFFFF) << 16 | (uint64_t)bound << 32;
-    g_trap.store(pred, std::memory_order_relaxed);
-    /* Pairs with the slow path's fence through the flag byte: a probe that sees TRAP reads pred. */
-    std::atomic_thread_fence(std::memory_order_release);
-    for (uint32_t p = 0; g_flags && p < g_count; ++p)
-    {
-        const uint8_t v = flag_load(p);
-        if (!(v & DBG_FLAG_TRAP)) flag_store(p, (uint8_t)(v | DBG_FLAG_TRAP));
-    }
-    std::atomic_thread_fence(std::memory_order_seq_cst);
+    set_trap_locked(kind, task, bound);
 }
 
 extern "C" void debug_agent_clear_trap(void)
@@ -553,6 +574,17 @@ extern "C" void debug_agent_clear_trap(void)
         const uint8_t v = flag_load(p);
         if (v & DBG_FLAG_TRAP) flag_store(p, (uint8_t)(v & ~DBG_FLAG_TRAP));
     }
+    for (size_t t = 0; t < DBG_MAX_TASKS; ++t) g_entry[t].store(0, std::memory_order_relaxed);
+}
+
+extern "C" bool debug_agent_arm_entry(void)
+{
+    std::lock_guard<std::mutex> g(g_mu);
+    if (!g_bp || g_count == 0) return false;
+    for (size_t t = 0; t < DBG_MAX_TASKS; ++t)
+        g_entry[t].store(t < g_task_count ? 1 : 0, std::memory_order_relaxed);
+    set_trap_locked(DBG_TRAP_ENTRY, DBG_TASK_ANY, 0);
+    return true;
 }
 
 extern "C" size_t debug_agent_frames(const dbg_stop_t *stop, dbg_frame_t *out, size_t max,

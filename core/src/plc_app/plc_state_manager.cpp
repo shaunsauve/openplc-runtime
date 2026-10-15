@@ -40,6 +40,7 @@ extern "C" {
 #include "plc_output_hold.h"
 #include "plc_retain.h"
 #include "plc_state_manager.h"
+#include "plc_switch.h"
 #include "plcapp_manager.h"
 #include "scan_cycle_manager.h"
 #include "task_policy.h"
@@ -640,6 +641,17 @@ static uint64_t safe_stop_entry(unsigned long long base_ns, bool *cycle_end_pend
 /* Set by every run-control request so the dispatcher applies it while waiting out a tick. */
 static std::atomic<bool> g_run_requests_pending{false};
 
+/* F037's restart, consumed by the next cycle thread.
+ * g_start_halted has to be read INSIDE the start: the entry trap must be armed after the
+ * program's bind and before the first release, and the first release follows the RUNNING
+ * publish by microseconds, so a caller that armed it after the landing would be one scan too
+ * late (A041's red-proof: the plant would count 1 scan). */
+static std::atomic<bool> g_start_halted{false};
+/* A cold restart re-initialises every variable, the RETAIN ones included (F037): the next load
+ * writes the fresh values instead of restoring the store, so a later warm restart cannot bring
+ * back what this one discarded. */
+static std::atomic<bool> g_retain_drop{false};
+
 /* True while any task is stopped inside its scan: the window must not read a half-finished
  * scan (ADR-001 D7.1, ADR-004 D6.5). */
 static bool any_task_parked(void)
@@ -888,7 +900,19 @@ void *plc_cycle_thread(void *arg)
      * for THIS program and discards a prior program's bytes. Must run
      * after located-variable binding so image slots exist. */
     plc_retain_init();
-    plc_retain_read();
+    if (g_retain_drop.exchange(false, std::memory_order_acq_rel))
+    {
+        /* A cold restart: every variable starts at its initial value, the RETAIN ones included.
+         * The save writes those values over the store instead of restoring it, so the values
+         * this restart discarded cannot come back at the next warm one. No task has been released
+         * yet, which is the quiescence the retained save needs. */
+        plc_retain_save();
+        log_info("Cold restart: retained values re-initialised");
+    }
+    else
+    {
+        plc_retain_read();
+    }
 
     init_image_journal(itm);
 
@@ -1127,6 +1151,18 @@ void *plc_cycle_thread(void *arg)
 
     bind_debug_probes(pm);
     debug_link_set_image(ext_strucpp_program_md5, ext_strucpp_dbg_build_id);
+
+    /* A start-halted restart (F037): every task stops before the first statement of its first
+     * scan. Armed here — after the bind, before the threads exist and long before the first
+     * release — because the halt is probe-level (ADR-001 D2): the task has to run, and stop
+     * before executing anything. */
+    if (g_start_halted.exchange(false, std::memory_order_acq_rel))
+    {
+        if (debug_agent_arm_entry())
+            log_info("[debug] start halted: every task stops at its first probe");
+        else
+            log_warn("[debug] start halted asked for, but this program has no probes to stop at");
+    }
 
     /* Spawn task threads. On partial failure (pthread_create succeeds
      * for 0..i-1, fails at i): flip state to ERROR, post every
@@ -1808,6 +1844,70 @@ extern "C" bool plc_claim_granted_start(const char *user)
 {
     if (!user || !user[0]) return false;
     return claim_transition(PLC_STATE_RUNNING, ClaimKind::Granted, user);
+}
+
+/* Waits for the landing of a claimed transition, and reports whether it landed. The bound is the
+ * same one the socket's transition worker and the watchdog use, so a stuck landing is the
+ * runtime's problem to end, not this caller's. */
+static bool wait_for_landing(void)
+{
+    const timespec poll = {0, 20 * NS_PER_MS};
+    for (int waited = 0; plc_state_is_transitioning(); waited += 20)
+    {
+        if (waited >= PLC_TRANSITION_LANDING_TIMEOUT_MS) return false;
+        nanosleep(&poll, nullptr);
+    }
+    return true;
+}
+
+extern "C" int plc_restart_program(bool cold, bool start_halted)
+{
+    PLCState s = plc_get_state();
+    if (plc_state_is_transitioning()) return PLC_RESTART_BUSY;
+    /* SAFE_STOPPED needs a granted start from a user with control (plc_claim_granted_start), and
+     * the mode switch is authoritative over a debugger's request to start. */
+    if (s == PLC_STATE_SAFE_STOPPED) return PLC_RESTART_REFUSED;
+    if (!plc_switch_allows_run()) return PLC_RESTART_REFUSED;
+
+    /* Set before the start is claimed and cleared on every path that does not reach one, so a
+     * refused restart cannot arm the entry trap on somebody else's start. */
+    g_retain_drop.store(cold, std::memory_order_release);
+    g_start_halted.store(start_halted, std::memory_order_release);
+
+    if (s == PLC_STATE_RUNNING)
+    {
+        if (!claim_transition(PLC_STATE_STOPPED, ClaimKind::Explicit, nullptr))
+        {
+            g_start_halted.store(false, std::memory_order_release);
+            g_retain_drop.store(false, std::memory_order_release);
+            return PLC_RESTART_BUSY;
+        }
+        plc_set_state(PLC_STATE_STOPPED);
+        if (!wait_for_landing())
+        {
+            g_start_halted.store(false, std::memory_order_release);
+            g_retain_drop.store(false, std::memory_order_release);
+            return PLC_RESTART_FAILED;
+        }
+    }
+    if (!claim_transition(PLC_STATE_RUNNING, ClaimKind::Explicit, nullptr))
+    {
+        g_start_halted.store(false, std::memory_order_release);
+        g_retain_drop.store(false, std::memory_order_release);
+        return plc_get_state() == PLC_STATE_SAFE_STOPPED ? PLC_RESTART_REFUSED : PLC_RESTART_BUSY;
+    }
+    plc_set_state(PLC_STATE_RUNNING);
+    /* The start is refused by the same gate claim_transition applies, so a refusal here is a
+     * drop, not a landing: wait for it only if one is in flight. */
+    if (plc_state_is_transitioning() && !wait_for_landing())
+    {
+        g_start_halted.store(false, std::memory_order_release);
+        g_retain_drop.store(false, std::memory_order_release);
+        return PLC_RESTART_FAILED;
+    }
+    /* RUNNING is published after the task threads exist and before the first release, so the
+     * entry trap is armed by the time this returns (A041). */
+    return plc_get_state() == PLC_STATE_RUNNING ? PLC_RESTART_OK : PLC_RESTART_FAILED;
 }
 
 extern "C" void plc_publish_final_state(PLCState final_state)

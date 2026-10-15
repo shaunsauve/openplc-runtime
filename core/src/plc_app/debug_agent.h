@@ -62,6 +62,7 @@ typedef enum
     DBG_TRAP_STEP_OVER,/* the next probe of the task at frame depth <= bound */
     DBG_TRAP_STEP_OUT, /* the next probe of the task at frame depth < bound */
     DBG_TRAP_AT_PROBE, /* probe `bound` of the task (cycle step's second scan, D4.9) */
+    DBG_TRAP_ENTRY,    /* the first probe each task reaches after a start-halted restart (F037) */
 } dbg_trap_kind_t;
 
 #define DBG_TASK_ANY 0xFFu
@@ -72,6 +73,9 @@ typedef enum
     DBG_STOP_BREAKPOINT,
     DBG_STOP_PAUSE,
     DBG_STOP_STEP,
+    /* F037's startHalted: the task is parked before the first statement of its first scan of
+     * the program a restart just loaded. Probe-level, like every other halt (ADR-001 D2). */
+    DBG_STOP_ENTRY,
 } dbg_stop_reason_t;
 
 struct strucpp_dbg_frame;
@@ -153,6 +157,19 @@ void debug_agent_reclaim(void);
 /* bound: the frame depth for STEP_OVER/STEP_OUT, the probe ID for AT_PROBE. */
 void debug_agent_set_trap(dbg_trap_kind_t kind, uint32_t task, uint32_t bound);
 void debug_agent_clear_trap(void);
+
+/**
+ * @brief Arm the start-halted restart trap: every task stops before the first statement of its
+ *        first scan (F037 `restart {startHalted}`).
+ *
+ * One shot per task: a task that has taken its entry stop is not armed again, so a task whose
+ * scan finished before the agent cleared the trap resumes and runs. The state manager calls this
+ * inside a start, after the program's bind and before the first release; arming it any later
+ * would be too late, the first scan is released microseconds after RUNNING is published.
+ *
+ * @return false when the bound program has no probes, so nothing can stop (DBG_E_NO_PROBES)
+ */
+bool debug_agent_arm_entry(void);
 
 /* ---- Stops (agent thread) ---- */
 

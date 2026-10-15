@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from flask import request
 from flask_jwt_extended import decode_token, get_current_user, verify_jwt_in_request
@@ -70,6 +70,10 @@ OBSERVER_EVENTS = frozenset(
      "programReplaced"}
 )
 _CODES = {c.value: c for c in ErrorCode}
+# A restart stops the program and starts it again, so the core answers it only once the new
+# program is RUNNING. The link's default 2 s is shorter than a program's own stop budget
+# (plc_stop_budget_ms), which would turn a slow-but-fine restart into a lost link.
+_CORE_TIMEOUT_S: Mapping[str, float] = {"restart": 120.0}
 # frameId = taskId * _FRAMES_PER_TASK + the frame's index, innermost 0. Valid while the task stays
 # halted on the stop it was listed for, as DAP's frame ids are.
 _FRAMES_PER_TASK = 4096
@@ -365,7 +369,12 @@ class DebugGateway:
         }
 
     def _core(self, command: str, args: JsonObj) -> JsonObj:
-        reply = self.link.request(command, args)
+        timeout = _CORE_TIMEOUT_S.get(command)
+        reply = (
+            self.link.request(command, args)
+            if timeout is None
+            else self.link.request(command, args, timeout)
+        )
         if reply.success:
             return reply.body
         code = _CODES.get(reply.code or "")

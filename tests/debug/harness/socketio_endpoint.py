@@ -27,6 +27,9 @@ from interfaces import Blocked, Json, JsonObj
 
 NAMESPACE = "/api/debug-session"
 RESPONSE_TIMEOUT_S = 5.0
+# `restart` stops the program and starts it again before it answers (F037), which is the
+# program's lifecycle rather than a control request and can outlast any control deadline.
+RESPONSE_TIMEOUTS_S = {"restart": 30.0}
 
 
 class SocketIOEndpoint:
@@ -50,6 +53,10 @@ class SocketIOEndpoint:
         self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self.token = token
         self.insecure = insecure
+        # `setup.startHalted` states that the scenario needs a start-halted start
+        # (`restart {startHalted}`). Nothing deploys one: the scenario's own restart asks for
+        # it, and the handshake is where the runtime says whether it can. Set by prepare().
+        self.requires_start_halted = False
         self.description = f"endpoint {self.host}:{self.port}"
 
     def _probe(self) -> None:
@@ -75,18 +82,12 @@ class SocketIOEndpoint:
         self._probe()
         # Nothing deploys a build or rewrites halt configuration for a run yet; a scenario that
         # needs one cannot be judged against whatever happens to be loaded. Task intervals are
-        # deployed by the caller (tests/debug/plant/session_e2e.sh) and declared here.
+        # deployed by the caller (tests/debug/plant/session_e2e.sh) and declared here, and
+        # `startHalted` is a capability the handshake declares (checked in request()).
+        self.requires_start_halted = setup.get("startHalted") is True
         needs = [
             k
-            for k in (
-                "build",
-                "tasks",
-                "params",
-                "haltPolicy",
-                "safeValues",
-                "haltMode",
-                "startHalted",
-            )
+            for k in ("build", "tasks", "params", "haltPolicy", "safeValues", "haltMode")
             if k in setup and not (k == "tasks" and self._tasks_deployed(setup[k]))
         ]
         if needs:
@@ -195,19 +196,38 @@ class SocketIOSession:
             {"type": "request", "seq": seq, "command": command, "arguments": args},
             namespace=NAMESPACE,
         )
+        timeout_s = RESPONSE_TIMEOUTS_S.get(command, RESPONSE_TIMEOUT_S)
         try:
-            resp = waiter.get(timeout=RESPONSE_TIMEOUT_S)
+            resp = waiter.get(timeout=timeout_s)
         except queue.Empty:
             resp = {
                 "success": False,
-                "error": {"code": "TIMEOUT", "message": f"no response in {RESPONSE_TIMEOUT_S:g} s"},
+                "error": {"code": "TIMEOUT", "message": f"no response in {timeout_s:g} s"},
             }
         finally:
             with self.lock:
                 self.pending.pop(seq, None)
-        if command == "initialize" and resp.get("success") is True and self.beat is None:
-            self._start_heartbeat(resp)
+        if command == "initialize" and resp.get("success") is True:
+            self._check_capabilities(resp)
+            if self.beat is None:
+                self._start_heartbeat(resp)
         return resp
+
+    def _check_capabilities(self, resp: JsonObj) -> None:
+        """A scenario whose setup asks for `startHalted` needs a runtime that serves it.
+
+        The refusal belongs here, at the handshake that declares the capability, and not at
+        setup: the runtime's own advertisement is the evidence, so a scenario that cannot run
+        here says which runtime would run it."""
+        if not self.endpoint.requires_start_halted:
+            return
+        body = resp.get("body")
+        caps = body.get("capabilities") if isinstance(body, dict) else None
+        if not isinstance(caps, dict) or caps.get("startHalted") is not True:
+            raise Blocked(
+                "setup startHalted: this runtime does not advertise the startHalted "
+                "capability, so it cannot restart the program halted at its first statement"
+            )
 
     def _start_heartbeat(self, resp: JsonObj) -> None:
         # ADR-005 D4.3: an idle controller sends `heartbeat` every P1, or P2 expiry safe-stops a halt.
