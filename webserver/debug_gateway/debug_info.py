@@ -42,6 +42,21 @@ def _ints(v: Json) -> List[int]:
     return [x for x in v if isinstance(x, int)] if isinstance(v, list) else []
 
 
+def _frame_leaves(v: Json) -> Tuple[Tuple[str, str, int], ...]:
+    """A POU's `__dbg_locals` table as (path, type, size) per slot, in slot order. The three
+    arrays are parallel and of one length in every build STruCpp emits; a table the gateway cannot
+    line up is read as no table at all rather than as the wrong bytes."""
+    leaves = _obj(v)
+    paths, types, sizes = leaves.get("path"), leaves.get("type"), leaves.get("size")
+    if not (isinstance(paths, list) and isinstance(types, list) and isinstance(sizes, list)):
+        return ()
+    if not len(paths) == len(types) == len(sizes):
+        return ()
+    return tuple(
+        (str(p), str(t), s) for p, t, s in zip(paths, types, sizes) if isinstance(s, int)
+    )
+
+
 @dataclass(frozen=True)
 class Location:
     file: str
@@ -90,6 +105,19 @@ class TypeInfo:
     length: Optional[int] = None
 
 
+def _frame_step(base: str, path: str) -> Optional[str]:
+    """The one-level name `path` is under `base`, a frame variable's path in the `__dbg_locals`
+    table: the token up to the next `.` or `[`, kept as `[i]` for a subscript. None when `path` is
+    not under `base`. Used to group a variable's leaves into its immediate children: the walk is a
+    depth-first pre-order, so the leaves of one child are consecutive."""
+    if not path.startswith(base):
+        return None
+    m = re.match(r"\.([^\.\[]+)|\[([^\[\]]*)\]", path[len(base):])
+    if m is None:
+        return None
+    return m.group(1) if m.group(1) is not None else f"[{m.group(2)}]"
+
+
 @dataclass(frozen=True)
 class Pou:
     id: int
@@ -97,19 +125,29 @@ class Pou:
     kind: str
     entry_probe: int
     type_id: Optional[int]
-    locals: Tuple[Tuple[str, Optional[int], str], ...]  # (name, typeId, section)
+    # (name, typeId, section, localsSlot): a frame variable, and the slot its first leaf takes in
+    # the frame's `__dbg_locals` table (None when the variable has no readable leaf).
+    locals: Tuple[Tuple[str, Optional[int], str, Optional[int]], ...]
+    # The frame's `__dbg_locals` table, index = slot: (leaf path, IEC type name, byte size).
+    # Empty when the POU's body declares no frame variable.
+    frame_leaves: Tuple[Tuple[str, str, int], ...]
 
 
 @dataclass(frozen=True)
 class Node:
     """A resolved variable: its display path, type and first leaf. `program` marks a program
-    instance's root, whose leaf walk omits VAR_IN_OUT."""
+    instance's root, whose leaf walk omits VAR_IN_OUT. `frame` marks a leaf of a probed body's
+    `__dbg_locals` table (a function's inputs and temps, an FB's or program's VAR_TEMP), which
+    lives on the halted task's stack: it is (POU id, slot) and `leaf` carries the slot, not a flat
+    leaf index, because those leaves are in no static table."""
 
     path: str
     type_id: int
     leaf: int
     program: bool = False
     pou: Optional[int] = None  # the POU whose VAR_EXTERNALs are reachable from this node
+    frame: Optional[Tuple[int, int]] = None  # (pou id, __dbg_locals slot)
+    frame_path: Optional[str] = None  # the frame variable this node belongs to, in table paths
 
 
 class DebugInfo:
@@ -166,9 +204,11 @@ class DebugInfo:
                 p_obj.get("typeId") if isinstance(p_obj.get("typeId"), int) else None,
                 tuple(
                     (str(_obj(v).get("name")), _obj(v).get("typeId") if isinstance(_obj(v).get("typeId"), int) else None,
-                     str(_obj(v).get("kind")))
+                     str(_obj(v).get("kind")),
+                     _obj(v).get("localsSlot") if isinstance(_obj(v).get("localsSlot"), int) else None)
                     for v in p_obj.get("locals") or []
                 ),
+                _frame_leaves(p_obj.get("frameLeaves")),
             )
             self.pous[pou.id] = pou
             self.pou_by_entry[pou.entry_probe] = pou
@@ -348,24 +388,92 @@ class DebugInfo:
                 return base
         return computed
 
+    def frame_local(self, pou: Optional[Pou], tokens: List[str]) -> Optional[Node]:
+        """The frame variable `tokens[0]` names in `pou`, or None: a function's VAR_INPUT /
+        VAR_IN_OUT / VAR_TEMP, an FB's or program's VAR_TEMP. These live on the halted task's
+        stack, not in the program's static debug table, so they resolve to a slot of the frame's
+        `__dbg_locals` rather than to a flat leaf index. The frame's own variables come first: a
+        local shadows the globals and the instances the same path would otherwise reach."""
+        if pou is None or not tokens:
+            return None
+        for name, type_id, _section, slot in pou.locals:
+            if slot is None or name.upper() != tokens[0].upper():
+                continue
+            return Node(f"{pou.name}.{name}", type_id if type_id is not None else -1, slot,
+                        frame=(pou.id, slot), frame_path=name)
+        return None
+
+    def frame_children(self, node: Node) -> List[Tuple[str, Node]]:
+        """The immediate children of a frame variable or leaf, one level (A089). The table is a
+        depth-first walk of one frame variable at a time, so a variable's leaves are the slots
+        from its own first slot to the next variable's, and a child's leaves are consecutive:
+        group them by the one-level name each leaf sits under. The names and types come from the
+        static type walk, as everywhere else; only the slot is the frame's."""
+        if node.frame is None or node.frame_path is None:
+            return []
+        pou = self.pous.get(node.frame[0])
+        if pou is None:
+            return []
+        base = node.frame_path
+        end = self._frame_var_end(pou, node.frame[1])
+        out: List[Tuple[str, Node]] = []
+        seen: Optional[str] = None
+        # Inclusive of the node's own slot: a composite's first slot is already its first child,
+        # and an elementary's is `_frame_step`'s own path, which names no child.
+        for slot in range(node.frame[1], end):
+            name = _frame_step(base, pou.frame_leaves[slot][0])
+            if name is None:
+                break  # past this variable's leaves, or out of the table
+            if name == seen:
+                continue  # another leaf of the child already listed
+            seen = name
+            sep = "" if name.startswith("[") else "."
+            child_path = f"{base}{sep}{name}"
+            out.append((name, Node(child_path, self._frame_child_type(node.type_id, name), slot,
+                                   frame=(pou.id, slot), frame_path=child_path)))
+        return out
+
+    @staticmethod
+    def _frame_var_end(pou: Pou, slot: int) -> int:
+        """Where the frame variable that starts at or before `slot` ends: the next variable's
+        first slot, or the end of the table. Its leaves are the slots in between."""
+        starts = [s for _n, _t, _k, s in pou.locals if s is not None and s > slot]
+        return min(starts) if starts else len(pou.frame_leaves)
+
+    def _frame_child_type(self, type_id: int, name: str) -> int:
+        """A frame leaf's owner's type for one child: an array element's element type, else the
+        member's. -1 (no type) where the static walk has none, which reads as `?`, never as a
+        wrong type."""
+        t = self.types.get(type_id)
+        if t is None:
+            return -1
+        if name.startswith("["):
+            return t.elem if t.kind == "array" and t.elem is not None else -1
+        for m in t.members:
+            if str(m.get("name")).upper() == name.upper() and isinstance(m.get("typeId"), int):
+                return int(m["typeId"])
+        return -1
+
     def resolve(self, path: str, frame_instance: Optional[str] = None,
                 frame_pou: Optional[Pou] = None) -> Node:
         """A variable path (`PROG0.motor1.pid.out`, `G_SEG.a.x`, `PROG0.arr[4]`; case-insensitive),
-        or a name relative to a frame's instance or its POU's externals."""
+        or a name relative to a frame's own variables, its instance, or its POU's externals."""
         tokens = self._tokens(path)
         if not tokens:
             raise Refusal(ErrorCode.BAD_REQUEST, "A variable path must not be empty.")
-        node = self._root(tokens[0])
-        if node is None and frame_instance is not None:
-            node = self._root(frame_instance.split(".")[0])
-            if node is not None:
-                tokens = self._tokens(frame_instance) + tokens
-        if node is None and frame_pou is not None:
-            for ext in self.externals.get(frame_pou.id, []):
-                if ext.upper() == tokens[0].upper():
-                    node = self._root(ext)
+        node = self.frame_local(frame_pou, tokens)
         if node is None:
-            raise self._no_such(path)
+            node = self._root(tokens[0])
+            if node is None and frame_instance is not None:
+                node = self._root(frame_instance.split(".")[0])
+                if node is not None:
+                    tokens = self._tokens(frame_instance) + tokens
+            if node is None and frame_pou is not None:
+                for ext in self.externals.get(frame_pou.id, []):
+                    if ext.upper() == tokens[0].upper():
+                        node = self._root(ext)
+            if node is None:
+                raise self._no_such(path)
         for tok in tokens[1:]:
             nxt = self._step(node, tok)
             if nxt is None:
@@ -400,6 +508,11 @@ class DebugInfo:
         return None
 
     def _step(self, node: Node, tok: str) -> Optional[Node]:
+        if node.frame is not None:
+            for name, child in self.frame_children(node):
+                if name.upper() == tok.upper():
+                    return child
+            return None
         t = self.types.get(node.type_id)
         if t is None:
             return None
@@ -427,6 +540,8 @@ class DebugInfo:
 
     def children(self, node: Node) -> List[Tuple[str, Node]]:
         """The immediate children of a composite value, one level (A089)."""
+        if node.frame is not None:
+            return self.frame_children(node)
         t = self.types.get(node.type_id)
         if t is None:
             return []

@@ -96,9 +96,10 @@ typedef struct
 /* One stack frame of a parked task, innermost first (ADR-001 D3.3). */
 typedef struct
 {
-    uint32_t    pou;  /* the POU body's entry probe ID */
-    uint32_t    at;   /* the frame's location: the stop probe (innermost) or its call statement */
-    const void *self; /* the FB or program instance, or null (a function) */
+    uint32_t    pou;    /* the POU body's entry probe ID */
+    uint32_t    at;     /* the frame's location: the stop probe (innermost) or its call statement */
+    const void *self;   /* the FB or program instance, or null (a function) */
+    void       *locals; /* the frame's `__dbg_locals` (void*[] of frame leaves), or null */
 } dbg_frame_t;
 
 /* park() return values (ADR-001 D2.2). */

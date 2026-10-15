@@ -721,8 +721,9 @@ class DebugGateway:
         return ref
 
     def _scopes(self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]) -> JsonObj:
-        """F074: a frame's variables grouped by section; a function's locals have no values yet
-        (docs/DEBUG_CORE_LINK.md: no __dbg_locals tables)."""
+        """F074: a frame's variables grouped by section. An instance's members come from the
+        static tree; the frame's own variables (a function's inputs and temps, an FB's or a
+        program's VAR_TEMP) come from the POU's `__dbg_locals` table, which is read per slot."""
         assert info is not None
         frame_id = _int(args["frameId"])
         frame, _ = self._frame(session, info, frame_id)
@@ -733,10 +734,12 @@ class DebugGateway:
             for name, child in info.children(info.resolve(instance)):
                 section = self._section_of(info, info.resolve(instance), name)
                 groups.setdefault(SCOPE_OF_SECTION.get(section, "members"), []).append(name)
-        for name, _tid, section in pou.locals if pou is not None else ():
+        for name, _tid, section, _slot in pou.locals if pou is not None else ():
             groups.setdefault(SCOPE_OF_SECTION.get(section, "locals"), []).append(name)
         scopes = [
-            {"name": scope, "variablesReference": self._ref("scope", str(frame_id), scope, *names),
+            {"name": scope,
+             "variablesReference": self._ref(
+                 "scope", str(frame_id), str(frame_id // _FRAMES_PER_TASK), scope, *names),
              "namedVariables": len(names), "expensive": False}
             for scope, names in groups.items()
         ]
@@ -750,8 +753,8 @@ class DebugGateway:
                 return str(m.get("section") or "VAR")
         return "VAR_EXTERNAL"
 
-    def _read(self, info: DebugInfo, session: ClientSession, nodes: List[Node]
-              ) -> Tuple[List[Json], List[Json]]:
+    def _read(self, info: DebugInfo, session: ClientSession, nodes: List[Node],
+              frame: Optional[Tuple[int, int]] = None) -> Tuple[List[Json], List[Json]]:
         """Decoded values per node, and the core's `pending` per leaf alongside them.
 
         `pending` is what the image slot a located %I leaf will next copy in, while
@@ -760,8 +763,16 @@ class DebugGateway:
         dropped, which is why A055's oracle saw the field absent rather than
         wrong. A non-input leaf, or one with no pending write, yields None and the
         field is omitted — an output is not 'pending', the copy-out decides it.
+
+        A node whose leaves are in the halted task's stack (a frame's own variables) is read by
+        slot through `readFrameLocals` instead: those leaves are in no static table, so they have
+        no `pending` either — a local is not a located member. `frame` is that frame's
+        (task id, index in the halted stack).
         """
-        leaves = [n.leaf for n in nodes]
+        out_values: List[Json] = [None] * len(nodes)
+        out_pending: List[Json] = [None] * len(nodes)
+        static = [i for i, n in enumerate(nodes) if n.frame is None]
+        leaves = [nodes[i].leaf for i in static]
         values: List[Json] = []
         pending: List[Json] = []
         for i in range(0, len(leaves), _MAX_LEAVES):
@@ -769,23 +780,60 @@ class DebugGateway:
                                              "leaves": leaves[i: i + _MAX_LEAVES]})
             values.extend(_list(body.get("values")))
             pending.extend(_list(body.get("pending")))
-        decoded = [
-            info.decode(n.type_id, v if isinstance(v, str) else None, n.leaf)
-            for n, v in zip(nodes, values)
-        ]
         # zip, not index: a short reply must not shift one leaf's pending onto another's
-        return decoded, pending[: len(nodes)] + [None] * max(0, len(nodes) - len(pending))
+        for at, (v, p) in zip(static, zip(values, pending)):
+            node = nodes[at]
+            out_values[at] = info.decode(node.type_id, v if isinstance(v, str) else None, node.leaf)
+            out_pending[at] = p
+        if frame is not None:
+            groups: Dict[int, List[int]] = {}
+            for at, node in enumerate(nodes):
+                if node.frame is not None:
+                    groups.setdefault(node.frame[0], []).append(at)
+            for pou_id, ats in groups.items():
+                self._read_frame_leaves(info, session, pou_id, frame, [nodes[at] for at in ats], ats,
+                                        out_values)
+        return out_values, out_pending
+
+    def _read_frame_leaves(self, info: DebugInfo, session: ClientSession, pou_id: int,
+                           frame: Tuple[int, int], nodes: List[Node], ats: List[int],
+                           out: List[Json]) -> None:
+        """One frame's own variables, read by slot out of its `__dbg_locals`. The core has the
+        table's addresses and this has each leaf's IEC type and byte size (both from the same
+        build's debug information, ADR-002 D1), so the pair is a hex string decoded exactly like
+        a static leaf. `ats` are the positions in the caller's `nodes` the answers belong to."""
+        pou = info.pous.get(pou_id)
+        if pou is None:
+            return
+        task, index = frame
+        ask: List[JsonObj] = []
+        for node in nodes:
+            slot = node.frame[1] if node.frame is not None else -1
+            # A slot past the table the debug info describes is asked for at size 0, which the
+            # core answers null: a frame variable with no leaf reads as no value, not as garbage.
+            size = pou.frame_leaves[slot][2] if 0 <= slot < len(pou.frame_leaves) else 0
+            ask.append({"slot": max(slot, 0), "size": size})
+        body = self._core("readFrameLocals", {
+            "session": session.core_session, "task": task, "frame": index, "leaves": ask,
+        })
+        raw = _list(body.get("values"))
+        for at, node, value in zip(ats, nodes, raw):
+            slot = node.frame[1] if node.frame is not None else -1
+            out[at] = info.decode(
+                node.type_id, value if isinstance(value, str) else None, slot)
 
     def _listing(
         self, session: ClientSession, info: DebugInfo, named: List[Tuple[str, Optional[Node]]],
-        native: bool = False,
+        native: bool = False, frame: Optional[Tuple[int, int, int]] = None,
     ) -> List[JsonObj]:
         """One level of variables: an elementary one with its value, a composite one with a
         variablesReference to expand it (A089: no grandchild is read before it is asked for).
         DAP's `value` is display text, with the JSON value in `data`; `native` (the by-path form)
-        puts the JSON value in `value`."""
+        puts the JSON value in `value`. `frame` is (frame id, task id, index in the halted stack)
+        of the frame these names are relative to: frame variables are read by slot, and a
+        composite one expands within the frame, so its reference has to name the frame too."""
         readable = [n for _, n in named if n is not None and info.is_elementary(n.type_id)]
-        raw_values, raw_pending = self._read(info, session, readable)
+        raw_values, raw_pending = self._read(info, session, readable, frame[1:] if frame else None)
         values = dict(zip((n.path for n in readable), raw_values))
         pendings = dict(zip((n.path for n in readable), raw_pending))
         out: List[JsonObj] = []
@@ -805,7 +853,10 @@ class DebugGateway:
                     item["pending"] = info.decode(node.type_id, pend, node.leaf)
             else:
                 item.update({"value": info.type_name(node.type_id), "type": info.type_name(node.type_id),
-                             "evaluateName": node.path, "variablesReference": self._ref("path", node.path),
+                             "evaluateName": node.path,
+                             "variablesReference": self._ref(
+                                 *(("frame", str(frame[0]), node.path) if frame and node.frame is not None
+                                   else ("path", node.path))),
                              "namedVariables": len(info.children(node))})
             out.append(item)
         return out
@@ -820,33 +871,38 @@ class DebugGateway:
             if key[0] == "path":
                 node = info.resolve(key[1])
                 return {"variables": self._listing(session, info, info.children(node))}
-            frame, _ = self._frame(session, info, int(key[1]))
-            instance, pou = frame["instance"], frame["pou"]
+            if key[0] == "frame":
+                # A composite frame variable, expanded in place: its children are the slots
+                # after it in the same `__dbg_locals` table.
+                frame_id, path = int(key[1]), key[2]
+                f, index = self._frame(session, info, frame_id)
+                node = info.resolve(path, f["instance"], f["pou"])
+                return {"variables": self._listing(
+                    session, info, info.children(node),
+                    frame=(frame_id, frame_id // _FRAMES_PER_TASK, index))}
+            frame_id, task = int(key[1]), _int(key[2])
+            f, index = self._frame(session, info, frame_id)
+            instance, pou = f["instance"], f["pou"]
             named: List[Tuple[str, Optional[Node]]] = []
-            for name in key[3:]:
+            for name in key[4:]:
                 try:
                     named.append((name, info.resolve(name, instance, pou)))
                 except Refusal:
-                    named.append((name, None))  # a function local: no __dbg_locals table yet
-            return {"variables": self._listing(session, info, named)}
+                    named.append((name, None))  # a name the frame does not have
+            return {"variables": self._listing(
+                session, info, named, frame=(frame_id, task, index))}
         path = args.get("path")
         if not isinstance(path, str):
             raise Refusal(ErrorCode.BAD_REQUEST, "variables needs a variablesReference or a path.")
-        instance, pou = None, None
+        instance, pou, frame = None, None, None
         if isinstance(args.get("frameId"), int):
-            frame, _ = self._frame(session, info, _int(args["frameId"]))
-            instance, pou = frame["instance"], frame["pou"]
-            if instance is None and pou is not None and any(
-                n.upper() == path.split(".")[0].split("[")[0].upper() for n, _t, _s in pou.locals
-            ):
-                raise Refusal(
-                    ErrorCode.UNSUPPORTED,
-                    f"'{path}' is a local of the function {pou.name}; function locals are not "
-                    f"readable yet (STruCpp emits no __dbg_locals tables).",
-                )
+            frame_id = _int(args["frameId"])
+            f, index = self._frame(session, info, frame_id)
+            instance, pou = f["instance"], f["pou"]
+            frame = (frame_id, frame_id // _FRAMES_PER_TASK, index)
         node = info.resolve(path, instance, pou)
         if info.is_elementary(node.type_id):
-            value, pending = self._read(info, session, [node])
+            value, pending = self._read(info, session, [node], frame[1:] if frame else None)
             out: JsonObj = {"path": node.path, "type": info.type_name(node.type_id),
                             "value": value[0]}
             if pending[0] is not None:
@@ -858,8 +914,10 @@ class DebugGateway:
         return {
             "path": node.path,
             "type": info.type_name(node.type_id),
-            "variablesReference": self._ref("path", node.path),
-            "children": self._listing(session, info, info.children(node), native=True),
+            "variablesReference": self._ref(
+                *(("frame", str(frame[0]), node.path) if frame and node.frame is not None
+                  else ("path", node.path))),
+            "children": self._listing(session, info, info.children(node), native=True, frame=frame),
         }
 
     # ------------------------------------------------------------------ status API

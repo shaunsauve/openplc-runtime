@@ -118,6 +118,7 @@ restart                 req {session: str, kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {session: str, mode: str} -> {mode: str}
 stackTrace              req {session: str, task?: TaskRef} -> {task: str, taskId: int, frames: [Frame], truncated: bool}
 readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]}
+readFrameLocals         req {session: str, task?: TaskRef, frame: int, leaves: [{slot: int, size: int}]} -> {values: [str|null]}
 ```
 
 ### Requests, in words
@@ -137,12 +138,14 @@ readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]
 | `stop` | Stops the program as STOP does; the session stays attached. Answered once the program has stopped (state `STOPPED`, at most 3 s), so a status read after the response sees it | `NOT_RUNNING`, `BUSY` |
 | `stackTrace` | The halted `task`'s frames (absent: the task of the most recent stop), innermost first (ADR-001 D3). `pou` is the frame's POU by its entry probe (`debug-info.json` `pous[].entryProbe`); `at` its location probe: the stop probe for the innermost frame, the calling statement's probe for the others; `leaf` the flat index of the lowest-addressed debug-table leaf at or above the frame's instance, `null` for a function or a program without the table (see "Interim instance binding"). `truncated` is true when the walk stopped at a frame of an earlier attach (N4). A task held at its scan boundary has `frames: []` (D2.5) | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
 | `readLeaves` | Each leaf's value, by flat leaf index (the `DebugMapV2` leaf order: array 0's elements, then array 1's, …, the numbering of `instances.leafBase`), as lowercase hex of the bytes `strucpp_debug_read` writes (little-endian scalars; STRING 1+126 and WSTRING 1+252 byte windows). An index the program does not have reads `null`. At most 1024 per request. Read without stopping the program, as the legacy `0x44` read is | `BAD_REQUEST` |
+| `readFrameLocals` | One frame's own variables — a function's VAR_INPUT, VAR_IN_OUT and VAR_TEMP, an FB's or a program's VAR_TEMP — which live on the halted task's stack, not in the program's static debug table, so `readLeaves` cannot name them. `frame` indexes the halted `task`'s `stackTrace` frames (0 is the innermost); `leaves` asks for slots of that frame's `__dbg_locals` table (`debug-info.json` `pous[].frameLeaves`, index = slot), each with the byte size to read. Values are lowercase hex of those bytes, as `readLeaves` writes them; a slot, size or frame that is not there reads `null`. At most 1024 leaves. The task must be halted: the table lives on its stack. A core that predates this answers `UNSUPPORTED`, and the gateway passes that on rather than reading a static leaf that is not the local | `BAD_REQUEST`, `NOT_HALTED` |
 | `cycleStep` | Runs only `task` (absent: the task of the most recent stop) for exactly one scan (ADR-001 D4.9). Halted at probe P in scan k: the rest of scan k runs to its boundary, then one released scan runs with a trap on P, so the stop is at P in scan k+1 (reason `step`), or, if that scan never reaches P, a hold at its boundary (reason `step`, `heldAtBoundary`). Held at a boundary: one released scan, then a hold (reason `step`, `heldAtBoundary`). A breakpoint reached first stops there and ends the cycle step. The dispatcher holds the task before its next release (a scan budget), so its virtual time moves exactly one interval (ADR-004 D4). `continued {task, taskId}` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
 | `setExceptionBreakpoints`, `runScans`, `runToCursor`, `restart`, `setHaltMode` | Defined by the link; the real core does not implement them yet and answers `UNSUPPORTED` (their capabilities are `false` in `hello`) | `UNSUPPORTED` |
 
-Function locals (VAR_INPUT, VAR_TEMP and VAR_IN_OUT of a function or method) are not readable over
-the link: STruCpp does not emit the `__dbg_locals` `offsetof` tables yet (`pous[].locals[]
-.localsSlot` is `null`), so a function frame lists its locals with no value.
+A frame's own variables are read with `readFrameLocals`: STruCpp emits the `__dbg_locals` table in
+each probed clone (`pous[].frameLeaves`, `pous[].locals[].localsSlot`), and the table's addresses
+live on the halted task's stack. A POU whose body declares no frame variable has no table, and the
+core answers `null` for every slot of that frame.
 
 #### Interim instance binding
 
@@ -235,5 +238,5 @@ from everything it forwards to clients. `webserver/app.py` `handle_status` adds 
 ## Not built here
 
 The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), forces, writes,
-function locals over the link, exception breakpoints,
+exception breakpoints,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).

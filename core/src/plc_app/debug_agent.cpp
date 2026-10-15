@@ -603,9 +603,10 @@ extern "C" size_t debug_agent_frames(const dbg_stop_t *stop, dbg_frame_t *out, s
             *truncated = true;
             break;
         }
-        out[n].pou  = f->pou;
-        out[n].at   = n == 0 ? stop->probe : f->at;
-        out[n].self = f->self;
+        out[n].pou    = f->pou;
+        out[n].at     = n == 0 ? stop->probe : f->at;
+        out[n].self   = f->self;
+        out[n].locals = f->locals;
         n++;
     }
     if (f && n == max) *truncated = true;

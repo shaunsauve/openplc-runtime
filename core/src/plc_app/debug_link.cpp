@@ -875,6 +875,65 @@ Reply read_leaves(cJSON *list)
     return success(b);
 }
 
+/* One frame's stack locals (ADR-002 D3 "Addressing", the frame half). A function's VAR_INPUT,
+ * VAR_IN_OUT and VAR_TEMP, and an FB's or program's VAR_TEMP, live on the call's stack, not in the
+ * program's static debug table, so readLeaves cannot name them: the frame carries its own
+ * `__dbg_locals` table (void*[] in slot order, debug-info.json `pous[].frameLeaves`) and this reads
+ * the leaves asked for by slot. The core does not know a table's length or a leaf's IEC type — both
+ * are the gateway's, from the same build's debug info (ADR-002 D1: bound by buildId) — so each item
+ * names the slot and the byte size to read. Valid only while the task stays parked: the tables live
+ * on the halted task's stack. */
+Reply read_frame_locals(size_t task, cJSON *frame, cJSON *list)
+{
+    const TaskView &v = g_view[task];
+    if (plc_task_run_state(task, nullptr) == PLC_TASK_RUN_RUNNING || !v.halted)
+        return fail("NOT_HALTED", "the task is not halted");
+    if (!is_int(frame) || frame->valuedouble < 0)
+        return fail("BAD_REQUEST", "readFrameLocals needs a non-negative frame index");
+    if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > kMaxLeaves)
+        return fail("BAD_REQUEST", "readFrameLocals needs a list of at most 1024 frame leaves");
+    dbg_frame_t  frames[256];
+    bool         truncated = false;
+    const size_t n  = v.at_boundary ? 0 : debug_agent_frames(&v.stop, frames, 256, &truncated);
+    const size_t idx = (size_t)frame->valuedouble;
+    if (idx >= n) return fail("BAD_REQUEST", "there is no such frame in the halted task's stack");
+    /* The table is void*[]; a frame with none (a POU with no frame variables) answers null for
+     * every slot rather than dereferencing nothing. */
+    void *const *tab = (void *const *)frames[idx].locals;
+    cJSON       *out = cJSON_CreateArray();
+    cJSON       *item;
+    cJSON_ArrayForEach(item, list)
+    {
+        cJSON *slot = arg(item, "slot");
+        cJSON *size = arg(item, "size");
+        if (!is_int(slot) || !is_int(size))
+        {
+            cJSON_AddItemToArray(out, cJSON_CreateNull());
+            continue;
+        }
+        const long s = (long)slot->valuedouble;
+        const int  w = (int)size->valuedouble;
+        if (s < 0 || w < 1 || w > kMaxLeafSize || !tab || !tab[s])
+        {
+            cJSON_AddItemToArray(out, cJSON_CreateNull());
+            continue;
+        }
+        uint8_t buf[kMaxLeafSize];
+        std::memcpy(buf, tab[s], (size_t)w);
+        std::string hex((size_t)w * 2u, '0');
+        static const char kHex[] = "0123456789abcdef";
+        for (int i = 0; i < w; ++i)
+        {
+            hex[2 * i]     = kHex[buf[i] >> 4];
+            hex[2 * i + 1] = kHex[buf[i] & 0xF];
+        }
+        cJSON_AddItemToArray(out, cJSON_CreateString(hex.c_str()));
+    }
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddItemToObject(b, "values", out);
+    return success(b);
+}
+
 bool is_command(const char *c, std::initializer_list<const char *> names)
 {
     for (const char *n : names)
@@ -927,7 +986,8 @@ Reply handle(const char *command, cJSON *args)
     const bool known = is_command(command, {"detach", "terminate", "beatClient", "setBreakpoints",
                                             "clearAllBreakpoints", "continue", "pause", "next",
                                             "stepIn", "stepOut", "stop", "stackTrace",
-                                            "readLeaves", "cycleStep", "restart"});
+                                            "readLeaves", "cycleStep", "restart",
+                                            "readFrameLocals"});
     if (!known)
         return fail("UNSUPPORTED", std::string("this runtime core does not implement ") + command);
 
@@ -1114,6 +1174,15 @@ Reply handle(const char *command, cJSON *args)
             task = (size_t)g_last_stop_task;
         }
         return stack_trace_locked(task);
+    }
+    if (!std::strcmp(command, "readFrameLocals"))
+    {
+        if (all)
+        {
+            if (g_last_stop_task < 0) return fail("NOT_HALTED", "no task is halted");
+            task = (size_t)g_last_stop_task;
+        }
+        return read_frame_locals(task, arg(args, "frame"), arg(args, "leaves"));
     }
     /* pm ruling 8: continue is all-stop, whatever `task` says. */
     if (!std::strcmp(command, "continue")) return resume_all_locked();
