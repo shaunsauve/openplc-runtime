@@ -71,7 +71,7 @@ One JSON file per scenario, `<name>/<id>.oracle.json`, `scenario` = `<name>/<id>
   "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/bp-before-statement", "corpus": "plant-io",
   "kind": "runtime",                 // "build": a debug-info / generated-code inspection, no runtime
-  "criteria": ["A034", "A031"],      // the criteria this scenario discharges (⊆ the header's)
+  "criteria": ["A034", "A031"],      // the criteria this scenario discharges (⊆ the header's); [] for a diagnostic
   "title": "...",
   "setup": {                          // all optional
     "build": {"probes": true, "variant": "variant-inplace.st", "path": "library|cli|editor", "control": true},
@@ -256,7 +256,13 @@ except where a `noEvent` step forbids them.
 ## Coverage
 
 A program header lists every criterion that cites the program; each oracle lists the ones it
-discharges. Criteria listed in a header but in no oracle still need a scenario (E13.4: every
-A# gets a `Test:` naming one). `validate.py` reports nothing for those: the gap is tracked in
-`docs/STATUS.md`, not here. `tests/debug/harness/coverage.txt` maps each criterion to the
-scenarios that cite it, marks the partial ones, and lists the MVP criteria no oracle can express.
+discharges. That list is the claim an oracle earns, not a label on the file: an oracle that cites
+a criterion is asserting that its steps cover that criterion's check, so cut a scenario down and
+it stops citing the criterion. A **diagnostic** scenario — another scenario with the broken steps
+removed, to show that the rest still holds — cites none (`"criteria": []`) and names in its title
+and notes the steps it excludes. It writes no `runs/*.jsonl` row, so no verdict path can count it
+as coverage; a PASS from it is a bisect, never evidence for a criterion. Criteria listed in a
+header but in no oracle still need a scenario (E13.4: every A# gets a `Test:` naming one).
+`validate.py` reports nothing for those: the gap is tracked in `docs/STATUS.md`, not here.
+`tests/debug/harness/coverage.txt` maps each criterion to the scenarios that cite it, marks the
+partial ones, and lists the MVP criteria no oracle can express.

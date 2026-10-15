@@ -1,11 +1,12 @@
 {
   "$schema": "../oracle.schema.json",
-  "format": "openplc-debug-oracle", "major": 1, "minor": 1,
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
   "scenario": "all-scopes-types/scopes-tail",
   "corpus": "all-scopes-types",
   "kind": "runtime",
-  "criteria": ["A088"],
-  "title": "Diagnostic: scopes.oracle.json without its three `types: true` steps and its force/unforce pair, to show what A088's own evidence covers on its own",
+  "criteria": [],
+  "title": "Diagnostic: scopes.oracle.json with its seven broken-and-downstream steps cut out — discharges no criterion, and a PASS here is not A088 coverage",
+  "notes": "EXCLUDES the steps that fail today, and more besides; `criteria` is empty on purpose. At this head scopes.oracle.json stops at step 6, the first `types: true` request (variables on PROG0.segs answers with no body.elementType, so the Seg members [['a','Point'],['b','Point'],['tag','Mode']] are never produced). Removed from scopes' steps 6-16: the three `types: true` requests (6-8), the force (11), the continue plus the @LAST stop and its nine-path variables read-back (12-13) and the unforce (14) — seven of sixteen steps. It still arms @LAST as a breakpoint and then never reaches it. What is left is scopes' steps 0-5, 9-10 and 15: entry, the @HOLDER_FIRST stack with every scope of the fb frame and of the program frame, and the @SCALE_FIRST stack. A088 is discharged by scopes.oracle.json and by nested-fb-loop/step-sequence.oracle.json — the two scenarios its ACCEPTANCE `Test:` names. This file exists as the bisect that proved the rest of that evidence already holds; keep it as that, and read its verdict as nothing more.",
   "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10, "inputs": {"%IW0": 3}}},
   "steps": [
     {"request": "initialize", "expect": {"success": true}},

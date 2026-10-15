@@ -46,11 +46,12 @@
     },
     "criteria": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "items": {
         "type": "string",
         "pattern": "^A[0-9]{3}$"
-      }
+      },
+      "description": "The criteria this scenario discharges (a subset of the program's header `criteria`) — the claim this file earns, not a label on it. The key is always present, so an oracle can never leave its coverage unstated; a diagnostic scenario that discharges nothing lists it empty (`[]`) and says in its title or notes which steps it excludes. An empty list writes no `runs/*.jsonl` row, so such a scenario can never be counted as coverage for a criterion."
     },
     "title": {
       "type": "string",
