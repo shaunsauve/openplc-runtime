@@ -882,6 +882,19 @@ bool is_command(const char *c, std::initializer_list<const char *> names)
     return false;
 }
 
+/* F037's restart, run with the link's lock dropped. The transition unloads the program, and the
+ * unload calls debug_link_set_image, which takes this file's own g_mu on this same thread; it also
+ * has to leave the agent thread free to turn the entry stop into a `stopped` event. Dropping the
+ * lock around it is the only way both can happen: handle() owns it, and nothing else runs requests
+ * meanwhile (the server thread serves one client at a time). */
+int restart_program(bool cold, bool start_halted)
+{
+    g_mu.unlock();
+    const int rc = plc_restart_program(cold, start_halted);
+    g_mu.lock();
+    return rc;
+}
+
 Reply handle(const char *command, cJSON *args)
 {
     const bool running = plc_get_state() == PLC_STATE_RUNNING;
@@ -982,8 +995,8 @@ Reply handle(const char *command, cJSON *args)
         for (auto &c : g_cycle) c = Cycle{};
         g_last_stop_task = -1;
 
-        const int rc = plc_restart_program(named && !std::strcmp(kind->valuestring, "cold"),
-                                           start_halted);
+        const bool cold = named && !std::strcmp(kind->valuestring, "cold");
+        const int  rc   = restart_program(cold, start_halted);
         if (rc == PLC_RESTART_BUSY) return fail("BUSY", "a state change is in flight");
         if (rc == PLC_RESTART_REFUSED)
             return fail("SAFE_STOPPED",

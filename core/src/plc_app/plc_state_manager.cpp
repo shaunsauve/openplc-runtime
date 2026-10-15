@@ -1869,8 +1869,13 @@ extern "C" int plc_restart_program(bool cold, bool start_halted)
     if (s == PLC_STATE_SAFE_STOPPED) return PLC_RESTART_REFUSED;
     if (!plc_switch_allows_run()) return PLC_RESTART_REFUSED;
 
-    /* Set before the start is claimed and cleared on every path that does not reach one, so a
-     * refused restart cannot arm the entry trap on somebody else's start. */
+    /* Both flags are read by the next cycle thread, so they must be set before the start is
+     * claimed, and taken back on every path that reaches no start: a refused restart must not arm
+     * an entry stop, or reset the retained values, on somebody else's start. */
+    auto cancel = [] {
+        g_start_halted.store(false, std::memory_order_release);
+        g_retain_drop.store(false, std::memory_order_release);
+    };
     g_retain_drop.store(cold, std::memory_order_release);
     g_start_halted.store(start_halted, std::memory_order_release);
 
@@ -1878,36 +1883,33 @@ extern "C" int plc_restart_program(bool cold, bool start_halted)
     {
         if (!claim_transition(PLC_STATE_STOPPED, ClaimKind::Explicit, nullptr))
         {
-            g_start_halted.store(false, std::memory_order_release);
-            g_retain_drop.store(false, std::memory_order_release);
+            cancel();
             return PLC_RESTART_BUSY;
         }
         plc_set_state(PLC_STATE_STOPPED);
         if (!wait_for_landing())
         {
-            g_start_halted.store(false, std::memory_order_release);
-            g_retain_drop.store(false, std::memory_order_release);
+            cancel();
             return PLC_RESTART_FAILED;
         }
     }
     if (!claim_transition(PLC_STATE_RUNNING, ClaimKind::Explicit, nullptr))
     {
-        g_start_halted.store(false, std::memory_order_release);
-        g_retain_drop.store(false, std::memory_order_release);
-        return plc_get_state() == PLC_STATE_SAFE_STOPPED ? PLC_RESTART_REFUSED : PLC_RESTART_BUSY;
+        const PLCState now = plc_get_state();
+        cancel();
+        return now == PLC_STATE_SAFE_STOPPED ? PLC_RESTART_REFUSED : PLC_RESTART_BUSY;
     }
     plc_set_state(PLC_STATE_RUNNING);
-    /* The start is refused by the same gate claim_transition applies, so a refusal here is a
-     * drop, not a landing: wait for it only if one is in flight. */
-    if (plc_state_is_transitioning() && !wait_for_landing())
+    /* plc_set_state(RUNNING) returns before the cycle thread publishes RUNNING, which it does
+     * after the task threads exist and before the first release: by the time the landing is here,
+     * the entry trap is armed (A041). A start that never lands takes the flags back with it,
+     * rather than leaving them for the next one. */
+    if (!wait_for_landing() || plc_get_state() != PLC_STATE_RUNNING)
     {
-        g_start_halted.store(false, std::memory_order_release);
-        g_retain_drop.store(false, std::memory_order_release);
+        cancel();
         return PLC_RESTART_FAILED;
     }
-    /* RUNNING is published after the task threads exist and before the first release, so the
-     * entry trap is armed by the time this returns (A041). */
-    return plc_get_state() == PLC_STATE_RUNNING ? PLC_RESTART_OK : PLC_RESTART_FAILED;
+    return PLC_RESTART_OK;
 }
 
 extern "C" void plc_publish_final_state(PLCState final_state)
