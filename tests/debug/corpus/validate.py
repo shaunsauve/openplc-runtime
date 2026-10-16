@@ -13,10 +13,14 @@ Checks, in order:
   3. Program headers: corpus name, criteria, FC tags, and the scan witness
      contract (one per task, first statement of the task's first program).
   4. Optional cross-checks: --acceptance (header criteria equal the criteria that
-     cite the corpus) and --catalog (every FC tag exists).
+     cite the corpus, and every oracle's `criteria` list against those criteria's
+     `Test:` field in both directions) and --catalog (every FC tag exists).
 
-Usage: validate.py [--acceptance ACCEPTANCE.md] [--catalog feature-catalog.md] [ORACLE ...]
+Usage: validate.py [--acceptance ACCEPTANCE.md] [--catalog feature-catalog.md] [--strict] [ORACLE ...]
 Exit status 0 when everything validates, 1 otherwise; one `path: message` per problem.
+Warnings are printed as `warning: ...` and are not failures unless --strict is given:
+they are the parts of the corpus that have not caught up with their acceptance document,
+and a run that fails on them cannot be made green without doing that work.
 
 See also:
   tests/debug/corpus/README.md - the oracle format and the program header contract.
@@ -39,7 +43,8 @@ Json = Union[None, bool, int, float, str, List["Json"], Dict[str, "Json"]]
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA_PATH = ROOT / "oracle.schema.json"
-ORACLE_GLOB = "*.oracle.json"
+ORACLE_SUFFIX = ".oracle.json"
+ORACLE_GLOB = f"*{ORACLE_SUFFIX}"
 FAMILY_FILE = "family.txt"
 MAIN_SOURCE = "program.st"
 
@@ -481,8 +486,7 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
 
 def acceptance_citations(path: Path) -> Dict[str, Set[str]]:
     cited: Dict[str, Set[str]] = {}
-    text = path.read_text(encoding="utf-8")
-    for block in re.split(r"\n(?=### A\d+ )", text):
+    for block in _acceptance_blocks(path):
         head = re.match(r"### (A\d+) ", block)
         corpus = re.search(r"^Corpus:\s*(.*)$", block, re.M)
         if head is None or corpus is None:
@@ -492,9 +496,96 @@ def acceptance_citations(path: Path) -> Dict[str, Set[str]]:
     return cited
 
 
+def _acceptance_blocks(path: Path) -> List[str]:
+    return re.split(r"\n(?=### A\d+ )", path.read_text(encoding="utf-8"))
+
+
+def acceptance_tests(path: Path) -> Dict[str, Optional[List[str]]]:
+    """Criterion -> the paths its `Test:` names, or None when the field is `—` or absent.
+
+    ACCEPTANCE.md's `Test:` is the only authority over what an oracle earns (README § Coverage): an
+    oracle's `criteria` list is the claim, this is what says the claim was paid for. `Corpus:` is the
+    weaker field -- it names a program directory, and every criterion of that program cites it -- so
+    a header cross-check can be green while the oracle that does the work names nothing. A `Test:`
+    value continues on following lines indented by two or more spaces.
+    """
+    out: Dict[str, Optional[List[str]]] = {}
+    for block in _acceptance_blocks(path):
+        head = re.match(r"### (A\d+) ", block)
+        found = re.search(r"^Test:[ \t]*(\S.*)$", block, re.M)
+        if head is None:
+            continue
+        value = found.group(1).strip() if found else ""
+        if found is not None:
+            lines = block[found.end():].splitlines()
+            take = 0
+            for line in lines:
+                if not line.startswith("  ") or not line.strip():
+                    break
+                value += " " + line.strip()
+                take += 1
+        out[head.group(1)] = None if value in ("", "—") else value.split(", ")
+    return out
+
+
+# A `Test:` that names a corpus scenario. Anything else (a shell script, an ADR review, `—`) is left
+# to whoever owns that criterion: this check joins two documents, it does not judge either.
+TESTED_SCENARIO = re.compile(r"corpus/([a-z0-9_-]+)/([a-z0-9_.-]+)\.oracle\.json")
+
+
+def join_problems(oracles: List[Tuple[Path, Json]], acceptance: Path) -> List[str]:
+    """Every way an oracle's `criteria` and ACCEPTANCE.md's `Test:` can disagree.
+
+    Both directions, because either one alone lets a claim through: forward, a scenario claims a
+    criterion whose `Test:` is `—` or names other scenarios (the scenario earns nothing); reverse, a
+    criterion names a scenario that does not cite it (the criterion is not exercised by anything).
+    """
+    out: List[str] = []
+    tests = acceptance_tests(acceptance)
+    on_disk = {f"{p.parent.name}/{p.name[: -len(ORACLE_SUFFIX)]}" for p, _ in oracles}
+    claims: Dict[str, Set[str]] = {}
+    for path, doc in oracles:
+        scenario = str(doc.get("scenario", ""))
+        for c in [str(x) for x in (doc.get("criteria") or [])]:
+            claims.setdefault(scenario, set()).add(c)
+            where = f"{path}: claims {c}"
+            named = tests.get(c, False)  # False = no such block; None = the field is —
+            if named is False:
+                out.append(f"{where}, which no ACCEPTANCE criterion block names")
+            elif named is None:
+                out.append(f"{where}, whose ACCEPTANCE Test: is —")
+            elif not any(TESTED_SCENARIO.search(t) for t in named):
+                out.append(f"{where}, whose ACCEPTANCE Test: names no corpus scenario: {', '.join(named)}")
+            elif not any(
+                (found := TESTED_SCENARIO.search(t)) is not None
+                and "/".join(found.groups()) == scenario
+                for t in named
+            ):
+                out.append(f"{where}, whose ACCEPTANCE Test: names other scenarios: {', '.join(named)}")
+    for c, named in sorted(tests.items()):
+        for value in named or []:
+            for found in TESTED_SCENARIO.finditer(value):
+                scenario = "/".join(found.groups())
+                if scenario not in on_disk:
+                    out.append(f"{c}'s Test: names {scenario}, which does not exist")
+                elif c not in claims.get(scenario, set()):
+                    what = ", ".join(sorted(claims.get(scenario, set()))) or "no criterion at all"
+                    out.append(
+                        f"{c}'s Test: names {scenario}, which does not cite it (it claims {what})"
+                    )
+    return out
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--acceptance", type=Path, help="docs/ACCEPTANCE.md of the orchestration root")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="count the warnings (the oracle<->ACCEPTANCE.md join, a stale build record, a stale "
+        "coverage.txt) as problems. They are warnings by default so a corpus that has not caught up "
+        "with its acceptance document still validates; the number going to zero is the work.",
+    )
     parser.add_argument("--catalog", type=Path, help="docs/drafts/feature-catalog.md, to check FC tags exist")
     parser.add_argument("--root", type=Path, default=ROOT, help="corpus root (default: this directory)")
     parser.add_argument("oracles", nargs="*", type=Path, help="oracle files (default: every one under the root)")
@@ -516,6 +607,8 @@ def main(argv: List[str]) -> int:
     for prog in programs.values():
         if not any(o.parent == prog.directory for o in oracles) and not args.oracles:
             problems.append(f"{prog.directory}: no {ORACLE_GLOB} scenario")
+    warnings: List[str] = []
+    loaded: List[Tuple[Path, Json]] = []
     for path in oracles:
         try:
             doc: Json = json.loads(path.read_text(encoding="utf-8"))
@@ -526,6 +619,7 @@ def main(argv: List[str]) -> int:
         if not found:
             found = oracle_problems(path, doc, programs)
         problems.extend(f"{path}: {p}" for p in found)
+        loaded.append((path, doc))
 
     if args.acceptance:
         cited = acceptance_citations(args.acceptance)
@@ -538,13 +632,21 @@ def main(argv: List[str]) -> int:
             for c in sorted(prog.criteria - want):
                 problems.append(f"{prog.directory}: header lists {c}, which does not cite corpus:{name}")
         problems.extend(f"{args.acceptance}: corpus:{n} has no program directory" for n in sorted(set(cited) - set(programs)))
+        warnings.extend(join_problems(loaded, args.acceptance))
     if args.catalog:
         known = set(re.findall(r"FC-[A-Z]+-\d+", args.catalog.read_text(encoding="utf-8")))
         for prog in programs.values():
             problems.extend(f"{prog.directory}: unknown FC tag {t}" for t in sorted(prog.fc - known))
 
+    if args.strict:
+        problems.extend(warnings)
+        warnings = []
     for p in problems:
         print(p)
+    for w in warnings:
+        print(f"warning: {w}")
+    if warnings:
+        print(f"{len(warnings)} warnings (--strict to count them as problems)")
     scenarios = len(oracles)
     print(f"{'FAIL' if problems else 'OK'}: {len(programs)} programs, {scenarios} scenarios, {len(problems)} problems")
     return 1 if problems else 0

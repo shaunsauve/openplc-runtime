@@ -132,11 +132,126 @@ SOURCE_DEFECTS: List[Tuple[str, Tuple[str, str], str]] = [
 ]
 
 
-def run(root: Path) -> Tuple[int, str]:
+def run(root: Path, argv: List[str] = ()) -> Tuple[int, str]:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        code = validate.main(["--root", str(root)])
+        code = validate.main(["--root", str(root), *argv])
     return code, buf.getvalue()
+
+
+CLAIMS = "openplc-runtime:tests/debug/corpus/plant-io/bp-before-statement.oracle.json"
+
+# One ACCEPTANCE.md block per criterion the program header cites, as the real file has. The
+# `--acceptance` header cross-check needs all of them, so a fixture that names one or two is not a
+# fixture for the join alone.
+BLOCK = """### {c} — criterion {c}
+Covers:    F001
+Tier:      MVP
+Gate:      none
+Method:    gesture — headless-harness
+Batch:     b-test
+Corpus:    corpus:plant-io
+Check:     what is driven
+Evidence:  what must be observed
+Negative:  —
+Red-proof: the seeded defect
+Test:      {test}
+Ran-on:    as declared
+Verdict:   PENDING — UNTESTED
+
+"""
+
+
+def acceptance(root: Path, **tests: str) -> Path:
+    """ACCEPTANCE.md over `plant-io`'s header criteria; `tests` overrides a criterion's `Test:`,
+    and a `None` override omits that criterion's block entirely."""
+    doc = validate.load_program(root / "plant-io")
+    out = ["# Acceptance Criteria\n\n"]
+    for c in sorted(doc.criteria):
+        test = tests.get(c, CLAIMS if c in ("A034", "A031") else "—")
+        if test is None:
+            continue
+        out.append(BLOCK.format(c=c, test=test))
+    path = root / "ACCEPTANCE.md"
+    path.write_text("".join(out), encoding="utf-8")
+    return path
+
+
+class JoinTest(unittest.TestCase):
+    """The oracle -> ACCEPTANCE.md join (validate.py `join_problems`).
+
+    An oracle's `criteria` list is the claim it earns, and `ACCEPTANCE.md`'s `Test:` is what says
+    the claim was paid for. Nothing read both: `acceptance_citations` cross-checks the *program
+    header* against the criteria whose `Corpus:` names the directory, and never an oracle's own
+    list. So 39 claims named a criterion whose `Test:` was `—` or named other scenarios, one named
+    a scenario that does not cite it, and nothing said so.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        shutil.copytree(ROOT / "plant-io", self.tmp / "plant-io")
+        for extra in (self.tmp / "plant-io").glob("*.oracle.json"):
+            if extra.name != ORACLE:
+                extra.unlink()
+        self.oracle = self.tmp / "plant-io" / ORACLE  # claims A034, A031
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def _run_with(self, **tests: str) -> Tuple[int, str]:
+        return run(self.tmp, ["--acceptance", str(acceptance(self.tmp, **tests))])
+
+    def test_a_claim_the_acceptance_names_is_not_reported(self) -> None:
+        code, out = self._run_with()
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("warning", out)
+        self.assertIn("OK: 1 programs, 1 scenarios, 0 problems", out)
+
+    def test_a_claim_whose_test_is_a_dash_is_a_warning_not_a_failure(self) -> None:
+        code, out = self._run_with(A031="—")
+        self.assertEqual(code, 0, out)  # the corpus stays green while the number is not zero
+        self.assertIn("warning: ", out)
+        self.assertIn("claims A031, whose ACCEPTANCE Test: is —", out)
+        self.assertIn("OK: 1 programs, 1 scenarios, 0 problems", out)
+
+    def test_a_claim_whose_test_names_other_scenarios_is_reported(self) -> None:
+        _, out = self._run_with(A031="openplc-runtime:tests/debug/corpus/plant-io/elsewhere.oracle.json")
+        self.assertIn("claims A031, whose ACCEPTANCE Test: names other scenarios", out)
+        self.assertIn("elsewhere.oracle.json", out)
+
+    def test_a_claim_whose_test_names_no_corpus_scenario_is_reported_as_such(self) -> None:
+        _, out = self._run_with(A034="openplc-debug:tools/adr_review.py")
+        self.assertIn("claims A034, whose ACCEPTANCE Test: names no corpus scenario", out)
+        self.assertIn("adr_review.py", out)
+
+    def test_a_claim_no_criterion_block_names_at_all_is_reported(self) -> None:
+        # Defensive branch: `--acceptance` already refuses a header criterion nothing cites, so this
+        # can only be reached with a document that is not the real one. It still has to say so.
+        _, out = run(self.tmp, ["--acceptance", str(acceptance(self.tmp, **{"A031": None}))])
+        self.assertIn("claims A031", out)
+
+    def test_strict_turns_every_warning_into_a_problem(self) -> None:
+        code, out = self._run_with(A031="—")
+        self.assertEqual(code, 0, out)
+        code, out = run(self.tmp, ["--acceptance", str(acceptance(self.tmp, A031="—")), "--strict"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("claims A031", out)
+        self.assertIn("FAIL: 1 programs, 1 scenarios, 1 problems", out)
+        # One switch, both directions: A033 names this scenario but the scenario does not cite it.
+        doc = acceptance(self.tmp, A033=CLAIMS)
+        code, out = run(self.tmp, ["--acceptance", str(doc), "--strict"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("A033's Test: names plant-io/bp-before-statement, which does not cite it", out)
+        # And --strict with nothing to join against is still green.
+        code, out = run(self.tmp, ["--strict"])
+        self.assertEqual(code, 0, out)
+
+    def test_a_test_naming_a_scenario_that_does_not_exist_is_reported(self) -> None:
+        # One slip, both directions: the criterion's Test: points at an oracle nobody wrote, and the
+        # scenario that claims it is therefore claiming nothing.
+        _, out = self._run_with(A034="openplc-runtime:tests/debug/corpus/plant-io/nowhere.oracle.json")
+        self.assertIn("A034's Test: names plant-io/nowhere, which does not exist", out)
+        self.assertIn("claims A034, whose ACCEPTANCE Test: names other scenarios", out)
 
 
 class ValidatorRedGreen(unittest.TestCase):
