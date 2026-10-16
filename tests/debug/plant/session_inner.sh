@@ -80,7 +80,7 @@ PY
       || { echo "SEED forcecell not applied"; exit 1; } ;;
   forceowner)  # A116 red-proof: a force is registered with no owner at all
     python3 - <<'PY' || { echo "SEED forceowner not applied"; exit 1; }
-p = "core/src/plc_app/debug_link.cpp"
+p = "webserver/debug_gateway/gateway.py"
 s = open(p).read()
 a = '                "owner": session.user,\n'
 assert a in s
