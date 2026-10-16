@@ -94,14 +94,16 @@ for dir in "$HERE"/*/; do
     libargs=(-L "$out/lib")
   fi
   files=(); for s in $srcs; do files+=("$dir/$s"); done
+  dbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && dbg=("${DEBUG_FLAG[@]}" "$out/debug")
   # Everything whose content this program's verdict depends on: the declared sources, every
   # variant-*.st and reject-*.st (a variant that stops compiling is the program's failure), and a
-  # gen.py whose generated program.st is only as good as the generator that wrote it.
+  # gen.py whose generated program.st is only as good as the generator that wrote it. This is the
+  # record's list, NOT the compiler's: `files` stays exactly what the program declares.
+  recorded=("${files[@]}")
   for extra in "$dir"/variant-*.st "$dir"/reject-*.st "$dir"/gen.py; do
-    [ -f "$extra" ] && files+=("$extra")
+    [ -f "$extra" ] && recorded+=("$extra")
   done
-  record "$out" "${files[@]}"
-  dbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && dbg=("${DEBUG_FLAG[@]}" "$out/debug")
+  record "$out" "${recorded[@]}"
   libinc=; [ -d "$out/lib" ] && libinc="$out/lib"
   if node "$CLI" "${files[@]}" -o "$out/program.cpp" ${libargs[@]+"${libargs[@]}"} ${dbg[@]+"${dbg[@]}"} >"$out/build.log" 2>&1; then
     cxx_check "$out" "$out/program.cpp" "$libinc" || status=1

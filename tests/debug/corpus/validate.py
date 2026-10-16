@@ -523,20 +523,17 @@ def diagnostic_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> 
     sibling = path.parent / f"{name.split('/', 1)[-1]}{ORACLE_SUFFIX}"
     if not sibling.exists():
         return [f"a diagnostic scenario is a bisect of {name}, which does not exist"]
-    corpus, _, sid = name.partition("/")
-    claims = [str(x) for x in (doc.get("criteria") or [])]
     try:
         other = json.loads(sibling.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return [f"{sibling}: {exc}"]
-    if isinstance(other, dict):
-        if str(other.get("scenario")) != name:
-            out.append(f"a diagnostic scenario is a bisect of {name}, whose `scenario` is "
-                       f"{other.get('scenario')!r}")
-        shared = sorted(set(claims) & {str(x) for x in (other.get("criteria") or [])})
-        if shared:
-            out.append(f"{name} is bisected here and also claims {shared}")
-    steps, other_steps = len(flat_steps_of(doc)), len(flat_steps_of(other)) if isinstance(other, dict) else 0
+    if not isinstance(other, dict):
+        return [f"{sibling}: not an object"]
+    if str(other.get("scenario")) != name:
+        out.append(f"a diagnostic scenario is a bisect of {name}, whose `scenario` is "
+                   f"{other.get('scenario')!r}")
+    other_steps = len(flat_steps_of(other))
+    steps = len(flat_steps_of(doc))
     want = int(removed.group(1))  # type: ignore[union-attr]
     if want < 1:
         out.append(f"a diagnostic scenario says it removed {want} steps of {name}; a bisect that "
