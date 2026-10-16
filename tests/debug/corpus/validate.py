@@ -32,8 +32,12 @@ See also:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -478,7 +482,74 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                 out.extend(f"{here}.expect.{key}: task {t!r} is not a task of {prog.name}" for t in per_task if t not in tasks)
     if doc.get("kind") == "runtime" and plant_reads == 0:
         out.append("a runtime scenario must read the plant at least once (observe: plant)")
+    out.extend(diagnostic_problems(path, doc, programs))
     return out
+
+
+# A diagnostic says which scenario it is a bisect of and how many steps it removed. Both are checked
+# as counts, not prose: `Steps removed:` is compared against the sibling oracle's own step count, so
+# a diagnostic that has quietly stopped being a bisect (the sibling grew steps, or the notes were
+# copied) fails rather than decaying into a scenario nobody has read.
+DIAGNOSTIC_OF = re.compile(r"^Diagnostic of:[ \t]*(\S+)[ \t]*$", re.M)
+DIAGNOSTIC_REMOVED = re.compile(r"^Steps removed:[ \t]*(\d+)[ \t]*$", re.M)
+
+
+def diagnostic_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List[str]:
+    """`criteria: []` is a claim of nothing, so it takes a `kind` to say so, and a count to prove it."""
+    criteria = doc.get("criteria")
+    listed = isinstance(criteria, list) and bool(criteria)
+    if doc.get("kind") == "diagnostic":
+        if listed:
+            return [f"a diagnostic scenario claims {criteria}; it is a bisect and earns nothing, so "
+                    "its criteria must be empty"]
+    elif not listed and isinstance(criteria, list):
+        return ["criteria is empty: say why with \"kind\": \"diagnostic\", which names the scenario "
+                "this one is a bisect of and how many steps it removed"]
+    if doc.get("kind") != "diagnostic":
+        return []
+    notes = str(doc.get("notes", ""))
+    of = DIAGNOSTIC_OF.search(notes)
+    removed = DIAGNOSTIC_REMOVED.search(notes)
+    out: List[str] = []
+    if of is None:
+        out.append("a diagnostic scenario's notes must name the scenario it is a bisect of, "
+                   "as a line 'Diagnostic of: <corpus>/<scenario>'")
+    if removed is None:
+        out.append("a diagnostic scenario's notes must count the steps it removed, as a line "
+                   "'Steps removed: <n>'")
+    if out:
+        return out
+    name = of.group(1)  # type: ignore[union-attr]
+    sibling = path.parent / f"{name.split('/', 1)[-1]}{ORACLE_SUFFIX}"
+    if not sibling.exists():
+        return [f"a diagnostic scenario is a bisect of {name}, which does not exist"]
+    corpus, _, sid = name.partition("/")
+    claims = [str(x) for x in (doc.get("criteria") or [])]
+    try:
+        other = json.loads(sibling.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"{sibling}: {exc}"]
+    if isinstance(other, dict):
+        if str(other.get("scenario")) != name:
+            out.append(f"a diagnostic scenario is a bisect of {name}, whose `scenario` is "
+                       f"{other.get('scenario')!r}")
+        shared = sorted(set(claims) & {str(x) for x in (other.get("criteria") or [])})
+        if shared:
+            out.append(f"{name} is bisected here and also claims {shared}")
+    steps, other_steps = len(flat_steps_of(doc)), len(flat_steps_of(other)) if isinstance(other, dict) else 0
+    want = int(removed.group(1))  # type: ignore[union-attr]
+    if want < 1:
+        out.append(f"a diagnostic scenario says it removed {want} steps of {name}; a bisect that "
+                   "removed nothing is not a bisect")
+    elif steps + want != other_steps:
+        out.append(f"a diagnostic scenario says it removed {want} step(s) of {name}, which has "
+                   f"{other_steps}; this one has {steps}")
+    return out
+
+
+def flat_steps_of(doc: Json) -> List[Tuple[str, Json]]:
+    """`flat_steps` for any document, including one that failed to parse."""
+    return list(flat_steps(doc.get("steps")) if isinstance(doc, dict) else [])
 
 
 # ---------------------------------------------------------------- cross-checks
@@ -576,6 +647,172 @@ def join_problems(oracles: List[Tuple[Path, Json]], acceptance: Path) -> List[st
     return out
 
 
+# `build_all.sh`'s per-program record of what a verdict was measured on: the compiler head, the
+# corpus commit, and a hash of every source the verdict depends on. Plain text, one `key value...`
+# per line, so a person can read what a verdict meant without this script.
+BUILD_RECORD = "build-record.txt"
+COVERAGE_FILE = "coverage.txt"
+
+
+def read_build_record(path: Path) -> Dict[str, Json]:
+    """`key value...` lines into a dict; `source` lines become a list of [name, sha256, bytes].
+
+    A truncated or hand-edited record must not crash the validator: the caller reports what it can
+    read and says so, rather than the run dying on a file nobody's build produced.
+    """
+    out: Dict[str, Json] = {"source": []}
+    sources: List[List[str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "source" and len(parts) >= 3:
+            sources.append(parts[1:])
+        else:
+            out[parts[0]] = parts[1] if len(parts) > 1 else ""
+    out["source"] = sources
+    return out
+
+
+def build_record_warnings(root: Path, out: Path) -> List[str]:
+    """Every recorded build verdict that no longer describes the sources it was measured on.
+
+    A warning, never a failure: the corpus has to validate on a machine that has not built it, and a
+    stale record says the build is due, not that the corpus is wrong. A missing build directory says
+    nothing at all -- there is no record to be stale.
+    """
+    found: List[str] = []
+    if not out.is_dir():
+        return found
+    for record in sorted(out.glob(f"*/{BUILD_RECORD}")):
+        prog = root / record.parent.name
+        if not prog.is_dir():
+            continue  # a record for a program this root does not have is not this root's business
+        where = f"{prog.name}: "
+        try:
+            doc = read_build_record(record)
+        except OSError as exc:
+            found.append(f"{where}{BUILD_RECORD} is unreadable: {exc}")
+            continue
+        head = str(doc.get("strucpp", "unknown"))
+        sources = [list(x) for x in (doc.get("source") or [])]  # type: ignore[union-attr]
+        if not sources:
+            found.append(f"{where}the build recorded at strucpp {head} records no source, "
+                         "so nothing says what it measured")
+            continue
+        stale: List[str] = []
+        for name, digest in [(str(s[0]), str(s[1])) for s in sources]:
+            source = prog / name
+            if not source.exists():
+                stale.append(f"{name} no longer exists")
+            elif hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+                stale.append(f"{name} changed")
+        if stale:
+            found.append(f"{where}the build recorded at strucpp {head} is stale "
+                         f"(recorded at corpus {doc.get('repo', 'unknown')}): " + ", ".join(stale))
+    moved = compiler_moved(out)
+    return found + ([moved] if moved else [])
+
+
+def compiler_moved(out: Path) -> Optional[str]:
+    """None unless a STruCpp checkout is here to compare against, and it has moved.
+
+    `STRUCPP` (the same variable `build_all.sh` reads) or a sibling `../STruCpp`. This is the whole
+    reason the records exist: "does not compile" is a statement about a revision, so the revision is
+    recorded, and a compiler that has moved since is the one thing that invalidates every verdict at
+    once. Silently absent when there is no checkout -- a checker-only CI job has none.
+    """
+    named = os.environ.get("STRUCPP", "")
+    compiler = Path(named).expanduser() if named else out.parents[2] / "STruCpp"
+    if not (compiler / ".git").is_dir() or not shutil.which("git"):
+        return None
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(compiler), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    heads = {
+        str(read_build_record(record).get("strucpp", ""))
+        for record in sorted(out.glob(f"*/{BUILD_RECORD}"))
+        if (record.parent.is_dir())
+    }
+    behind = sorted(h for h in heads if h and h != head)
+    if not behind:
+        return None
+    return (f"the corpus was built with STruCpp {', '.join(behind)}, "
+            f"which has moved to {head}: every build verdict in {out} predates it")
+
+
+# The index block of tests/debug/harness/coverage.txt is generated from the oracles; the prose around
+# it is not, because a generator cannot know what a scenario does not check. The markers are what
+# makes that split mechanical.
+COVERAGE_BEGIN = "<!-- BEGIN generated: tests/debug/corpus/validate.py --write-coverage -->"
+COVERAGE_END = "<!-- END generated -->"
+COVERAGE_TEST_ID = "tests/debug/harness/runner.py::"
+
+
+def coverage_block(loaded: List[Tuple[Path, Json]]) -> str:
+    """The generated index: every criterion and the scenarios that claim it, then the scenarios that
+    claim nothing (each a bisect, which is why it earns no criterion)."""
+    claims: Dict[str, List[str]] = {}
+    silent: List[str] = []
+    for _, doc in loaded:
+        scenario = str(doc.get("scenario", ""))
+        criteria = [str(c) for c in (doc.get("criteria") or [])]
+        if not criteria:
+            silent.append(scenario)
+        for c in criteria:
+            claims.setdefault(c, []).append(scenario)
+    lines = [f"{c} " + " ".join(f"{COVERAGE_TEST_ID}{s}" for s in sorted(claims[c]))
+             for c in sorted(claims)]
+    if silent:
+        lines.append("")
+        lines.append("# Scenarios that discharge no criterion: a bisect of another scenario, whose")
+        lines.append("# verdict is evidence about that scenario's evidence and never coverage of its own.")
+        lines.extend(f"#   {s}" for s in sorted(silent))
+    return "\n".join(lines) + "\n"
+
+
+def coverage_problems(loaded: List[Tuple[Path, Json]], path: Optional[Path]) -> List[str]:
+    """[] when the file is absent (nothing to keep in step) or its generated block is current."""
+    if path is None or not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    want = coverage_block(loaded)
+    begin = text.find(COVERAGE_BEGIN)
+    end = text.find(COVERAGE_END)
+    if begin < 0 or end < 0:
+        return [f"{path}: has no generated block (the markers {COVERAGE_BEGIN!r} / "
+                f"{COVERAGE_END!r} are missing), so nothing says when its index was written"]
+    have = text[begin + len(COVERAGE_BEGIN):end].strip("\n")
+    if have.strip("\n") == want.strip("\n"):
+        return []
+    missing = [line for line in want.splitlines() if line and line not in have.splitlines()]
+    extra = [line for line in have.splitlines() if line and line not in want.splitlines()]
+    return (
+        [f"{path}: its generated index is not what the oracles say "
+         f"({len(missing)} line(s) missing, {len(extra)} line(s) no oracle claims)"]
+        + [f"{path}:   missing: {line}" for line in missing[:20]]
+        + [f"{path}:   stale:   {line}" for line in extra[:20]]
+        + [f"{path}: rewrite it with `validate.py --write-coverage {path}` (the prose outside the "
+            f"markers is left alone)"]
+    )
+
+
+def write_coverage(loaded: List[Tuple[Path, Json]], path: Path) -> None:
+    """Rewrite the generated block in place; every other byte of the file is left as it was."""
+    text = path.read_text(encoding="utf-8")
+    begin, end = text.find(COVERAGE_BEGIN), text.find(COVERAGE_END)
+    if begin < 0 or end < 0:
+        raise SystemExit(f"{path}: has no generated block to write ({COVERAGE_BEGIN} / {COVERAGE_END})")
+    body = "\n".join(
+        [text[: begin + len(COVERAGE_BEGIN)], coverage_block(loaded).rstrip("\n"), text[end:]]
+    )
+    path.write_text(body, encoding="utf-8")
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--acceptance", type=Path, help="docs/ACCEPTANCE.md of the orchestration root")
@@ -587,6 +824,28 @@ def main(argv: List[str]) -> int:
         "with its acceptance document still validates; the number going to zero is the work.",
     )
     parser.add_argument("--catalog", type=Path, help="docs/drafts/feature-catalog.md, to check FC tags exist")
+    parser.add_argument(
+        "--coverage",
+        type=Path,
+        help="tests/debug/harness/coverage.txt, whose generated index block is checked against the "
+        "oracles (default: ../harness/coverage.txt when it is there; absent means nothing to check)",
+    )
+    parser.add_argument(
+        "--write-coverage",
+        nargs="?",
+        const="",
+        type=str,  # not Path: argparse would turn the empty `const` into "."
+        metavar="COVERAGE_TXT",
+        help="rewrite coverage.txt's generated index block from the oracles and check it (default: "
+        "the harness's coverage.txt); the prose outside the markers is left exactly as it was",
+    )
+    parser.add_argument(
+        "--build-out",
+        type=Path,
+        default=ROOT.parents[2] / "build" / "debug-corpus",
+        help="build_all.sh's output directory, read for the per-program build records (a directory "
+        "that does not exist means the corpus has not been built here, which is not a problem)",
+    )
     parser.add_argument("--root", type=Path, default=ROOT, help="corpus root (default: this directory)")
     parser.add_argument("oracles", nargs="*", type=Path, help="oracle files (default: every one under the root)")
     args = parser.parse_args(argv)
@@ -637,6 +896,21 @@ def main(argv: List[str]) -> int:
         known = set(re.findall(r"FC-[A-Z]+-\d+", args.catalog.read_text(encoding="utf-8")))
         for prog in programs.values():
             problems.extend(f"{prog.directory}: unknown FC tag {t}" for t in sorted(prog.fc - known))
+    warnings.extend(build_record_warnings(root, args.build_out.resolve()))
+    coverage = args.coverage
+    if coverage is None:
+        default = root.parent / "harness" / COVERAGE_FILE
+        coverage = default if default.exists() else None
+    if args.write_coverage is not None:
+        default = root.parent / "harness" / COVERAGE_FILE
+        target = Path(str(args.write_coverage)) if str(args.write_coverage) else (
+            coverage or default
+        )
+        write_coverage(loaded, target)
+        coverage = target
+    # A generated index that has drifted is a problem, not a warning: this script owns that file,
+    # and the only thing that can be wrong with it is that nobody regenerated it.
+    problems.extend(coverage_problems(loaded, coverage))
 
     if args.strict:
         problems.extend(warnings)

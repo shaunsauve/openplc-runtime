@@ -12,6 +12,12 @@
 #        must fail to compile (a construct the compiler refuses), leave no generated code, and,
 #        when its header has `expect-diagnostic: <text>`, name that text in the diagnostic;
 #        variant-*.st must compile.
+#        Every program's verdict is recorded with the compiler that produced it and a hash of
+#        every source that was read (`<out>/<name>/build-record.txt`), because the runtime head
+#        alone does not identify what was measured (plant/session_e2e.sh records the same pair
+#        into every row). `validate.py` reads those records and reports a stale one as a warning:
+#        a program whose sources have moved keeps its `build: expect-fail` header, and the header
+#        becomes a lie the moment the compiler gains what it was missing.
 #        "Compile" means the generated C++ too: every .cpp is syntax-checked against the
 #        STruCpp runtime headers with the flags scripts/Makefile.strucpp uses. STruCpp
 #        passes an unknown call (LOG_PRINT) or a construct its runtime lacks straight
@@ -49,6 +55,28 @@ header() {  # header <file> <key>: the value of a header key, first occurrence
   sed -n '1,/\*)/p' "$1" | sed -n "s/^ *$2: *//p" | head -1
 }
 
+# The compiler's head is part of what a verdict means: STruCpp upper-cases identifiers, emits
+# 16#... as C++ and still has no IECWStringVar <> char16_t[], so "this program does not compile"
+# is a statement about a revision and not about the program. `git` is not guaranteed on a
+# developer's PATH, so an unreadable head is recorded as unknown rather than aborting the run.
+STRUCPP_HEAD=$(git -C "$STRUCPP" rev-parse --short HEAD 2>/dev/null || echo unknown)
+REPO_HEAD=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
+git -C "$REPO" diff --quiet HEAD -- tests 2>/dev/null || REPO_HEAD="$REPO_HEAD-dirty"
+
+sha() {  # sha <file>: the file's SHA-256, whichever of the two names this system has
+  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+record() {  # record <out> <sources...>: what this program's verdict was measured on
+  local dir=$1 src; shift
+  printf 'strucpp %s\nrepo %s\n' "$STRUCPP_HEAD" "$REPO_HEAD" >"$dir/build-record.txt"
+  for src in "$@"; do
+    printf 'source %s %s %s\n' "$(basename "$src")" "$(sha "$src")" "$(wc -c <"$src" | tr -d ' ')" \
+      >>"$dir/build-record.txt"
+  done
+}
+
 ok=0; fail=0; xfail=0; xpass=0
 for dir in "$HERE"/*/; do
   dir=${dir%/}; name=$(basename "$dir")
@@ -66,6 +94,13 @@ for dir in "$HERE"/*/; do
     libargs=(-L "$out/lib")
   fi
   files=(); for s in $srcs; do files+=("$dir/$s"); done
+  # Everything whose content this program's verdict depends on: the declared sources, every
+  # variant-*.st and reject-*.st (a variant that stops compiling is the program's failure), and a
+  # gen.py whose generated program.st is only as good as the generator that wrote it.
+  for extra in "$dir"/variant-*.st "$dir"/reject-*.st "$dir"/gen.py; do
+    [ -f "$extra" ] && files+=("$extra")
+  done
+  record "$out" "${files[@]}"
   dbg=(); [ ${#DEBUG_FLAG[@]} -gt 0 ] && dbg=("${DEBUG_FLAG[@]}" "$out/debug")
   libinc=; [ -d "$out/lib" ] && libinc="$out/lib"
   if node "$CLI" "${files[@]}" -o "$out/program.cpp" ${libargs[@]+"${libargs[@]}"} ${dbg[@]+"${dbg[@]}"} >"$out/build.log" 2>&1; then
@@ -102,6 +137,6 @@ for dir in "$HERE"/*/; do
 done
 
 echo "== validate oracles"
-python3 "$HERE/validate.py"; vstatus=$?
-echo "build: $ok ok, $fail fail, $xfail expected-fail, $xpass unexpected-pass; validate exit $vstatus"
+python3 "$HERE/validate.py" --build-out "$OUT"; vstatus=$?
+echo "build: $ok ok, $fail fail, $xfail expected-fail, $xpass unexpected-pass; strucpp $STRUCPP_HEAD; corpus $REPO_HEAD; validate exit $vstatus"
 [ $fail -eq 0 ] && [ $xpass -eq 0 ] && [ $vstatus -eq 0 ]
