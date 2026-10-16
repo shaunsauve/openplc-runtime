@@ -1083,7 +1083,11 @@ Reply unforce_leaf(cJSON *args)
 
 /* ADR-005 D5.5: one action clears every force, every owner's and legacy ones
  * included; the count is the audit log's number. */
-Reply unforce_all(void)
+/* ADR-005 D5.5: one action clears every force, every owner's and legacy ones included, and
+ * answers how many went, which is the number the audit log records. `session` names the caller
+ * and is deliberately not consulted: cancel-all is not scoped to the caller, and A188's
+ * red-proof (clear only your own) is exactly what it must not do. */
+Reply unforce_all(const std::string &)
 {
     static dbgforce_t buf[256];
     for (int at = 0; at < dbgforce_count();)
@@ -1315,7 +1319,7 @@ Reply handle(const char *command, cJSON *args)
 
     if (!std::strcmp(command, "force")) return force_leaf(args);
     if (!std::strcmp(command, "unforce")) return unforce_leaf(args);
-    if (!std::strcmp(command, "unforceAll")) return unforce_all();
+    if (!std::strcmp(command, "unforceAll")) return unforce_all(session);
     if (!std::strcmp(command, "listForces"))
     {
         cJSON *b = cJSON_CreateObject();

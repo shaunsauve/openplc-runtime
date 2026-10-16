@@ -73,6 +73,77 @@ assert a in s
 open(p, "w").write(s.replace(a, a + "        end_session_locked(session, running);\n", 1))
 PY
     ;;
+  forcecell)  # A109 red-proof: force only the variable cell, not the I/O image
+    sed -i 's/        journal_force_set(jt, byte_index, bit_index, val);/        (void)val; \/* seeded: the image pin is gone, so copy_out owns the slot *\//' \
+      core/src/plc_app/debug_write_journal.cpp
+    grep -q 'seeded: the image pin is gone' core/src/plc_app/debug_write_journal.cpp \
+      || { echo "SEED forcecell not applied"; exit 1; } ;;
+  forceowner)  # A116 red-proof: a force is registered with no owner at all
+    python3 - <<'PY' || { echo "SEED forceowner not applied"; exit 1; }
+p = "core/src/plc_app/debug_link.cpp"
+s = open(p).read()
+a = '                "owner": session.user,\n'
+assert a in s
+open(p, "w").write(s.replace(a, '                "owner": "",\n', 1))
+PY
+    ;;
+  forcettl)  # A116 red-proof: a TTL is recorded but never expires
+    sed -i 's/    if (expires_ms != 0 \&\& expires_ms <= now_ms) gone.push_back(f.leaf);/    if (false \&\& f.expires_ms != 0 \&\& f.expires_ms <= now_ms) gone.push_back(f.leaf);/' \
+      core/src/plc_app/debug_force.cpp
+    grep -q 'if (false && f.expires_ms' core/src/plc_app/debug_force.cpp \
+      || { echo "SEED forcettl not applied"; exit 1; } ;;
+  forceallowner)  # A188 red-proof: cancel-all clears only the caller's own forces
+    python3 - <<'PY' || { echo "SEED forceallowner not applied"; exit 1; }
+p = "core/src/plc_app/debug_link.cpp"
+s = open(p).read()
+a = """    static dbgforce_t buf[256];
+    for (int at = 0; at < dbgforce_count();)
+    {
+        const int n = dbgforce_copy(&buf[0], (int)(sizeof buf / sizeof buf[0]));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i)
+        {
+            uint8_t  arr = 0;
+            uint16_t elem = 0;
+            if (dbgforce_arr_elem_of(buf[i].leaf, &arr, &elem) == 0)
+                runtime_external_write(arr, elem, DBGW_OP_UNFORCE, nullptr, 0);
+        }
+        at += n;
+    }
+    const int removed = dbgforce_clear_all();
+"""
+assert a in s, "cancel-all body not found"
+b = """    static dbgforce_t buf[256];
+    const std::string me = g_sessions.count(session) ? g_sessions[session].user : std::string();
+    for (int at = 0; at < dbgforce_count();)
+    {
+        const int n = dbgforce_copy(&buf[0], (int)(sizeof buf / sizeof buf[0]));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i)
+        {
+            if (me != buf[i].owner) continue;
+            uint8_t  arr = 0;
+            uint16_t elem = 0;
+            if (dbgforce_arr_elem_of(buf[i].leaf, &arr, &elem) == 0)
+                runtime_external_write(arr, elem, DBGW_OP_UNFORCE, nullptr, 0);
+        }
+        at += n;
+    }
+    int removed = 0;
+    for (int at = 0; at < dbgforce_count();)
+    {
+        static dbgforce_t mine[256];
+        const int n = dbgforce_copy(&mine[0], (int)(sizeof mine / sizeof mine[0]));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i)
+            if (me == mine[i].owner) removed += dbgforce_clear(mine[i].leaf);
+        at += n;
+        if (removed > 0) break;
+    }
+"""
+open(p, "w").write(s.replace(a, b, 1))
+PY
+    ;;
   *) echo "unknown SEED $SEED"; exit 1 ;;
 esac
 mkdir -p build/plugins /run/runtime core/generated

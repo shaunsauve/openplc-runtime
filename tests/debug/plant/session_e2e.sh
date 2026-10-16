@@ -21,7 +21,11 @@
 #                 lands on an armed breakpoint twice, as a step and as the breakpoint (A038);
 #                 `twoscans` makes a cycle step run two scans (A036); `skipout` skips the
 #                 copy-out of a scan that was halted and resumed (A037); `stopdetach` makes stop
-#                 also end the session (A033)
+#                 also end the session (A033); `forcecell` seeds a force that pins only the
+#                 variable cell, not the I/O image (A109: the plant never sees a forced output);
+#                 `forceowner` seeds a force registered with no owner (ADR-005 D5.1);
+#                 `forcettl` seeds a TTL that is recorded but never expires (A116);
+#                 `forceallowner` seeds a cancel-all that clears only the caller's own (A188)
 #        IMAGE    Linux image with g++, cmake and the runtime venv (default the runtime image)
 # Needs: node (host, STruCpp codegen) and docker.
 #
