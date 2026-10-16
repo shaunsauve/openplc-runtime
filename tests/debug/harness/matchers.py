@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
@@ -59,6 +60,55 @@ def _equal(expected: Json, observed: Observed) -> bool:
     if en is not None and on is not None:
         return en == on
     return not isinstance(observed, _Missing) and expected == observed
+
+
+# Keys whose value is an IEC identifier, compared case-insensitively (DEBUG_PROTOCOL's `variables`,
+# pm ruling 13): the runtime reports debug-info.json's spelling, which STruCpp upper-cases, and
+# an oracle writes the source's. Every comparison folds, not only the ones a caller remembered to
+# fold, which is why the fold lives here, beside the comparison, rather than at the call site.
+IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
+# A `type` is an IEC identifier too, and a compound one is several of them (`ARRAY[0..1] OF Seg`),
+# so it folds token by token rather than as one name.
+TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _fold_type(expected: str, observed: str) -> str:
+    """`observed` with the oracle's spelling when the two name the same type.
+
+    Every identifier token has to match case-insensitively and the token counts have to agree, so
+    this never makes two different types equal: `INT` and `DINT` are not, `STRING` and `STRING[8]`
+    are not, `Seg` and `Point` are not."""
+    if expected == observed or expected.casefold() == observed.casefold():
+        return expected
+    want, got = TYPE_TOKEN.findall(expected), TYPE_TOKEN.findall(observed)
+    if len(want) == len(got) and all(a.casefold() == b.casefold() for a, b in zip(want, got)):
+        return expected
+    return observed
+
+
+def fold_identifiers(expected: Json, observed: Observed) -> Observed:
+    """`observed` with each identifier-valued string that equals the oracle's but for case
+    replaced by the oracle's spelling, so the matchers compare everything else exactly.
+
+    Applied inside a matcher too (`~contains` over a list of records, say), which is the case a
+    caller-side fold missed: pm ruling 13 makes every identifier comparison case-insensitive, not
+    the ones that happen to sit at the top of an expectation."""
+    if isinstance(expected, dict) and isinstance(observed, dict) and not is_matcher(expected):
+        out = dict(observed)
+        for k, want in expected.items():
+            if k not in out:
+                continue
+            got = out[k]
+            if k in IDENTIFIER_KEYS and isinstance(want, str) and isinstance(got, str):
+                out[k] = want if got.casefold() == want.casefold() else got
+            elif k == "type" and isinstance(want, str) and isinstance(got, str):
+                out[k] = _fold_type(want, got)
+            else:
+                out[k] = fold_identifiers(want, got)
+        return out
+    if isinstance(expected, list) and isinstance(observed, list):
+        return [fold_identifiers(w, g) for w, g in zip(expected, observed)] + observed[len(expected):]
+    return observed
 
 
 KNOWN = {
@@ -171,8 +221,13 @@ def _match_matcher(
                 if not isinstance(arg, str) or arg not in observed:
                     return fail("does not contain")
             elif isinstance(observed, list):
-                # A trial match must not leak captures from elements that then fail.
-                if not any(match(arg, item, dict(captures)) is None for item in observed):
+                # A trial match must not leak captures from elements that then fail, and each
+                # element is folded for identifiers first: a record inside a list is compared the
+                # same way a record at the top of an expectation is (pm ruling 13).
+                if not any(
+                    match(arg, fold_identifiers(arg, item), dict(captures)) is None
+                    for item in observed
+                ):
                     return fail("no element matches")
             else:
                 return fail("neither an array nor a string")

@@ -49,7 +49,16 @@ from interfaces import (  # noqa: E402
     UnavailablePlant,
     WallClock,
 )
-from matchers import MISSING, Captures, Mismatch, Observed, is_matcher, match  # noqa: E402
+from matchers import (  # noqa: E402
+    IDENTIFIER_KEYS,
+    MISSING,
+    Captures,
+    Mismatch,
+    Observed,
+    fold_identifiers,
+    is_matcher,
+    match,
+)
 
 __all__ = [
     "UnavailableBuild",
@@ -69,49 +78,16 @@ MARKER = re.compile(r"^@[A-Za-z0-9_]+$")
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
 ACTIONS = ("request", "event", "noEvent", "plant", "wait", "observe", "inspect", "inject", "loop")
 MAIN = "main"  # the stream a step without `client` acts on
-# Keys whose values are IEC identifiers or paths of them, compared case-insensitively (IEC 61131-3
-# 6.1.2): the oracle names the source spelling, STruCpp's debug info its upper case
-# (docs/DEBUG_CORE_LINK.md, pm rulings 12 and 13).
-IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
-# A `type` is an IEC identifier too, and a compound one is several of them (`ARRAY[0..1] OF Seg`),
-# so it folds token by token rather than as one name.
-TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
-
-
-def _fold_type(expected: str, observed: str) -> str:
-    """`observed` with the oracle's spelling when the two name the same type.
-
-    Every identifier token has to match case-insensitively and the token counts have to agree, so
-    this never makes two different types equal: `INT` and `DINT` are not, `STRING` and `STRING[8]`
-    are not, `Seg` and `Point` are not."""
-    if expected == observed or expected.casefold() == observed.casefold():
-        return expected
-    want, got = TYPE_TOKEN.findall(expected), TYPE_TOKEN.findall(observed)
-    if len(want) == len(got) and all(a.casefold() == b.casefold() for a, b in zip(want, got)):
-        return expected
-    return observed
+# The identifier fold (IEC 61131-3 6.1.2: the oracle names the source spelling, STruCpp's debug
+# info its upper case — docs/DEBUG_CORE_LINK.md, pm rulings 12 and 13) lives in matchers.py, with
+# the comparison it exists for, so it applies inside a matcher argument too.
+IDENTIFIER_KEYS = IDENTIFIER_KEYS
 
 
 def _fold_identifiers(expected: Json, observed: Observed) -> Observed:
     """`observed` with each identifier-valued string that equals the oracle's but for case
     replaced by the oracle's spelling, so the matchers compare everything else exactly."""
-    if isinstance(expected, dict) and isinstance(observed, dict) and not is_matcher(expected):
-        out = dict(observed)
-        for k, want in expected.items():
-            if k not in out:
-                continue
-            got = out[k]
-            if k in IDENTIFIER_KEYS and isinstance(want, str) and isinstance(got, str):
-                out[k] = want if got.casefold() == want.casefold() else got
-            elif k == "type" and isinstance(want, str) and isinstance(got, str):
-                out[k] = _fold_type(want, got)
-            else:
-                out[k] = _fold_identifiers(want, got)
-        return out
-    if isinstance(expected, list) and isinstance(observed, list):
-        return [_fold_identifiers(w, g) for w, g in zip(expected, observed)] + observed[len(expected):]
-    return observed
-# stopped/event expectation key -> body key (ADR-003 D4 names the virtual time `vt`).
+    return fold_identifiers(expected, observed)
 EVENT_KEYS = {
     "reason": "reason",
     "task": "task",
