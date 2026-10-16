@@ -9,7 +9,10 @@
 #        Every ORACLE must be of one corpus program (the first one's directory), which is built and run
 #        with the task intervals the oracles' setup.tasks state (tests/debug/plant/deploy_tasks.py),
 #        the halt policy and build shape they state (tests/debug/plant/deploy_setup.py), and the
-#        heartbeat params they state (below).
+#        heartbeat params they state (below). Every `{"~token": "user:<name>"}` an oracle names is
+#        created as a real account and logged in as, and its JWT is handed to the runner as
+#        --user-token (below); COLLAPSE_USER=<name> serves one of them as the endpoint's own
+#        identity instead, which is the red-proof for a second identity.
 # Env:   STRUCPP  STruCpp checkout (default ../STruCpp), with dist/ built
 #        OUT      logs and traces (default build/session-e2e)
 #        RESULTS  status/runs JSON lines to append (default: none; e.g.
@@ -117,6 +120,25 @@ print("\n".join(f"{k.replace('_s', '')} = {v:g}" for k, v in sorted(first.items(
 PY
 ) || { echo "FAIL: cannot read setup.params from the oracles"; exit 2; }
 [ -n "$PARAMS" ] && echo "### deployed heartbeat params: $(echo $PARAMS | tr '\n' ' ') (an oracle declares setup.params)"
+# Named test users. A scenario's `{"~token": "user:<name>"}` is a second identity: the harness
+# cannot mint a JWT, so the runtime is asked for the accounts (tests/debug/wire/serve.py,
+# OPENPLC_DEBUG_USERS) and their real logins are handed to the runner as --user-token. The names
+# come from the oracles being run, so a run that names none creates no account and is unchanged.
+USERS=$(python3 - "$@" <<'PY'
+import json, re, sys
+names = []
+for path in sys.argv[1:]:
+    for name in re.findall(r'"~token"\s*:\s*"user:([A-Za-z0-9_.-]+)"', json.dumps(json.load(open(path)))):
+        if name not in names:
+            names.append(name)
+print(",".join(names))
+PY
+) || { echo "FAIL: cannot read the named test users from the oracles"; exit 2; }
+[ -n "$USERS" ] && echo "### named test users: $(echo "$USERS" | tr ',' ' ')"
+# COLLAPSE_USER=<name> serves that one name as the endpoint's own identity instead of its own
+# login: the red-proof for a second identity (a role check that cannot be shown failing is not a
+# role check). It changes what the name resolves to and nothing else.
+[ -n "${COLLAPSE_USER:-}" ] && echo "### RED PROOF: $COLLAPSE_USER is served as the endpoint's own identity"
 node "$HERE/gen_payload.mjs" "$STRUCPP" "$OUT/src/program.st" "$OUT/payload" --probes "$PROBES" \
   ${ORIGINS:+--origins "$ORIGINS"}
 # A probe-off build (A019) has no probe code at all: the STRUCPP_PROBE check is what a probe build
@@ -147,6 +169,7 @@ fi
 docker run --rm --cap-add SYS_NICE --ulimit rtprio=99 --entrypoint bash \
   -v "$REPO":/src:ro -v "$OUT/payload":/payload:ro -v "$OUT":/out ${RUNS_MOUNT[@]+"${RUNS_MOUNT[@]}"} \
   -e SEED="$SEED" -e RESULTS="$RESULTS_IN" -e HARNESS_COMMIT="$COMMIT" -e CORPUS="$C" -e DEPLOYED="$(echo $DEPLOYED)" \
-  -e START_HALTED="$START_HALTED" -e PARAMS="$PARAMS" \
+  -e START_HALTED="$START_HALTED" -e PARAMS="$PARAMS" -e USERS="$USERS" \
+  -e COLLAPSE_USER="${COLLAPSE_USER:-}" \
   -e HALT_POLICY="$HALT_POLICY" -e HALT_MODE="$HALT_MODE" -e PROBES="$PROBES" \
   "$IMAGE" /src/tests/debug/plant/session_inner.sh "${ORACLES[@]}"

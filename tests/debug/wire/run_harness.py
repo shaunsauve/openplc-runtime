@@ -133,6 +133,7 @@ def run(
     deployed_build: Optional[Dict[str, str]] = None,
     deployed_halt_policy: Optional[str] = None,
     core_socket: Optional[str] = None,
+    user_tokens: Optional[Dict[str, str]] = None,
 ) -> List[runner.RunResult]:
     # The client link (N013's tunnel profile, F154's network faults) is a splice the harness owns:
     # the gateway is reached through it, so `delayNetwork`, `dropNetwork` and `restoreNetwork` act
@@ -154,6 +155,10 @@ def run(
         deployed_tasks=deployed_tasks, deployed_params=deployed_params,
         deployed_build=deployed_build, deployed_halt_policy=deployed_halt_policy,
         plant=plant, net=net, core_socket=core_socket or CORE_SOCKET,
+        # The named test users' JWTs. Without them a scenario that asks for a second identity
+        # (`{"~token": "user:<name>"}`) BLOCKs at that step; the harness cannot mint one, so
+        # the driver hands them over from the runtime's own logins (tests/debug/wire/serve.py).
+        user_tokens=user_tokens,
     )
     try:
         return [
@@ -191,7 +196,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--core-socket", default=CORE_SOCKET, metavar="PATH",
                     help="the runtime's core command socket, which `inject socket` writes a "
                          "line to (the default is plc_main's)")
+    ap.add_argument("--user-token", action="append", default=[], metavar="NAME=JWT",
+                    help='a named test user\'s JWT, for {"~token": "user:NAME"} (repeatable); '
+                         "the driver's own logins (tests/debug/wire/serve.py, "
+                         "OPENPLC_DEBUG_USERS)")
     opts = ap.parse_args(argv)
+    user_tokens = dict(item.partition("=")[::2] for item in opts.user_token)
     plant = ReferencePlant(opts.plant) if opts.plant else None
     build = build_views.DirectoryBuild(opts.build_dir) if opts.build_dir else None
     deployed: Dict[str, float] = {}
@@ -207,7 +217,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         key, _, value = item.partition("=")
         deployed_build[key] = value
     results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed,
-                  deployed_params, deployed_build, opts.deployed_halt_policy, opts.core_socket)
+                  deployed_params, deployed_build, opts.deployed_halt_policy, opts.core_socket,
+                  user_tokens)
     rows = []
     for result in results:
         print(runner.format_trace(result), flush=True)

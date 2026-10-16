@@ -7,7 +7,9 @@
 # Env:     SEED CORPUS DEPLOYED START_HALTED PARAMS PROBES HALT_POLICY HALT_MODE RESULTS HARNESS_COMMIT
 #          — what the driver deployed, each from the oracles' own setup. PROBES says whether the
 #            payload was built with probes (the payload itself is the authority: this script reads
-#            debug-info.json back rather than believing the flag).
+#            debug-info.json back rather than believing the flag). USERS are the account names the
+#            oracles asked for and COLLAPSE_USER the one of them served as the endpoint's own
+#            identity (the red-proof for a second identity).
 set -uo pipefail
 PYINC=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
 PY=/workdir/venvs/runtime/bin/python
@@ -186,11 +188,30 @@ sleep 2
 echo "### start the gateway (webserver/debug_gateway) on https://127.0.0.1:8443, linked to plc_main"
 # PARAMS (session_e2e.sh, from the oracles' setup.params) deploys the gateway's P1/P2; absent, the
 # gateway reads <data dir>/debug.conf as the runtime does, which is the run before any.
-OPENPLC_DEBUG_PARAMS="$PARAMS" "$PY" tests/debug/wire/serve.py 127.0.0.1 8443 /tmp/token \
+OPENPLC_DEBUG_PARAMS="$PARAMS" OPENPLC_DEBUG_USERS="${USERS:-}" "$PY" tests/debug/wire/serve.py \
+  127.0.0.1 8443 /tmp/token \
   /run/runtime/plc_debug.socket /work/core/generated/debug-info.json >/out/gateway.log 2>&1 &
 GW=$!
 for _ in $(seq 1 300); do [ -s /tmp/token ] && break; sleep 0.1; done
 [ -s /tmp/token ] || { echo "GATEWAY FAIL"; tail -20 /out/gateway.log; exit 1; }
+# USERS: the runtime's own logins for the names the oracles asked for (serve.py). Each is a real
+# account; the harness cannot mint a JWT, so this file is the only way a second identity reaches a
+# scenario. A run that names none leaves the file absent and the harness with one identity.
+USER_ARGS=()
+if [ -n "${USERS:-}" ]; then
+  for _ in $(seq 1 300); do [ -s /tmp/token.users ] && break; sleep 0.1; done
+  [ -s /tmp/token.users ] || { echo "USERS FAIL: no login for $(echo "$USERS" | tr ',' ' ')"; \
+    tail -20 /out/gateway.log; exit 1; }
+  while IFS='=' read -r name jwt; do
+    [ -n "$name" ] || continue
+    # COLLAPSE_USER: the red-proof for a second identity — this name resolves to the endpoint's own
+    # token, so a scenario that needs two identities gets one identity wearing two names. What the
+    # runtime then answers (a force's owner, a `control` body's controller) is the measurement.
+    [ "$name" = "${COLLAPSE_USER:-}" ] && jwt=$(cat /tmp/token)
+    USER_ARGS+=(--user-token "$name=$jwt")
+  done </tmp/token.users
+  echo "### named test users handed to the harness: $((${#USER_ARGS[@]} / 2)) ($(echo "${USER_ARGS[@]}" | tr ' ' '\n' | grep -c '^--user-token'))"
+fi
 sleep 1
 
 echo "### harness over WSS"
@@ -231,10 +252,11 @@ echo "### deployed build: probes=$DEPLOYED_PROBES origins=$DEPLOYED_ORIGINS (fro
 BUILD_ARGS=(--deployed-build "probes=$DEPLOYED_PROBES" --deployed-build "origins=$DEPLOYED_ORIGINS")
 "$PY" tests/debug/wire/run_harness.py --endpoint https://127.0.0.1:8443 --insecure \
   --token "$(cat /tmp/token)" --plant /tmp/plant.sock --build-dir /out/build \
+  ${USER_ARGS[@]+"${USER_ARGS[@]}"} \
   ${RESULTS:+--results "$RESULTS"} $(for t in $DEPLOYED; do printf -- '--deployed-task %s ' "$t"; done) \
   ${PARAM_ARGS[@]+"${PARAM_ARGS[@]}"} ${HALT_ARGS[@]+"${HALT_ARGS[@]}"} \
   ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
-  --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
+  --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}${COLLAPSE_USER:+ (COLLAPSE_USER=$COLLAPSE_USER)}" \
   "$@" | tee /out/harness.txt
 RC=${PIPESTATUS[0]}
 kill "$GW" 2>/dev/null

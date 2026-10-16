@@ -12,6 +12,19 @@ Env:   OPENPLC_DEBUG_PARAMS  deploys the gateway's P1/P2, as `P1 = <s>` `P2 = <s
         text debug.conf holds, from an oracle's setup.params). Absent, the gateway reads
         <data dir>/debug.conf as the runtime does. This is the deploy step for a scenario's
         setup.params; tests/debug/harness/socketio_endpoint.py checks the gateway reports it.
+        OPENPLC_DEBUG_USERS  the extra accounts to create and log in as, comma separated
+        (`userb,userc,obs_only`). Each is a real account (POST /api/create-user) and a real login
+        (POST /api/login); the JWTs go to TOKEN_FILE.users as `name=JWT` lines, which the driver
+        hands the harness as `--user-token`. This is the only way a second identity reaches a
+        scenario: the harness cannot mint a JWT, so it can only be given one. Absent, no account
+        is created and the run is byte-for-byte the run before - the deploy step is off unless an
+        oracle names a `{"~token": "user:<name>"}`.
+        The ROLES here are the runtime's own two (webserver/restapi.py:143-146) and no more: every
+        name but `admin` is created with `user`. ADR-005 D3.2's five permissions are a per-user
+        `debug_permissions` column the product does not have, so a name like `obs_only` or
+        `ctl_only` cannot be given a narrower set than `plain` here. That is deliberate: a
+        criterion that needs the permissions to differ must measure the runtime's answer to that,
+        not a set the harness invented for it.
 
 See also:
   tests/debug/wire/wire_server.py - the stack being served.
@@ -84,6 +97,45 @@ def _deployed_p5() -> float | None:
     return None
 
 
+def _named_users() -> list:
+    """OPENPLC_DEBUG_USERS' account names, in order, without duplicates."""
+    names = []
+    for raw in os.environ.get("OPENPLC_DEBUG_USERS", "").split(","):
+        name = raw.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _login(http, username: str, password: str) -> str:
+    """A real login's access token. Raises SystemExit rather than serving a half-built identity:
+    a named user the gateway cannot be handed would be a silent BLOCK one step later."""
+    reply = http.post("/api/login", json={"username": username, "password": password})
+    body = reply.get_json() or {}
+    token = body.get("access_token")
+    if not token:
+        raise SystemExit(f"login as {username!r} answered {reply.status_code}: {body}")
+    return str(token)
+
+
+def _create_and_login(http, admin_token: str, name: str) -> str:
+    """The account `name`, then a JWT for it. `admin` is the one the harness runs as, so it is
+    served the token it already has rather than a second login of the same identity."""
+    if name == "admin":
+        return admin_token
+    password = f"{name}-pass"
+    made = http.post(
+        "/api/create-user",
+        json={"username": name, "password": password, "role": "user"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    # 409 means the account is already there (a reused data dir); anything else must not be
+    # ignored, because a login that then fails is the same failure with less to read.
+    if made.status_code not in (201, 409):
+        raise SystemExit(f"create-user {name!r} answered {made.status_code}: {made.get_json()}")
+    return _login(http, name, password)
+
+
 def main() -> None:
     host, port, token_file = sys.argv[1], int(sys.argv[2]), Path(sys.argv[3])
     real = sys.argv[4:6]
@@ -94,8 +146,15 @@ def main() -> None:
         restapi.apply_user_schema_migrations()
     http = app.test_client()
     http.post("/api/create-user", json={"username": "admin", "password": "admin-pass"})
-    login = http.post("/api/login", json={"username": "admin", "password": "admin-pass"})
-    token = str(login.get_json()["access_token"])
+    token = _login(http, "admin", "admin-pass")
+    names = _named_users()
+    users_path = Path(f"{token_file}.users")
+    if names:
+        lines = [f"{name}={_create_and_login(http, token, name)}" for name in names]
+        users_path.write_text("\n".join(lines) + "\n")
+        print(f"serving as {len(names)} named user(s): {', '.join(names)}", flush=True)
+    else:
+        users_path.unlink(missing_ok=True)
     with app.app_context():
         # An already-expired JWT for the same user, signed with this server's key (A119).
         admin = restapi.User.query.filter_by(username="admin").one()
