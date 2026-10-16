@@ -517,5 +517,238 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(rows[0]["verdict"], "BLOCKED")
 
 
+# ---------------------------------------------------------------- the identifier fold
+
+
+# (the oracle's spelling, the runtime's, do the two name the same type?). A fold may only erase a
+# difference the specification declares insignificant: case is declared (IEC 61131-3 6.1.2, pm
+# ruling 13) and the whitespace between two tokens is nothing anyone can name as significant, so
+# those fold. Nothing else does -- least of all a bound, which is why this table exists: the
+# tokeniser the fold used to run on could not see a leading digit, so every width and every array
+# bound tokenised away and `STRING` matched `STRING[80]`. A112 is a refusal to write past a bounded
+# STRING's width, so an oracle that cannot tell STRING[8] from STRING[80] cannot falsify it.
+TYPE_FOLDS: List[Tuple[str, str, bool]] = [
+    ("Seg", "SEG", True),
+    ("Mode", "mode", True),
+    ("STRING[8]", "STRING[8]", True),
+    ("ARRAY[0..1] OF Seg", "array[0..1] of SEG", True),
+    ("ARRAY[1..4] OF INT", "array[1..4] of int", True),
+    ("ARRAY[0..1, 0..2] OF Point", "ARRAY[0..1,0..2] of POINT", True),
+    # -- and the differences nothing declares insignificant:
+    ("INT", "DINT", False),
+    ("Seg", "Point", False),
+    ("STRING", "STRING[8]", False),
+    ("STRING[8]", "STRING", False),
+    ("STRING[8]", "STRING[80]", False),
+    ("STRING[80]", "STRING[8]", False),
+    ("STRING", "STRING[80]", False),
+    ("ARRAY[0..1] OF Seg", "ARRAY[0..9] OF Seg", False),
+    ("ARRAY[0..9] OF Seg", "ARRAY[0..1] OF Seg", False),
+    ("ARRAY[1..4] OF INT", "ARRAY[1..40] OF INT", False),
+    ("ARRAY[1..4] OF INT", "ARRAY[1..4] OF DINT", False),
+    ("ARRAY[0..1, 0..2] OF Point", "ARRAY[0..1, 0..9] OF Point", False),
+]
+
+
+def _type_judged(want: str, got: str) -> bool:
+    """What the runner does with a `type`: fold the runtime's spelling, then compare exactly.
+
+    The same two calls `_check_response` and `_check_event` make, so a fold that erases too much is
+    caught here rather than only by whichever oracle happens to be wrong about a width.
+    """
+    from matchers import fold_identifiers, match  # noqa: PLC0415
+
+    folded = fold_identifiers({"type": want}, {"type": got})
+    return match({"type": want}, folded, {}) is None
+
+
+class TypeFoldTest(unittest.TestCase):
+    """What the `type` fold may and may not erase (matchers.py `_fold_type`)."""
+
+    def test_a_type_folds_only_on_case_and_the_whitespace_between_tokens(self) -> None:
+        for want, got, folds in TYPE_FOLDS:
+            with self.subTest(oracle=want, runtime=got):
+                self.assertEqual(_type_judged(want, got), folds)
+
+    def test_the_refusal_says_what_it_saw(self) -> None:
+        # A width that does not match is a mismatch at the path that carries it, so the ledger
+        # says which type disagreed rather than only that some expectation did.
+        from matchers import fold_identifiers, match  # noqa: PLC0415
+
+        folded = fold_identifiers({"type": "STRING[8]"}, {"type": "STRING[80]"})
+        found = match({"type": "STRING[8]"}, folded, {})
+        self.assertIsNotNone(found)
+        self.assertEqual(found.path, "$.type")  # type: ignore[union-attr]
+        assert found is not None
+        self.assertIn("STRING[80]", found.describe())
+
+    def test_a_contains_over_records_folds_case_and_still_refuses_a_different_bound(self) -> None:
+        # `~contains` folds each element itself, so a record inside a list is compared the way a
+        # record at the top of an expectation is -- which is also how a bound would slip through it.
+        from matchers import match  # noqa: PLC0415
+
+        def contains(want: str, got: str) -> bool:
+            return match({"~contains": {"type": want}}, [{"type": got}], {}) is None
+
+        self.assertTrue(contains("ARRAY[0..1] OF Seg", "array[0..1] of SEG"))
+        self.assertTrue(contains("Mode", "MODE"))
+        self.assertFalse(contains("STRING[8]", "STRING[80]"))
+        self.assertFalse(contains("ARRAY[0..1] OF Seg", "ARRAY[0..9] OF Seg"))
+        self.assertFalse(contains("STRING", "STRING[8]"))
+
+    def test_an_identifier_key_folds_case_and_nothing_else_either(self) -> None:
+        # `pou`, `instance`, `name` and `path` are identifiers the specification folds for case and
+        # for nothing else, so the same rule holds there: a name that differs by more than case is
+        # a different name, including when the name carries a bound.
+        from matchers import fold_identifiers, match  # noqa: PLC0415
+
+        def judged(want: str, got: str) -> bool:
+            folded = fold_identifiers({"path": want}, {"path": got})
+            return match({"path": want}, folded, {}) is None
+
+        self.assertTrue(judged("PROG0.segs[0]", "prog0.SEGS[0]"))
+        self.assertFalse(judged("PROG0.segs[0]", "PROG0.segs[1]"))
+
+
+# ---------------------------------------------------------------- the event stream
+
+
+class _ScriptedSession:
+    """A stream that replays `events` and answers nothing; no socket, no endpoint."""
+
+    def __init__(self, events: List[dict]) -> None:
+        self.queue = list(events)
+
+    def events(self) -> List[dict]:
+        out, self.queue = self.queue, []
+        return out
+
+    def request(self, command: str, args: dict) -> dict:
+        return {"success": True, "body": {}}
+
+    def close(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+class _ScriptedEndpoint:
+    description = "scripted"
+
+    def __init__(self, events: List[dict]) -> None:
+        self.events = list(events)
+
+    def open_session(self):
+        return _ScriptedSession(self.events)
+
+
+class _VirtualClock:
+    """Time passes only when the runner polls, so a `withinMs` bound costs no wall time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def now_ms(self) -> float:
+        return self.now
+
+    def sleep_ms(self, ms: float) -> None:
+        self.now += max(ms, 0.0)
+
+
+def _event(name: str, body: dict) -> dict:
+    return {"event": name, "body": body}
+
+
+class EventStreamTest(unittest.TestCase):
+    """`_next_event`: an event the oracle did not ask for is not a divergence, and a stream that
+    never sends the one it asked for still fails. Nothing tested this, which is how two loosening
+    commits and a fold that erased every bound landed in a row."""
+
+    @staticmethod
+    def _run(events: List[dict]):
+        run = object.__new__(runner._Run)  # the plumbing only; no oracle, no endpoint, no socket
+        run.doc = {}
+        run.corpus = "plant-io"
+        run.table = {}
+        run.endpoint = _ScriptedEndpoint(events)  # type: ignore[assignment]
+        run.plant = runner.UnavailablePlant()  # type: ignore[assignment]
+        run.clock = _VirtualClock()  # type: ignore[assignment]
+        run.build = runner.UnavailableBuild()  # type: ignore[assignment]
+        run.setup = {}
+        run.captures = {}
+        run.streams = {}
+        run.arrivals = 0
+        run.last_witness = None
+        run.last_plant_ms = 0.0
+        return run
+
+    def test_an_earlier_event_that_does_not_match_is_skipped_not_failed(self) -> None:
+        # ADR-005 D5.3: `forces` is sent on every change, so the force that was added is queued
+        # before the one that expired. Taking the oldest made A116 read the wrong force.
+        run = self._run([
+            _event("forces", {"list": [{"name": "PW", "state": "added"}]}),
+            _event("forces", {"list": [{"name": "PW", "state": "expired"}]}),
+        ])
+        got, problem = run._next_event(
+            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 500.0
+        )
+        self.assertIsNone(problem)
+        self.assertEqual(got["body"], {"list": [{"name": "PW", "state": "expired"}]})
+
+    def test_an_event_of_another_name_is_never_consumed(self) -> None:
+        run = self._run([_event("log", {"line": "x"}), _event("stopped", {"reason": "breakpoint"})])
+        stream = run._stream("main")
+        run._drain()
+        self.assertEqual([e["event"] for _, e in stream.inbox], ["log", "stopped"])
+        got, problem = run._next_event("main", "stopped", {"reason": "breakpoint"}, 500.0)
+        self.assertIsNone(problem)
+        self.assertEqual(got["body"], {"reason": "breakpoint"})
+        self.assertEqual([e["event"] for _, e in stream.inbox], ["log"])
+
+    def test_a_stream_that_never_sends_what_was_asked_for_still_fails(self) -> None:
+        # The skip must not become a way to pass: with nothing matching, the earliest event comes
+        # back with its own problem so the verdict names what actually arrived.
+        run = self._run([_event("forces", {"list": [{"name": "PW", "state": "added"}]})])
+        got, problem = run._next_event(
+            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 50.0
+        )
+        self.assertEqual(got["body"], {"list": [{"name": "PW", "state": "added"}]})
+        assert problem is not None
+        self.assertIn("not equal", problem.reason)
+
+        run = self._run([_event("forces", {"list": [{"name": "PW", "state": "added"}]})])
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "forces", "withinMs": 50,
+                             "expect": {"body": {"list": [{"name": "PW", "state": "expired"}]}}})
+        # Something did arrive, so the failure names what arrived rather than the timeout.
+        self.assertIn('observed "added"', caught.exception.reason)
+
+    def test_a_stream_with_no_event_at_all_is_blocked_by_the_step_not_by_a_hang(self) -> None:
+        run = self._run([])
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "stopped", "withinMs": 50, "expect": {"reason": "breakpoint"}})
+        self.assertIn("no 'stopped' event within 50 ms", caught.exception.reason)
+        self.assertLessEqual(run.clock.now_ms(), 50.0)
+
+    def test_an_event_step_with_no_expectation_takes_the_first_that_arrives(self) -> None:
+        run = self._run([_event("heartbeat", {"n": 1})])
+        got, problem = run._next_event("main", "heartbeat", {}, 500.0)
+        self.assertIsNone(problem)
+        self.assertEqual(got["body"], {"n": 1})
+
+    def test_a_count_step_is_not_failed_by_an_event_that_does_not_match(self) -> None:
+        # `count` says "N of these arrive": a stream that sends none is a count of 0, checked.
+        run = self._run([_event("log", {"line": "unrelated"})])
+        detail = run._step_event({"event": "log", "count": 0, "withinMs": 50,
+                                  "expect": {"body": {"line": "wanted"}}})
+        self.assertEqual(detail, "log")
+        run = self._run([_event("log", {"line": "unrelated"})])
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "log", "count": 1, "withinMs": 50,
+                             "expect": {"body": {"line": "wanted"}}})
+        self.assertIn("log.count", caught.exception.reason)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,23 +67,29 @@ def _equal(expected: Json, observed: Observed) -> bool:
 # an oracle writes the source's. Every comparison folds, not only the ones a caller remembered to
 # fold, which is why the fold lives here, beside the comparison, rather than at the call site.
 IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
-# A `type` is an IEC identifier too, and a compound one is several of them (`ARRAY[0..1] OF Seg`),
-# so it folds token by token rather than as one name.
-TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+# A `type` is an IEC identifier too, and a compound one is more than a name: `ARRAY[0..1] OF Seg`
+# and `STRING[80]` carry bounds, which are part of the type and not decoration. A fold may only
+# erase a difference the specification declares insignificant, and the specification declares one:
+# case (IEC 61131-3 6.1.2, pm ruling 13). Nothing declares a bound insignificant, so every token a
+# type is made of is tokenised -- names AND the numbers that bound it -- and the two spellings must
+# agree on all of them, in the same order. The token pattern used to be able to see no digit that did
+# not follow a letter, so every width and every array bound tokenised away: `STRING[8]` matched
+# `STRING[80]` and `ARRAY[0..1] OF Seg` matched `ARRAY[0..9] OF Seg`. The only difference left that
+# this fold still erases is the whitespace between two tokens, which no type can distinguish.
+TYPE_TOKEN = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|\d+")
 
 
 def _fold_type(expected: str, observed: str) -> str:
     """`observed` with the oracle's spelling when the two name the same type.
 
-    Every identifier token has to match case-insensitively and the token counts have to agree, so
-    this never makes two different types equal: `INT` and `DINT` are not, `STRING` and `STRING[8]`
-    are not, `Seg` and `Point` are not."""
+    Every token has to match case-insensitively and the token lists have to agree, so this never
+    makes two different types equal: `INT` and `DINT` are not, `STRING` and `STRING[8]` are not,
+    `Seg` and `Point` are not, and neither are `STRING[8]` and `STRING[80]`."""
     if expected == observed or expected.casefold() == observed.casefold():
         return expected
-    want, got = TYPE_TOKEN.findall(expected), TYPE_TOKEN.findall(observed)
-    if len(want) == len(got) and all(a.casefold() == b.casefold() for a, b in zip(want, got)):
-        return expected
-    return observed
+    want = [t.casefold() for t in TYPE_TOKEN.findall(expected)]
+    got = [t.casefold() for t in TYPE_TOKEN.findall(observed)]
+    return expected if want == got else observed
 
 
 def fold_identifiers(expected: Json, observed: Observed) -> Observed:
