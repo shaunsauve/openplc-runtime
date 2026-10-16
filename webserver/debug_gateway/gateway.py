@@ -133,7 +133,7 @@ class DebugGateway:
         self.ended: Dict[str, str] = {}
         self.ended_tokens: Dict[str, str] = {}  # resume hash -> why its session ended
         self.params = params
-        # ADR-005 D5.1: P5, the TTL a force with no `ttlMs` of its own gets.
+        # ADR-005 D5.1: P5, the TTL a force with no `ttl` of its own gets.
         self.p5_s = p5_s
         self._closed = threading.Event()
         self.locked = False
@@ -702,14 +702,14 @@ class DebugGateway:
                 "else reading it.",
                 {"path": path},
             )
-        ttl_ms = args.get("ttlMs")
+        ttl_ms = args.get("ttl")
         if ttl_ms is None:
             ttl_ms = self.p5_s * 1000.0
         if ttl_ms > P5_MAX_S * 1000.0:
             raise Refusal(
                 ErrorCode.RANGE_ERROR,
                 f"A force may live at most {P5_MAX_S / 3600:g} h; {ttl_ms / 3600000:g} h is longer.",
-                {"ttlMs": ttl_ms, "maxMs": P5_MAX_S * 1000.0},
+                {"ttl": ttl_ms, "max": P5_MAX_S * 1000.0},
             )
         node = self._resolve(info, path)
         hexed = info.encode(node.type_id, args["value"], node.leaf)

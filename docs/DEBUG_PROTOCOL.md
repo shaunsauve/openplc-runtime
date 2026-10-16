@@ -516,9 +516,13 @@ and the lock off; `admin` requests need an administrator account.
 | `threads` | - | - | planned |
 | `stackTrace` | `probes` | probe | `{task?, startFrame?, levels?}`: the halted task's frames, innermost first. Body `{stackFrames:[{id, name, pou, kind, instance, location:{file, line, col}, line, column, source}], totalFrames, truncated, task, taskId}`; `kind` is `program`, `fb`, `function` or `method`, `instance` the instance path (null for a function); `truncated` when frames from before the attach are missing (ADR-001 D3.4). A task held at its scan boundary has no frames |
 | `scopes` | `probes` | probe | `{frameId}`; body `{scopes:[{name, variablesReference, namedVariables}]}`, `name` one of `inputs`, `outputs`, `inOuts`, `members`, `temps`, `externals` |
-| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout |
+| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout |
 | `evaluate` | - | - | planned |
 | `setVariable` | `modify`, `write` | control | planned |
+| `force` | `modify`, `force` | control | `{path, value, reason, ttl?}`; body `{}`. See "Forces" |
+| `unforce` | `modify`, `force` | control | `{path}`; body `{}` |
+| `unforceAll` | `modify`, `force` | control | Body `{removed}` |
+| `listForces` | `force` | - | Body `{forces: [Force]}` |
 | `subscribe` | `liveWatch` | - | planned |
 | `unsubscribe` | `liveWatch` | - | planned |
 | `traceStart` | `trace` | - | planned |
@@ -605,7 +609,7 @@ scopes                  req {frameId: int} -> {scopes: [{name: str, variablesRef
 variables               req {variablesReference?: int, path?: str, frameId?: int} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool} | {path: str, type: str, variablesReference: int, children: [Variable]}
 restart                 req {kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {mode: str} -> {mode: str}
-force                   req {path: str, value: any, reason: str, ttlMs?: num} -> {}
+force                   req {path: str, value: any, reason: str, ttl?: num} -> {}
 unforce                 req {path: str} -> {}
 unforceAll              req {} -> {removed: int}
 listForces              req {} -> {forces: [Force]}
@@ -621,7 +625,7 @@ it carries the three things ADR-005 D5 requires (F103):
 - **`owner`** is the session's user, taken from the login — not an argument, so a client cannot
   name someone else and "who left this forced" always has an answer.
 - **`reason`** is the client's own words and is required; an empty one is `BAD_REQUEST`.
-- **`ttlMs`** is how long the force lives. Absent means P5's default, 10 min; more than 8 h is
+- **`ttl`** is how long the force lives. Absent means P5's default, 10 min; more than 8 h is
   `RANGE_ERROR`. It runs on the wall clock (D5.2): an expired force is removed within one
   dispatcher tick of expiry, including while every task is halted, and its removal is reported in
   a `forces` event.

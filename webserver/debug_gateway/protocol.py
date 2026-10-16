@@ -187,7 +187,7 @@ COMMANDS: Mapping[str, Command] = {
             Kind.MODIFY,
             ("modify", "force"),
             {"path": Arg("str", True), "value": Arg("any", True), "reason": Arg("str", True),
-             "ttlMs": Arg("num", minimum=1)},
+             "ttl": Arg("num", minimum=1)},
             probe_dependent=True,
             local=True,
         ),
