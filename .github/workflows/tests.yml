@@ -118,6 +118,93 @@ jobs:
             tests/pytest/plugins/opcua/test_string_types.py \
             tests/pytest/plugins/opcua/test_read_status.py
 
+  corpus:
+    name: Debug corpus (validator + harness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The corpus is a measuring instrument, and until this job existed nothing in CI ran any of
+      # it: `grep -n "tests/debug" .github/workflows/*.yml` matched nothing, so an oracle could stop
+      # validating and an assertion could stop failing and the page would stay green. All three
+      # commands are pure-Python and stdlib-only (0.3 s of the 121 scenarios), which is why there
+      # was never a reason not to run them.
+      - name: validate every oracle
+        run: python3 tests/debug/corpus/validate.py
+
+      - name: the validator's own red/green proof
+        run: python3 -m unittest tests/debug/corpus/test_validate.py
+
+      # The runner against the fake endpoint: the seeded-defect DIVERGE rows, the identifier fold,
+      # the event stream, and the diagnostic ledger row. Without this a matcher that stopped
+      # matching would still be "passing" every scenario it is supposed to divide.
+      - name: the harness
+        run: python3 -m unittest discover tests/debug/harness
+
+  corpus-build:
+    name: Debug corpus (compile every program)
+    runs-on: ubuntu-latest
+    # Known-red and therefore visible rather than blocking: this job cannot pass yet, because the
+    # compiler revision the corpus is authored against has never been pushed (see the checkout step
+    # below). It is landed anyway, red, so the run that says so exists on every PR from now on --
+    # a job that cannot pass is a job everyone learns to ignore, but a job that cannot pass *and
+    # says why on every PR* is a ticket. Delete this line when the checkout below is configured.
+    #
+    # What it will report once configured, at this head: 25 programs OK and 3 XFAIL -- faults'
+    # ADR(v) XOR, print-builtin's missing print builtin and retain-200's IECWStringVar <> char16_t[],
+    # all three `build: expect-fail` against STruCpp 4e24129. build_all.sh exits 0 on that, so the
+    # six oracles in those two programs are the corpus's known gap, not a regression.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # STruCpp's package.json requires node >= 22; ubuntu-latest ships 20.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # NOT CONFIGURED ON PURPOSE, and the job fails here until it is -- rather than pinning a
+      # compiler the corpus has never been built with.
+      #
+      # Every verdict in this corpus is a statement about a compiler revision: the payload's debug
+      # info and probes come from STruCpp, not from this repository. The revision the corpus is
+      # authored against is 4e24129, and it is 21 commits ahead of STruCpp's `development`, on a
+      # LOCAL branch that has never been pushed -- `git ls-remote Autonomy-Logic/STruCpp` does not
+      # contain it, and neither does the fork. So there is no ref this job can check out today.
+      #
+      # What it needs, whichever way it is solved: that revision reachable by `actions/checkout`
+      # (push `debug-support` to a remote, or merge it, or vendor a tarball into the repo or an
+      # artifact), then `repository:` and `ref:` filled in above -- pinned, never a branch, because
+      # a moving compiler turns every verdict into a statement about whenever the job ran.
+      # build_all.sh already records the head it built with into each program's build-record.txt and
+      # prints it in its summary line, so a run of this job says which compiler it measured.
+      - name: check out the STruCpp revision this corpus is authored against
+        env:
+          STRUCPP_REPO: ''  # e.g. Autonomy-Logic/STruCpp, or a fork that has 4e24129 pushed
+          STRUCPP_REF: ''   # the pinned revision (4e2412965d8610e09c264f2e1bf869a09bfdc295)
+        run: |
+          if [ -z "$STRUCPP_REPO" ] || [ -z "$STRUCPP_REF" ]; then
+            echo "::error::no STruCpp checkout is configured. The corpus's compiler revision" \
+              "(4e24129) is on an unpushed local branch of ../STruCpp, so there is nothing to" \
+              "fetch. See the comment above: push it, merge it, or vendor it, then set" \
+              "STRUCPP_REPO and STRUCPP_REF."
+            exit 1
+          fi
+          echo "::warning::STRUCPP_REPO=$STRUCPP_REPO STRUCPP_REF=$STRUCPP_REF" \
+            "-> tests/debug/corpus/build_all.sh compiles with that compiler"
+
+      # Named as a step so the job's failure says what is missing rather than "the job exited 1".
+      - name: build_all.sh
+        run: tests/debug/corpus/build_all.sh
+
   shell:
     name: Installer scripts
     runs-on: ubuntu-latest

@@ -17,15 +17,23 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
-import validate
+HERE = Path(__file__).resolve().parent
+# The docstring's own command is `python3 -m unittest tests/debug/corpus/test_validate.py`, which
+# puts the repository root on sys.path and not this directory -- so `import validate` failed under
+# exactly the command the file tells you to run, and pytest (which inserts the test file's
+# directory) was the only way in.
+sys.path.insert(0, str(HERE))
 
-ROOT = Path(__file__).resolve().parent
+import validate  # noqa: E402
+
+ROOT = HERE
 ORACLE = "bp-before-statement.oracle.json"
 
 Doc = Dict[str, object]
