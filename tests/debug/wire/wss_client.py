@@ -50,7 +50,12 @@ class WssSio:
         self.handlers: Dict[str, Handler] = {}
         self.ws: Optional[simple_websocket.Client] = None
         self.connected = threading.Event()
+        # Set when the reader stops: the transport is gone (the peer closed it, or it sent a
+        # frame this client could not parse). A client that has not connected yet has not either.
+        self.closed = threading.Event()
         self.refused: Optional[str] = None
+        # Why the reader stopped, when it stopped because of the peer.
+        self.close_reason: Optional[str] = None
         self.sent: List[str] = []  # outbound Socket.IO event packets, for passive-client checks
         self.lock = threading.Lock()
         self.eio = _Eio(self)
@@ -100,7 +105,8 @@ class WssSio:
         while self.ws is not None:
             try:
                 pkt = self.ws.receive()
-            except simple_websocket.ConnectionClosed:
+            except simple_websocket.ConnectionClosed as exc:
+                self.close_reason = str(exc)
                 break
             if not isinstance(pkt, str):
                 continue
@@ -119,6 +125,7 @@ class WssSio:
         if not self.connected.is_set():
             self.refused = "connection closed before the namespace connected"
         self.connected.set()
+        self.closed.set()
 
     def emit(self, event: str, data: Json, namespace: Optional[str] = None) -> None:
         packet = f"42{namespace or self.namespace}," + json.dumps([event, data])
@@ -155,3 +162,4 @@ class WssSio:
         if reader is not None and reader is not threading.current_thread():
             reader.join(2.0)
         ws.sock.close()
+        self.closed.set()

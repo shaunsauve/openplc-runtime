@@ -85,6 +85,12 @@ class WssSession(SocketIOSession):
                 raise Blocked("inject rawFrame: this stream's transport is closed")
             ws.send(text)
 
+    def _transport_gone(self, timeout_s: float) -> str:
+        if self.sio.closed.wait(timeout_s):
+            reason = self.sio.close_reason or "the stream was closed"
+            return reason
+        return ""
+
 
 class WssEndpoint(SocketIOEndpoint):
     def open_session(self) -> WssSession:

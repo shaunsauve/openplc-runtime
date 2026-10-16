@@ -408,6 +408,26 @@ class InjectTest(unittest.TestCase):
             self._stream([]).inject_frame("rawFrame", {"frame": "sideways"})
         self.assertIn("is not a frame this harness builds", str(caught.exception))
 
+    def test_a_burst_that_takes_the_transport_with_it_is_named_at_the_burst(self) -> None:
+        """A burst answers nothing by design, so the injection is what says whether the link
+        survived it: A087's evidence wants a valid request afterwards to work."""
+        sent: List[str] = []
+        stream = self._stream(sent)
+        gone: List[str] = []
+
+        def transport_gone(timeout_s: float) -> str:
+            del timeout_s
+            return gone[0] if gone else ""
+
+        stream._transport_gone = transport_gone  # type: ignore[method-assign]
+        self.assertEqual(stream.inject_frame("rawFrame", {"frame": "garbage", "count": 2})["frames"], 2)
+        gone.append("Connection closed: 1002")
+        with self.assertRaises(Blocked) as caught:
+            stream.inject_frame("rawFrame", {"frame": "garbage", "count": 1000})
+        message = str(caught.exception)
+        self.assertIn("1000 frames of 64 bytes", message)
+        self.assertIn("A087's burst is not refused, it ends the stream", message)
+
 
 class RunnerTest(unittest.TestCase):
     def test_correct_fake_passes_real_corpus_scenarios(self) -> None:

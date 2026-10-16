@@ -36,6 +36,8 @@ RESPONSE_TIMEOUT_S = 5.0
 # `restart` stops the program and starts it again before it answers (F037), which is the
 # program's lifecycle rather than a control request and can outlast any control deadline.
 RESPONSE_TIMEOUTS_S = {"restart": 30.0}
+# How long a burst of frames is given to take the transport down before the injection says so.
+BURST_SETTLE_S = 1.0
 CORE_SOCKET = "/run/runtime/plc_runtime.socket"
 PLANT_NAME = "reference-plant"
 # How long `killRuntime`/`restartRuntime` wait for the runtime to open its sockets again.
@@ -856,6 +858,12 @@ class SocketIOSession:
             "only the harness's own WSS client (tests/debug/wire/run_harness.py) can"
         )
 
+    def _transport_gone(self, timeout_s: float) -> str:
+        """Why this stream's transport is gone, or "" while it is still there. A transport that
+        cannot be asked (one that is not the harness's WSS client) never reports itself gone."""
+        del timeout_s
+        return ""
+
     def inject_frame(self, kind: str, args: JsonObj) -> Json:
         """Send a message the Socket.IO client would never build, and answer with what the
         gateway said about it (ADR-003 D2, the refusal codes A087 and A129 read).
@@ -890,9 +898,20 @@ class SocketIOSession:
                 raise Blocked(
                     f"inject rawFrame: count must be a non-negative integer, not {count!r}"
                 )
+            per_frame = max(int(size), 1)
             for _ in range(count):
-                self._raw_frame("!" * max(int(size), 1))
-            return {"frames": count, "bytes": int(size) * count}
+                self._raw_frame("!" * per_frame)
+            # A burst is the one frame that answers nothing, so the injection itself says whether
+            # the link survived it: A087's evidence wants a valid request afterwards to work, and
+            # that is the thing a burst takes away.
+            gone = self._transport_gone(BURST_SETTLE_S)
+            if gone:
+                raise Blocked(
+                    f"inject rawFrame garbage: {count} frames of {per_frame} bytes left the "
+                    f"gateway with the transport gone ({gone}), so no valid request can follow "
+                    "them — A087's burst is not refused, it ends the stream"
+                )
+            return {"frames": count, "bytes": per_frame * count}
         with self.lock:
             self.seq += 1
             seq = self.seq
