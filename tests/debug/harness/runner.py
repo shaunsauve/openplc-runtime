@@ -419,16 +419,42 @@ class _Run:
             observed: JsonObj = body if success else {**error, **body}
             self._check(expect["body"], _fold_identifiers(expect["body"], observed), f"{where}.body")
 
-    def _wait_event(self, client: str, name: str, deadline: float) -> Optional[JsonObj]:
+    def _next_event(self, client: str, name: str, expect: JsonObj,
+                    deadline: float) -> Tuple[Optional[JsonObj], Optional[Diverge]]:
+        """The next event of `name` that satisfies `expect`, with the first one that does not as
+        the fallback.
+
+        An oracle says "an event like this arrives within N ms", so an earlier event of the same
+        name that does not match is not a divergence — it is not the one being waited for. A
+        stream that emits `forces` on every change (ADR-005 D5.3) and `runState` on every state
+        change queues several before any step reads them, and taking the oldest made A116 read
+        the force that was *added* where it meant the one that *expired*. The check is not
+        weakened: a stream with no matching event still fails, and with none at all the earliest
+        one is returned so the failure says what actually arrived.
+        """
         stream = self._stream(client)
+        first: Optional[JsonObj] = None
+        first_problem: Optional[Diverge] = None
         while True:
             self._drain()
             for i, (_, ev) in enumerate(stream.inbox):
-                if ev.get("event") == name:
-                    del stream.inbox[i]
-                    return ev
+                if ev.get("event") != name:
+                    continue
+                if first is None:
+                    first = ev
+                    if not expect:
+                        return first, None
+                del stream.inbox[i]
+                try:
+                    self._check_event(client, name, expect, _obj(ev.get("body")))
+                    return ev, None
+                except Diverge as exc:
+                    if first_problem is None:
+                        first_problem = exc
             if self.clock.now_ms() >= deadline:
-                return None
+                if first is not None:
+                    return first, first_problem
+                return None, None
             self.clock.sleep_ms(POLL_MS)
 
     def _step_event(self, step: JsonObj) -> str:
@@ -444,10 +470,12 @@ class _Run:
             received = 0
             for client in clients:
                 on = "" if client == MAIN else f" on {client}"
-                ev = self._wait_event(client, name, deadline)
+                ev, problem = self._next_event(client, name, expect, deadline)
                 try:
                     if ev is None:
                         raise Diverge(f"no '{name}' event{on} within {within:g} ms{rep}")
+                    if problem is not None:
+                        raise problem
                     self._check_event(client, name, expect, _obj(ev.get("body")))
                 except Diverge:
                     if count is None:
