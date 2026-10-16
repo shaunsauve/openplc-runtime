@@ -2,7 +2,12 @@
 # Inside the runtime image (Linux): build plc_main (with SEED's defect, if any) and the reference
 # plant, compile the probed corpus payload (CORPUS, default plant-io), start plc_main with the plant and the real
 # gateway, run the harness over WSS. Called by session_e2e.sh; not for direct use.
-# Mounts: /src (repo, read-only), /payload (gen_payload.mjs output), /out (logs), /runs (results).
+# Mounts: /src (repo, read-only), /payload (gen_payload.mjs output, with conf/halt_policy.json when
+#         an oracle states setup.haltPolicy), /out (logs), /runs (results).
+# Env:     SEED CORPUS DEPLOYED START_HALTED PARAMS PROBES HALT_POLICY HALT_MODE RESULTS HARNESS_COMMIT
+#          — what the driver deployed, each from the oracles' own setup. PROBES says whether the
+#            payload was built with probes (the payload itself is the authority: this script reads
+#            debug-info.json back rather than believing the flag).
 set -uo pipefail
 PYINC=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
 PY=/workdir/venvs/runtime/bin/python
@@ -126,10 +131,36 @@ while IFS= read -r line; do
     P2\ *) PARAM_ARGS+=(--deployed-param "P2_s=${line#*= }") ;;
   esac
 done <<<"${PARAMS:-}"
+# T-VER-HLTDEPLOY: the halt policy the oracles state is in the payload's conf/halt_policy.json, and
+# the core has loaded it by now. It says so itself, once, at load time:
+#   [halt] halt policy: safe (4 configured output(s))
+# That line is the read-back. The protocol has no handshake field for the policy (A049's oracle asks
+# for one and the handshake does not carry it), so the runtime's own log is the only place it names
+# what it loaded, and the harness refuses a scenario whose declared policy is not what the core says.
+HALT_ARGS=()
+LOADED=$(sed -n 's/.*\[halt\] halt policy: \([a-z]*\) (\([0-9]*\) configured output(s)).*/\1:\2/p' \
+  /out/plc_main.log | head -1)
+if [ -n "$HALT_POLICY" ]; then
+  [ -n "$LOADED" ] || { echo "HALT POLICY FAIL: the core loaded no halt policy"; tail -5 /out/plc_main.log; exit 1; }
+  echo "### the core loaded halt policy $LOADED"
+  HALT_ARGS=(--deployed-halt-policy "$LOADED")
+else
+  HALT_ARGS=(--deployed-halt-policy none)
+fi
+# T-VER-BUILDDEPLOY: the build shape is read back out of the deployed debug-info.json — the same
+# file the gateway loaded (core/generated/debug-info.json is a copy of it) — not asserted by the
+# driver. `probes` is what the runtime will advertise; the harness confirms that at the handshake.
+DEPLOYED_PROBES=$(python3 -c \
+  'import json; print("on" if json.load(open("/payload/debug-info.json"))["build"]["probes"] else "off")')
+DEPLOYED_ORIGINS=$(python3 -c \
+  'import json; print(len(json.load(open("/payload/debug-info.json")).get("origins") or []))')
+echo "### deployed build: probes=$DEPLOYED_PROBES origins=$DEPLOYED_ORIGINS (from debug-info.json)"
+BUILD_ARGS=(--deployed-build "probes=$DEPLOYED_PROBES" --deployed-build "origins=$DEPLOYED_ORIGINS")
 "$PY" tests/debug/wire/run_harness.py --endpoint https://127.0.0.1:8443 --insecure \
   --token "$(cat /tmp/token)" --plant /tmp/plant.sock --build-dir /out/build \
   ${RESULTS:+--results "$RESULTS"} $(for t in $DEPLOYED; do printf -- '--deployed-task %s ' "$t"; done) \
-  ${PARAM_ARGS[@]+"${PARAM_ARGS[@]}"} \
+  ${PARAM_ARGS[@]+"${PARAM_ARGS[@]}"} ${HALT_ARGS[@]+"${HALT_ARGS[@]}"} \
+  ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} \
   --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443${SEED:+ (SEED=$SEED)}" \
   "$@" | tee /out/harness.txt
 RC=${PIPESTATUS[0]}

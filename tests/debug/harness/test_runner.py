@@ -28,7 +28,8 @@ sys.path.insert(0, str(HERE))
 
 import runner  # noqa: E402
 from fake_endpoint import FakeWorld  # noqa: E402
-from socketio_endpoint import SocketIOEndpoint  # noqa: E402
+from interfaces import Blocked  # noqa: E402
+from socketio_endpoint import SocketIOEndpoint, SocketIOSession  # noqa: E402
 
 CORPUS = HERE.parent / "corpus"
 FIXTURES = HERE / "fixtures"
@@ -86,6 +87,163 @@ def _run_path(path: Path, defect: Optional[str], build: bool = True) -> runner.R
     world = FakeWorld(defects={defect} if defect else set())
     outputs = world.build() if build else runner.UnavailableBuild()
     return runner.run_scenario(path, world.endpoint(), world.plant(), world, outputs)
+
+
+class DeployTest(unittest.TestCase):
+    """The setup keys the driver deploys are checked, not assumed (T-VER-HLTDEPLOY,
+    T-VER-BUILDDEPLOY, T-VER-HALTMODE): prepare() takes a scenario only when what was deployed
+    is what the scenario declared, and the handshake refuses a runtime whose own report
+    disagrees. Every refusal here is a real one a run can hit."""
+
+    @staticmethod
+    def _endpoint(**kwargs) -> SocketIOEndpoint:
+        endpoint = SocketIOEndpoint("https://127.0.0.1:1", token=None, insecure=True, **kwargs)
+        endpoint._probe = lambda: None  # the TCP liveness check; these tests never open a socket
+        return endpoint
+
+    @staticmethod
+    def _prepare(endpoint: SocketIOEndpoint, setup: dict) -> None:
+        endpoint.prepare(setup)
+
+    def _blocked(self, endpoint: SocketIOEndpoint, setup: dict, needle: str) -> str:
+        with self.assertRaises(Blocked) as caught:
+            self._prepare(endpoint, setup)
+        self.assertIn(needle, str(caught.exception))
+        return str(caught.exception)
+
+    # -- haltPolicy / safeValues
+
+    def test_halt_policy_is_refused_unless_the_core_reports_the_one_declared(self) -> None:
+        declared = json.loads(_oracle("plant-io/halt-holds-outputs").read_text())["setup"]
+        self.assertEqual(declared["haltPolicy"], "hold")
+        self._blocked(
+            self._endpoint(deployed_halt_policy="none"), declared, "no halt policy was deployed"
+        )
+        self._blocked(
+            self._endpoint(deployed_halt_policy="safe:0"), declared, "the core reports it loaded"
+        )
+        # What was deployed is what was declared: accepted.
+        self._prepare(self._endpoint(deployed_halt_policy="hold:0"), declared)
+
+    def test_safe_values_must_be_the_ones_the_core_configured(self) -> None:
+        declared = json.loads(_oracle("plant-io/force-while-halted-safe").read_text())["setup"]
+        self.assertEqual((declared["haltPolicy"], len(declared["safeValues"])), ("safe", 4))
+        self._blocked(
+            self._endpoint(deployed_halt_policy="safe:2"), declared, "names 4 output(s)"
+        )
+        self._prepare(self._endpoint(deployed_halt_policy="safe:4"), declared)
+
+    # -- build
+
+    def test_probe_off_build_is_refused_unless_it_was_deployed(self) -> None:
+        declared = json.loads(_oracle("plant-io/probe-off").read_text())["setup"]
+        self.assertEqual(declared["build"], {"probes": False})
+        self._blocked(
+            self._endpoint(deployed_build={"probes": "on"}), declared, "probe-off build"
+        )
+        endpoint = self._endpoint(deployed_build={"probes": "off"})
+        self._prepare(endpoint, declared)
+        self.assertIs(endpoint.requires_probes, False)
+
+    def test_editor_build_needs_the_origin_map_it_was_written_against(self) -> None:
+        declared = json.loads(_oracle("fbd-sample/origins").read_text())["setup"]
+        self.assertEqual(declared["build"], {"path": "editor"})
+        self._blocked(
+            self._endpoint(deployed_build={"origins": "0"}), declared, "carries no origins"
+        )
+        self._prepare(self._endpoint(deployed_build={"origins": "3"}), declared)
+        # The other direction too: a build with origins is not the cli build.
+        cli = json.loads(_oracle("print-builtin/with-and-without-session").read_text())["setup"]
+        self.assertEqual(cli["build"], {"path": "cli"})
+        self._blocked(
+            self._endpoint(deployed_build={"origins": "2"}), cli, "needs a build with no origins"
+        )
+
+    def test_the_two_undeclarable_build_keys_keep_their_refusal(self) -> None:
+        control = json.loads(_oracle("plant-io/control-compiled-out").read_text())["setup"]
+        self.assertEqual(control["build"], {"control": False})
+        # ADR-005 D6.2's OPENPLC_DEBUG_CONTROL is in no cmake option and no source, so the
+        # compile-out build is not something the harness can produce.
+        self._blocked(self._endpoint(), control, "compile-out")
+        # `path: library` names a producer the payload builder does not vary.
+        self._blocked(
+            self._endpoint(deployed_build={"probes": "on"}),
+            {"build": {"path": "library"}},
+            "not something the harness can deploy",
+        )
+
+    # -- the handshake, which is the runtime's own report
+
+    @staticmethod
+    def _session(endpoint: SocketIOEndpoint) -> "SocketIOSession":
+        session = object.__new__(SocketIOSession)  # no socket: these tests call the checks only
+        session.endpoint = endpoint
+        session.non_stop = False
+        session.halt_mode_deployed = False
+        session.sent: List[tuple] = []
+        return session
+
+    @staticmethod
+    def _reply(**caps) -> dict:
+        return {"success": True, "body": {"capabilities": caps}}
+
+    def test_the_handshake_refuses_a_runtime_whose_probe_build_is_not_the_one_deployed(self) -> None:
+        endpoint = self._endpoint(deployed_build={"probes": "off"})
+        self._prepare(endpoint, {"build": {"probes": False}})
+        session = self._session(endpoint)
+        # A probe build: not the one this scenario was written against.
+        with self.assertRaises(Blocked) as caught:
+            session._check_capabilities(self._reply(probes=True))
+        self.assertIn("this runtime advertises the probes capability", str(caught.exception))
+        # The probe-off build it declared: accepted.
+        session._check_capabilities(self._reply(probes=False))
+        # And the other way round, a scenario that declares a probe build.
+        endpoint = self._endpoint(deployed_build={"probes": "on"})
+        self._prepare(endpoint, {"build": {"probes": True}})
+        session = self._session(endpoint)
+        with self.assertRaises(Blocked) as caught:
+            session._check_capabilities(self._reply(probes=False))
+        self.assertIn("does not advertise the probes capability", str(caught.exception))
+        session._check_capabilities(self._reply(probes=True))
+
+    def test_non_stop_is_refused_when_the_core_does_not_advertise_it(self) -> None:
+        endpoint = self._endpoint()
+        self._prepare(endpoint, {"haltMode": "nonStop"})
+        session = self._session(endpoint)
+        with self.assertRaises(Blocked) as caught:
+            session._check_capabilities(self._reply(control=True))
+        self.assertIn("all-stop only", str(caught.exception))
+        # Advertised: the mode is put in place with the request, before step 0.
+        session = self._session(endpoint)
+        replies = [self._reply(control=True, nonStop=True), {"success": True}]
+        session.request = lambda command, args: replies.pop(0)  # type: ignore[method-assign]
+        session._deploy_halt_mode()
+
+    def test_all_stop_asks_a_core_that_can_be_non_stop_and_notices_a_refusal(self) -> None:
+        allstop = self._endpoint()
+        self._prepare(allstop, {"haltMode": "allStop"})
+        session = self._session(allstop)
+        session.request = lambda command, args: {"success": True}  # type: ignore[method-assign]
+        # A core that cannot be non-stop: all-stop is what it gives, so nothing is asked.
+        session.non_stop = False
+        session._deploy_halt_mode()
+        # A core that can: the harness asks, so a session is never all-stop by accident.
+        session = self._session(allstop)
+        asked: List[tuple] = []
+        session.request = lambda c, a: (asked.append((c, a)) or {"success": True})  # type: ignore
+        session.non_stop = True
+        session._deploy_halt_mode()
+        self.assertEqual(asked, [("setHaltMode", {"mode": "allStop"})])
+        # And a refusal is a disagreement, not a run.
+        session = self._session(allstop)
+        session.request = lambda c, a: {  # type: ignore[method-assign]
+            "success": False,
+            "error": {"code": "UNSUPPORTED", "message": "not served"},
+        }
+        session.non_stop = True
+        with self.assertRaises(Blocked) as caught:
+            session._deploy_halt_mode()
+        self.assertIn("refused setHaltMode", str(caught.exception))
 
 
 class RunnerTest(unittest.TestCase):

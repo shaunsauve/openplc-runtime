@@ -32,6 +32,11 @@ RESPONSE_TIMEOUT_S = 5.0
 RESPONSE_TIMEOUTS_S = {"restart": 30.0}
 
 
+def _obj(value: Json) -> JsonObj:
+    """The object in `value`, or an empty one: a body that is not an object says nothing."""
+    return cast(JsonObj, value) if isinstance(value, dict) else {}
+
+
 class SocketIOEndpoint:
     def __init__(
         self,
@@ -41,6 +46,8 @@ class SocketIOEndpoint:
         user_tokens: Optional[Dict[str, str]] = None,
         deployed_tasks: Optional[Dict[str, float]] = None,
         deployed_params: Optional[Dict[str, float]] = None,
+        deployed_build: Optional[Dict[str, str]] = None,
+        deployed_halt_policy: Optional[str] = None,
     ) -> None:
         parsed = urlparse(url)
         # The task intervals (ms) of the program the caller deployed (T-VER-TASKDEPLOY): a
@@ -49,6 +56,15 @@ class SocketIOEndpoint:
         # The gateway's heartbeat params the caller deployed (T-VER-PARAMDEPLOY), as the
         # oracle's setup.params names them (`P1_s`/`P2_s`, seconds).
         self.deployed_params = dict(deployed_params or {})
+        # The build the caller deployed (T-VER-BUILDDEPLOY), read back out of the deployed
+        # debug-info.json: `probes` = "on"|"off", `origins` = how many origin records the
+        # transpiler's source map put in it. A scenario's setup.build is met when it names
+        # these, and refused otherwise.
+        self.deployed_build = dict(deployed_build or {})
+        # The halt policy the core reported it loaded (T-VER-HLTDEPLOY), as `kind:count` from
+        # its own startup log ([halt] halt policy: safe (4 configured output(s))). "none" when
+        # no policy was deployed, which is what the runtime loads when the file is absent.
+        self.deployed_halt_policy = deployed_halt_policy or "none"
         # Named test users' JWTs (`~token: "user:<name>"`): permission, lock and hand-over
         # scenarios need several identities, and the harness cannot mint them.
         self.user_tokens = dict(user_tokens or {})
@@ -64,6 +80,12 @@ class SocketIOEndpoint:
         self.requires_start_halted = False
         # Set by prepare() when the scenario's setup.params names the deployed heartbeat params.
         self.requires_params = False
+        # Set by prepare() when the scenario's setup.build names the deployed build, and to the
+        # probes capability that must be true at the handshake (`None` when it names neither).
+        self.requires_probes: Optional[bool] = None
+        # Set by prepare() from setup.haltMode: the mode the session must be in before step 0.
+        # `haltMode` needs no deploy step — it is a request, sent the moment the session is up.
+        self.halt_mode: Optional[str] = None
         self.description = f"endpoint {self.host}:{self.port}"
 
     def _probe(self) -> None:
@@ -103,27 +125,136 @@ class SocketIOEndpoint:
                 return False
         return True
 
+    def _build_deployed(self, build: Json) -> Optional[str]:
+        """True when the deployed build is the one setup.build names, else what is wrong.
+
+        `probes` is the probe-off build (A019) and `path` is how the ST reached the compiler:
+        `editor` transpiles LD/FBD and carries an origin map into debug-info.json (A024),
+        `cli` compiles ST as written and carries none. The count is the evidence, read out of
+        the deployed debug-info.json, so a build that lost its origins on the way is refused
+        rather than judged as if it had them.
+
+        `control` (A127) is refused with its reason rather than assumed: the runtime has no
+        debug-control compile-out switch, so there is nothing to deploy and nothing to check.
+        """
+        if not isinstance(build, dict):
+            return "setup build is not an object"
+        probes, path = build.get("probes"), build.get("path")
+        deployed_probes = self.deployed_build.get("probes")
+        if probes is not None:
+            want = "on" if probes is True else "off"
+            if deployed_probes != want:
+                return (
+                    f"setup build.probes={json.dumps(probes)} needs a probe-{want} build, and "
+                    f"the deployed one is probe-{deployed_probes or 'unknown'}"
+                )
+        if path == "library":
+            return (
+                "setup build.path=library: the payload builder has one producer, so a build "
+                "linked against a .stlib is not something the harness can deploy"
+            )
+        if "control" in build:
+            return (
+                f"setup build.control={json.dumps(build['control'])}: this runtime has no "
+                f"debug-control compile-out switch (ADR-005 D6.2 `OPENPLC_DEBUG_CONTROL` is in "
+                f"no cmake option and no source), so neither build is one the harness can deploy"
+            )
+        if path in ("editor", "cli"):
+            origins = self.deployed_build.get("origins")
+            count = int(origins) if origins not in (None, "") else 0
+            if path == "editor" and count == 0:
+                return (
+                    "setup build.path=editor needs the LD/FBD transpiler's source map in the "
+                    "deployed debug-info.json, and it carries no origins"
+                )
+            if path == "cli" and count != 0:
+                return (
+                    f"setup build.path=cli needs a build with no origins, and the deployed one "
+                    f"carries {count}"
+                )
+        return None
+
+    def _halt_policy_deployed(self, setup: JsonObj) -> Optional[str]:
+        """True when the core's own report of its halt policy is the one setup declares.
+
+        `haltPolicy` is the project's conf/halt_policy.json (the driver ships it in the payload)
+        and the core names what it loaded once, in its startup log; `safeValues` are the values
+        that file's `safe` list carries, so the count the core reports must be theirs. A BOOL
+        safe value is written as the number it stands for, which does not change the count.
+        """
+        policy, values = setup.get("haltPolicy"), setup.get("safeValues")
+        if policy is None and values is not None:
+            return (
+                "setup safeValues states safe values but no policy: it needs "
+                "haltPolicy=safe to be deployed"
+            )
+        if policy not in ("hold", "safe"):
+            return f"setup haltPolicy={json.dumps(policy)} is not a policy this runtime loads"
+        if values is not None and policy != "safe":
+            return "setup safeValues needs haltPolicy=safe; this states no policy of its own"
+        if self.deployed_halt_policy == "none":
+            return (
+                f"setup haltPolicy={policy} needs the runtime loaded with that policy, and no "
+                f"halt policy was deployed (no conf/halt_policy.json in the payload)"
+            )
+        kind, _, count = self.deployed_halt_policy.partition(":")
+        if kind != policy:
+            return (
+                f"setup haltPolicy={policy}, but the core reports it loaded the {kind} policy"
+            )
+        if values is not None and count.isdigit() and int(count) != len(values):
+            return (
+                f"setup safeValues names {len(values)} output(s) and the core reports "
+                f"{count} configured"
+            )
+        return None
+
     def prepare(self, setup: JsonObj) -> None:
         self._probe()
-        # No deploy step rewrites a build or the halt configuration for a run yet; a scenario
-        # that needs one cannot be judged against whatever happens to be loaded, so it is
-        # refused. Task intervals (setup.tasks) and the heartbeat params (setup.params) are
-        # deployed by the caller (tests/debug/plant/session_e2e.sh) and checked here.
+        # Nothing deploys a key by ignoring it: a scenario that declares something the run does
+        # not carry is refused here, because a silent wrong answer is the only thing worse than
+        # no answer. Task intervals (setup.tasks), the heartbeat params (setup.params), the
+        # build (setup.build) and the halt policy (setup.haltPolicy/setup.safeValues) are
+        # deployed by the caller (tests/debug/plant/session_e2e.sh) and checked here; the halt
+        # mode (setup.haltMode) is a session request this endpoint sends itself, checked at the
+        # handshake, where the runtime says whether it can serve it at all.
         self.requires_start_halted = setup.get("startHalted") is True
         self.requires_params = self._params_deployed(setup["params"]) if "params" in setup else False
-        needs = [
-            k
-            for k in ("build", "tasks", "params", "haltPolicy", "safeValues", "haltMode")
-            if k in setup
-            and not (
-                (k == "tasks" and self._tasks_deployed(setup[k]))
-                or (k == "params" and self.requires_params)
-            )
-        ]
+        self.requires_probes = None
+        if "build" in setup and isinstance(setup["build"], dict):
+            probes = setup["build"].get("probes")
+            self.requires_probes = probes if isinstance(probes, bool) else None
+        self.halt_mode = (
+            setup.get("haltMode") if setup.get("haltMode") in ("allStop", "nonStop") else None
+        )
+        needs = []
+        for key, value in (
+            ("tasks", setup.get("tasks")),
+            ("params", setup.get("params")),
+            ("build", setup.get("build")),
+            ("haltPolicy", setup.get("haltPolicy", setup.get("safeValues"))),
+            ("haltMode", setup.get("haltMode")),
+        ):
+            if key not in setup and not (key == "haltPolicy" and "safeValues" in setup):
+                continue
+            if key == "tasks":
+                bad = None if self._tasks_deployed(value) else ""
+            elif key == "params":
+                bad = None if self.requires_params else ""
+            elif key == "build":
+                bad = self._build_deployed(value)
+            elif key == "haltPolicy":
+                bad = self._halt_policy_deployed(setup)
+            else:
+                bad = (
+                    None
+                    if self.halt_mode
+                    else f"haltMode={json.dumps(value)} is not a halt mode (allStop, nonStop)"
+                )
+            if bad is not None:
+                needs.append(bad or f"{key} needs a deploy step the harness does not have yet")
         if needs:
-            raise Blocked(
-                f"setup {', '.join(needs)} needs a deploy step the harness does not have yet"
-            )
+            raise Blocked("setup " + "; ".join(needs))
         if self.requires_start_halted:
             self._require_start_halted()
 
@@ -216,6 +347,10 @@ class SocketIOSession:
             ) from exc
         self.endpoint = endpoint
         self.seq = 0
+        # The core's nonStop capability, from the handshake, and whether setup.haltMode has been
+        # put in place (one request per session, however many times it is initialized).
+        self.non_stop = False
+        self.halt_mode_deployed = False
         self.lock = threading.Lock()
         self.pending: Dict[int, "queue.Queue[JsonObj]"] = {}
         self.inbox: "queue.Queue[JsonObj]" = queue.Queue()
@@ -273,27 +408,68 @@ class SocketIOSession:
                 self.pending.pop(seq, None)
         if command == "initialize" and resp.get("success") is True:
             self._check_capabilities(resp)
+            self._deploy_halt_mode()
             if self.beat is None:
                 self._start_heartbeat(resp)
         return resp
 
     def _check_capabilities(self, resp: JsonObj) -> None:
-        """A scenario whose setup asks for `startHalted` needs a runtime that serves it, and one
-        whose setup.params names P1/P2 needs a gateway running at them.
+        """A scenario whose setup asks for `startHalted` needs a runtime that serves it, one
+        whose setup.params names P1/P2 needs a gateway running at them, one whose setup.build
+        names the probe build needs a runtime that advertises it, and one that asks for non-stop
+        needs a core that serves non-stop.
 
         The refusal belongs here, at the handshake that declares the capability, and not at
         setup: the runtime's own advertisement is the evidence, so a scenario that cannot run
         here says which runtime would run it."""
         if self.endpoint.requires_params:
             self._check_params(resp)
-        if not self.endpoint.requires_start_halted:
-            return
-        body = resp.get("body")
-        caps = body.get("capabilities") if isinstance(body, dict) else None
-        if not isinstance(caps, dict) or caps.get("startHalted") is not True:
+        caps = _obj(_obj(resp.get("body")).get("capabilities"))
+        self.non_stop = caps.get("nonStop") is True
+        if self.endpoint.requires_probes is not None:
+            want = self.endpoint.requires_probes
+            got = caps.get("probes") is True
+            if got is not want:
+                raise Blocked(
+                    f"setup build.probes={json.dumps(want)}: this runtime "
+                    f"{'advertises' if got else 'does not advertise'} the probes capability, so "
+                    f"it is not the build the scenario was written for"
+                )
+        if self.endpoint.halt_mode == "nonStop" and caps.get("nonStop") is not True:
+            raise Blocked(
+                "setup haltMode=nonStop: this runtime does not advertise the nonStop capability, "
+                "so its core halts every task (all-stop only) and no session of it can be non-stop"
+            )
+        if self.endpoint.requires_start_halted and caps.get("startHalted") is not True:
             raise Blocked(
                 "setup startHalted: this runtime does not advertise the startHalted "
                 "capability, so it cannot restart the program halted at its first statement"
+            )
+
+    def _deploy_halt_mode(self) -> None:
+        """Put the session in the halt mode the scenario declared, once it is up (ADR-004).
+
+        `setup.haltMode` is a session setting, not a boot one, so this is a request rather than
+        a file the driver writes: nothing in the runtime can be in the wrong mode before the
+        session exists. It is sent between `initialize` and step 0, so no oracle step sees it.
+
+        all-stop is the one mode that may need no request: a core that does not advertise
+        `nonStop` cannot be anything but all-stop, which is the handshake's own evidence that
+        the declared mode is what a session of this runtime gets. A core that *can* be non-stop
+        is asked, and its refusal is a disagreement.
+        """
+        mode = self.endpoint.halt_mode
+        if mode is None or self.halt_mode_deployed:
+            return
+        self.halt_mode_deployed = True
+        if mode == "allStop" and not self.non_stop:
+            return
+        resp = self.request("setHaltMode", {"mode": mode})
+        if resp.get("success") is not True:
+            error = _obj(resp.get("error"))
+            raise Blocked(
+                f"setup haltMode={mode}: the runtime refused setHaltMode "
+                f"({error.get('code', 'no code')}: {error.get('message', 'no message')})"
             )
 
     def _check_params(self, resp: JsonObj) -> None:

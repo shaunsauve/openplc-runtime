@@ -80,10 +80,13 @@ def run(
     build: Optional[BuildOutputs] = None,
     deployed_tasks: Optional[Dict[str, float]] = None,
     deployed_params: Optional[Dict[str, float]] = None,
+    deployed_build: Optional[Dict[str, str]] = None,
+    deployed_halt_policy: Optional[str] = None,
 ) -> List[runner.RunResult]:
     endpoint = WssEndpoint(
         url, token=token, insecure=insecure, deployed_tasks=deployed_tasks,
-        deployed_params=deployed_params,
+        deployed_params=deployed_params, deployed_build=deployed_build,
+        deployed_halt_policy=deployed_halt_policy,
     )
     return [
         runner.run_scenario(
@@ -108,6 +111,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--deployed-param", action="append", default=[], metavar="KEY=SEC",
                     help="a gateway heartbeat param the driver deployed, as the oracle's "
                          "setup.params names it (P1_s=2 or P2_s=15; repeatable)")
+    ap.add_argument("--deployed-build", action="append", default=[], metavar="FACT",
+                    help="a fact of the deployed build, read back out of the deployed "
+                         "debug-info.json: probes=on|off, origins=<count> (repeatable)")
+    ap.add_argument("--deployed-halt-policy", default="none", metavar="KIND:N",
+                    help="the halt policy the core itself reported it loaded at start "
+                         "(`safe:4`, `hold:0`), or `none` when no policy was deployed")
     opts = ap.parse_args(argv)
     plant = ReferencePlant(opts.plant) if opts.plant else None
     build = build_views.DirectoryBuild(opts.build_dir) if opts.build_dir else None
@@ -119,8 +128,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     for item in opts.deployed_param:
         key, _, seconds = item.partition("=")
         deployed_params[key] = float(seconds)
+    deployed_build: Dict[str, str] = {}
+    for item in opts.deployed_build:
+        key, _, value = item.partition("=")
+        deployed_build[key] = value
     results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed,
-                  deployed_params)
+                  deployed_params, deployed_build, opts.deployed_halt_policy)
     rows = []
     for result in results:
         print(runner.format_trace(result), flush=True)

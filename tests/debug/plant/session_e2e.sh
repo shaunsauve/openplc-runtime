@@ -7,7 +7,9 @@
 #
 # Usage: tests/debug/plant/session_e2e.sh [--results PATH] [ORACLE...]   (default: the J1 run-control set)
 #        Every ORACLE must be of one corpus program (the first one's directory), which is built and run
-#        with the task intervals the oracles' setup.tasks state (tests/debug/plant/deploy_tasks.py).
+#        with the task intervals the oracles' setup.tasks state (tests/debug/plant/deploy_tasks.py),
+#        the halt policy and build shape they state (tests/debug/plant/deploy_setup.py), and the
+#        heartbeat params they state (below).
 # Env:   STRUCPP  STruCpp checkout (default ../STruCpp), with dist/ built
 #        OUT      logs and traces (default build/session-e2e)
 #        RESULTS  status/runs JSON lines to append (default: none; e.g.
@@ -59,6 +61,20 @@ COMMIT="$COMMIT strucpp:$STRUCPP_COMMIT"
 
 rm -rf "$OUT"; mkdir -p "$OUT/payload"
 OUT=$(cd "$OUT" && pwd)  # docker -v needs an absolute path
+# T-VER-HLTDEPLOY / T-VER-BUILDDEPLOY: the halt policy, the build shape (probes on/off, the editor's
+# origin map) and the halt mode come from the oracles' own setup (deploy_setup.py). What it cannot
+# deploy — build.control, build.path "library" — it says nothing about, so the harness refuses the
+# scenarios that asked for it instead of running them against whatever happened to be loaded.
+SETUP=$(python3 "$HERE/deploy_setup.py" "$REPO/$C/program.st" "${ORACLES[@]/#/$REPO/}") \
+  || { echo "FAIL: the oracles state different setup; run them separately"; exit 2; }
+setup_of() { sed -n "s/^$1=//p" <<<"$SETUP"; }
+PROBES=$(setup_of probes)
+ORIGINS=$(setup_of origins)
+HALT_POLICY=$(setup_of halt-policy)
+HALT_MODE=$(setup_of halt-mode)
+echo "### deployed build: probes=$PROBES${ORIGINS:+ origins=$ORIGINS}"
+[ -n "$HALT_POLICY" ] && echo "### deployed halt policy: $HALT_POLICY (an oracle declares setup.haltPolicy)"
+[ -n "$HALT_MODE" ] && echo "### requested halt mode: $HALT_MODE (the harness sends setHaltMode; it is a session setting)"
 # T-VER-TASKDEPLOY: the program is deployed with the task intervals the oracles state.
 mkdir -p "$OUT/src"
 DEPLOYED=$(python3 "$HERE/deploy_tasks.py" "$REPO/$C/program.st" "$OUT/src/program.st" "${ORACLES[@]/#/$REPO/}") \
@@ -97,9 +113,26 @@ print("\n".join(f"{k.replace('_s', '')} = {v:g}" for k, v in sorted(first.items(
 PY
 ) || { echo "FAIL: cannot read setup.params from the oracles"; exit 2; }
 [ -n "$PARAMS" ] && echo "### deployed heartbeat params: $(echo $PARAMS | tr '\n' ' ') (an oracle declares setup.params)"
-node "$HERE/gen_payload.mjs" "$STRUCPP" "$OUT/src/program.st" "$OUT/payload"
-grep -q 'STRUCPP_PROBE' "$OUT"/payload/pou_*.cpp || { echo "FAIL: the payload has no probes"; exit 1; }
+node "$HERE/gen_payload.mjs" "$STRUCPP" "$OUT/src/program.st" "$OUT/payload" --probes "$PROBES" \
+  ${ORIGINS:+--origins "$ORIGINS"}
+# A probe-off build (A019) has no probe code at all: the STRUCPP_PROBE check is what a probe build
+# must satisfy, so it does not apply to one.
+if [ "$PROBES" = on ]; then
+  grep -q 'STRUCPP_PROBE' "$OUT"/payload/pou_*.cpp || { echo "FAIL: the payload has no probes"; exit 1; }
+else
+  if grep -q 'STRUCPP_PROBE' "$OUT"/payload/pou_*.cpp; then
+    echo "FAIL: a probe-off build has probe code"; exit 1
+  fi
+fi
 [ -f "$OUT/payload/debug-info.json" ] || { echo "FAIL: the payload has no debug-info.json"; exit 1; }
+# T-VER-HLTDEPLOY: the policy ships with the sources, as conf/halt_policy.json of program.zip does
+# (core/src/plc_app/plc_output_hold.h), so `cp -r /payload/. core/generated/` puts it where the core
+# looks for it. The core's own startup log says which policy it loaded; session_inner.sh reads that
+# line back and the harness refuses a scenario whose policy is not the one the runtime reports.
+if [ -n "$HALT_POLICY" ]; then
+  mkdir -p "$OUT/payload/conf"
+  printf '%s\n' "$HALT_POLICY" >"$OUT/payload/conf/halt_policy.json"
+fi
 RUNS_MOUNT=()
 RESULTS_IN=""
 if [ -n "${RESULTS:-}" ]; then
@@ -111,4 +144,5 @@ docker run --rm --cap-add SYS_NICE --ulimit rtprio=99 --entrypoint bash \
   -v "$REPO":/src:ro -v "$OUT/payload":/payload:ro -v "$OUT":/out ${RUNS_MOUNT[@]+"${RUNS_MOUNT[@]}"} \
   -e SEED="$SEED" -e RESULTS="$RESULTS_IN" -e HARNESS_COMMIT="$COMMIT" -e CORPUS="$C" -e DEPLOYED="$(echo $DEPLOYED)" \
   -e START_HALTED="$START_HALTED" -e PARAMS="$PARAMS" \
+  -e HALT_POLICY="$HALT_POLICY" -e HALT_MODE="$HALT_MODE" -e PROBES="$PROBES" \
   "$IMAGE" /src/tests/debug/plant/session_inner.sh "${ORACLES[@]}"
