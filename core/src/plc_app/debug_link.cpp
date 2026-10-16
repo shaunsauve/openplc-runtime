@@ -461,12 +461,13 @@ cJSON *forces_list(void)
     return list;
 }
 
+/* `send_event` takes the body (cJSON_AddItemToObject inside event_envelope owns it), so this
+ * does not free it — the pattern every other event here follows. */
 void push_forces(void)
 {
     cJSON *b = cJSON_CreateObject();
     cJSON_AddItemToObject(b, "list", forces_list());
     send_event("forces", b);
-    cJSON_Delete(b);
 }
 
 /* ADR-005 D5.2: the TTL runs on the wall clock and an expired force is removed
