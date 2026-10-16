@@ -164,8 +164,8 @@ class SocketIOEndpoint:
             count = int(origins) if origins not in (None, "") else 0
             if path == "editor" and count == 0:
                 return (
-                    "setup build.path=editor needs the LD/FBD transpiler's source map in the "
-                    "deployed debug-info.json, and it carries no origins"
+                    "setup build.path=editor: the deployed debug-info.json carries no origins, "
+                    "so the LD/FBD transpiler's source map did not reach the build"
                 )
             if path == "cli" and count != 0:
                 return (
@@ -252,9 +252,12 @@ class SocketIOEndpoint:
                     else f"haltMode={json.dumps(value)} is not a halt mode (allStop, nonStop)"
                 )
             if bad is not None:
-                needs.append(bad or f"{key} needs a deploy step the harness does not have yet")
+                needs.append(
+                    bad
+                    or f"setup {key} needs a deploy step the harness does not have yet"
+                )
         if needs:
-            raise Blocked("setup " + "; ".join(needs))
+            raise Blocked("; ".join(needs))
         if self.requires_start_halted:
             self._require_start_halted()
 
@@ -338,6 +341,13 @@ class SocketIOEndpoint:
 
 
 class SocketIOSession:
+    # The core's nonStop capability, from the handshake, and whether setup.haltMode has been put
+    # in place (one request per session, however many times it is initialized). Class defaults, so
+    # a subclass that swaps the transport and does not call super().__init__()
+    # (tests/debug/wire/run_harness.py's WssSession) still has them.
+    non_stop = False
+    halt_mode_deployed = False
+
     def __init__(self, endpoint: SocketIOEndpoint) -> None:
         try:
             import socketio  # noqa: PLC0415 - optional at import time, see module doc
@@ -347,10 +357,6 @@ class SocketIOSession:
             ) from exc
         self.endpoint = endpoint
         self.seq = 0
-        # The core's nonStop capability, from the handshake, and whether setup.haltMode has been
-        # put in place (one request per session, however many times it is initialized).
-        self.non_stop = False
-        self.halt_mode_deployed = False
         self.lock = threading.Lock()
         self.pending: Dict[int, "queue.Queue[JsonObj]"] = {}
         self.inbox: "queue.Queue[JsonObj]" = queue.Queue()

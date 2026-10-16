@@ -102,7 +102,9 @@ echo "reference-plant,./build/plugins/libreference_plant.so,1,1,/tmp/plant.conf,
 # START_HALTED (session_e2e.sh, from the oracles' setup.startHalted) boots the program halted at
 # its first statement: the harness attaches to a program that has not run. Nothing else does
 # this — a session that restarts start-halted and then detaches releases the halt.
-./build/plc_main --print-logs ${START_HALTED:+--start-halted} >/out/plc_main.log 2>&1 &
+# stdbuf -oL: --print-logs writes to a file, which libc block-buffers, so the halt policy the core
+# reports (T-VER-HLTDEPLOY, read back below) would still be in the buffer when the harness starts.
+stdbuf -oL ./build/plc_main --print-logs ${START_HALTED:+--start-halted} >/out/plc_main.log 2>&1 &
 PLC=$!
 for _ in $(seq 1 300); do
   [ -S /tmp/plant.sock ] && [ -S /run/runtime/plc_debug.socket ] && break
