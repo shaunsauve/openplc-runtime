@@ -866,10 +866,11 @@ class SocketIOSession:
         decided, rather than in the Socket.IO framing above it (a packet cut off at the framing
         layer is dropped in silence, with no refusal to read).
 
-        `truncated` is a message document cut off inside its JSON; `invalid` is a whole document
-        that is not a request; `oversize` is a well-formed request over P6, which does carry a
-        seq, so its refusal is correlated; `garbage` is a burst of frames that are not messages
-        at all (A087's burst), which answers nothing.
+        `truncated` is a message document cut off inside its JSON, so the gateway cannot read
+        the seq out of it and refuses uncorrelated; `invalid` is a whole document that is not a
+        request, which the gateway can read the seq out of, so it refuses correlated, as does
+        `oversize`, a well-formed request over P6; `garbage` is a burst of frames that are not
+        messages at all (A087's burst), which answers nothing.
         """
         frame = str(args.get("frame", ""))
         size = args.get("bytes", 2 * 1024 * 1024)
@@ -906,7 +907,7 @@ class SocketIOSession:
                     f'"arguments":{{"pad":"{pad}"}}}}'
                 )
             self._raw_frame(f"42{NAMESPACE}," + json.dumps(["msg", document]))
-            box = waiter if frame == "oversize" else self.uncorrelated
+            box = self.uncorrelated if frame == "truncated" else waiter
             try:
                 resp = box.get(timeout=RESPONSE_TIMEOUT_S)
             except queue.Empty:
