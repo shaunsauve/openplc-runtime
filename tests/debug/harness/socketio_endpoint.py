@@ -850,9 +850,10 @@ class SocketIOSession:
 
     # -- a raw frame on this stream's own transport
 
-    def _raw_frame(self, text: str) -> None:
+    def _send_frame(self, text: str) -> str:
         """Put one text frame carrying `text` on the wire, through whatever transport this
-        session has. A subclass whose transport cannot be written at raises Blocked instead."""
+        session has. "" when it went, or why it did not. A subclass whose transport cannot be
+        written frame by frame raises Blocked instead."""
         raise Blocked(
             "inject rawFrame: this session's transport cannot be written frame by frame; "
             "only the harness's own WSS client (tests/debug/wire/run_harness.py) can"
@@ -899,8 +900,15 @@ class SocketIOSession:
                     f"inject rawFrame: count must be a non-negative integer, not {count!r}"
                 )
             per_frame = max(int(size), 1)
-            for _ in range(count):
-                self._raw_frame("!" * per_frame)
+            for index in range(count):
+                reason = self._send_frame("!" * per_frame)
+                if reason:
+                    raise Blocked(
+                        f"inject rawFrame garbage: frame {index + 1} of {count} "
+                        f"({per_frame} bytes each) could not be sent ({reason}), and the gateway "
+                        "has already refused the burst — no valid request can follow it, which "
+                        "is what A087's evidence asks for"
+                    )
             # A burst is the one frame that answers nothing, so the injection itself says whether
             # the link survived it: A087's evidence wants a valid request afterwards to work, and
             # that is the thing a burst takes away.
@@ -928,7 +936,9 @@ class SocketIOSession:
                     f'{{"type":"request","seq":{seq},"command":"status",'
                     f'"arguments":{{"pad":"{pad}"}}}}'
                 )
-            self._raw_frame(f"42{NAMESPACE}," + json.dumps(["msg", document]))
+            reason = self._send_frame(f"42{NAMESPACE}," + json.dumps(["msg", document]))
+            if reason:
+                raise Blocked(f"inject rawFrame {frame}: the frame could not be sent ({reason})")
             box = self.uncorrelated if frame == "truncated" else waiter
             try:
                 resp = box.get(timeout=RESPONSE_TIMEOUT_S)

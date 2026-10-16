@@ -356,8 +356,9 @@ class InjectTest(unittest.TestCase):
                 self.lock = threading.Lock()
                 self.pending: dict = {}
 
-            def _raw_frame(self, text: str) -> None:
+            def _send_frame(self, text: str) -> str:
                 sent.append(text)
+                return ""
 
         return Stream()
 
@@ -427,6 +428,13 @@ class InjectTest(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("1000 frames of 64 bytes", message)
         self.assertIn("A087's burst is not refused, it ends the stream", message)
+        # The burst can also take the transport down between two of its own frames, which used
+        # to escape as an OSError out of the send rather than as an injection that did something.
+        gone.clear()
+        stream._send_frame = lambda text: "OSError: [Errno 9] Bad file descriptor"  # type: ignore[method-assign]
+        with self.assertRaises(Blocked) as caught:
+            stream.inject_frame("rawFrame", {"frame": "garbage", "count": 1000})
+        self.assertIn("frame 1 of 1000", str(caught.exception))
 
 
 class RunnerTest(unittest.TestCase):

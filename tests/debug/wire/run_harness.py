@@ -40,6 +40,7 @@ from interfaces import (  # noqa: E402
 )
 from netfault import NetFault  # noqa: E402
 from reference_plant import ReferencePlant  # noqa: E402
+import simple_websocket  # noqa: E402
 from socketio_endpoint import (  # noqa: E402
     CORE_SOCKET,
     NAMESPACE,
@@ -72,18 +73,24 @@ class WssSession(SocketIOSession):
         except (ConnectionError, OSError) as exc:
             raise Blocked(f"cannot attach to {NAMESPACE} at {endpoint.url}: {exc}") from exc
 
-    def _raw_frame(self, text: str) -> None:
+    def _send_frame(self, text: str) -> str:
         """One text frame carrying `text`, on this connection's own TLS socket.
 
         simple_websocket masks and frames a string for us, so this is exactly what `emit` sends
         except that the harness chooses the payload: a message the Socket.IO client would never
-        build, which is what `inject rawFrame` is.
+        build, which is what `inject rawFrame` is. "" when the frame went, or why it did not —
+        a burst can take the transport down mid-send, and that has to read as an injection that
+        did something rather than as an OSError out of the transport.
         """
         with self.sio.lock:
             ws = self.sio.ws
             if ws is None:
-                raise Blocked("inject rawFrame: this stream's transport is closed")
-            ws.send(text)
+                return "the stream's transport is closed"
+            try:
+                ws.send(text)
+            except (OSError, simple_websocket.ConnectionClosed) as exc:
+                return f"{type(exc).__name__}: {exc}"
+        return ""
 
     def _transport_gone(self, timeout_s: float) -> str:
         if self.sio.closed.wait(timeout_s):
