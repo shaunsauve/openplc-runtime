@@ -398,6 +398,10 @@ class InjectTest(unittest.TestCase):
         self.assertEqual(stream.inject_frame("rawFrame", {"frame": "garbage", "count": 3, "bytes": 8}),
                          {"frames": 3, "bytes": 24})
         self.assertEqual(sent[-3:], ["!" * 8] * 3)
+        # A burst states only its count: the frame size stays small rather than becoming the 2 MiB
+        # an oversize message asks for, which is 2 GB of garbage at a thousand frames.
+        stream.inject_frame("rawFrame", {"frame": "garbage", "count": 2})
+        self.assertEqual([len(t) for t in sent[-2:]], [64, 64])
 
     def test_a_frame_it_does_not_know_is_refused_rather_than_approximated(self) -> None:
         with self.assertRaises(Blocked) as caught:

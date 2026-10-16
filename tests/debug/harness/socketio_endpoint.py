@@ -873,7 +873,10 @@ class SocketIOSession:
         messages at all (A087's burst), which answers nothing.
         """
         frame = str(args.get("frame", ""))
-        size = args.get("bytes", 2 * 1024 * 1024)
+        # `bytes` is the size of an oversize message's payload (P6 is 1 MiB, so the corpus states
+        # 2 MiB); for the other frames it is how much garbage each one carries, which a scenario
+        # that bursts frames leaves at the default rather than making it megabytes per frame.
+        size = args.get("bytes", 2 * 1024 * 1024 if frame == "oversize" else 64)
         if not isinstance(size, (int, float)) or isinstance(size, bool):
             raise Blocked(f"inject rawFrame: bytes must be a number, not {size!r}")
         if frame not in ("truncated", "invalid", "oversize", "garbage"):
