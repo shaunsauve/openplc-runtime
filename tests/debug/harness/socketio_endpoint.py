@@ -857,14 +857,19 @@ class SocketIOSession:
         )
 
     def inject_frame(self, kind: str, args: JsonObj) -> Json:
-        """Send a frame the Socket.IO client would never build, and answer with what the gateway
-        said about it (ADR-003 D2, the refusal codes A087 and A129 read).
+        """Send a message the Socket.IO client would never build, and answer with what the
+        gateway said about it (ADR-003 D2, the refusal codes A087 and A129 read).
 
-        `truncated` is a Socket.IO packet cut off inside its JSON, so the gateway cannot parse it
-        and refuses BAD_REQUEST without a seq to correlate on; `invalid` is a whole packet that
-        is not a request; `oversize` is a well-formed request whose message is over P6, so it
-        does carry a seq and the refusal is correlated; `garbage` is a burst of frames that are
-        not messages at all, which is the A087 burst and answers nothing.
+        The gateway takes a message as JSON text or as an object (`_parse`), so the wire form
+        used here is the text one: a `msg` event whose argument is the message document. That is
+        what puts the fault inside the gateway's own parser, which is where a refused message is
+        decided, rather than in the Socket.IO framing above it (a packet cut off at the framing
+        layer is dropped in silence, with no refusal to read).
+
+        `truncated` is a message document cut off inside its JSON; `invalid` is a whole document
+        that is not a request; `oversize` is a well-formed request over P6, which does carry a
+        seq, so its refusal is correlated; `garbage` is a burst of frames that are not messages
+        at all (A087's burst), which answers nothing.
         """
         frame = str(args.get("frame", ""))
         size = args.get("bytes", 2 * 1024 * 1024)
@@ -878,9 +883,11 @@ class SocketIOSession:
         if frame == "garbage":
             count = args.get("count", 1)
             if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-                raise Blocked(f"inject rawFrame: count must be a non-negative integer, not {count!r}")
+                raise Blocked(
+                    f"inject rawFrame: count must be a non-negative integer, not {count!r}"
+                )
             for _ in range(count):
-                self._raw_frame("!" * max(int(size) if isinstance(size, (int, float)) else 64, 1))
+                self._raw_frame("!" * max(int(size), 1))
             return {"frames": count, "bytes": int(size) * count}
         with self.lock:
             self.seq += 1
@@ -889,20 +896,17 @@ class SocketIOSession:
             self.pending[seq] = waiter
         try:
             if frame == "truncated":
-                packet = f'42{NAMESPACE},["msg",{{"type":"request","seq":{seq},"command":'
-                source = None
+                document = f'{{"type":"request","seq":{seq},"command":'
             elif frame == "invalid":
-                packet = f'42{NAMESPACE},["msg",{{"type":"notice","seq":{seq},"body":"hello"}}]'
-                source = None
+                document = f'{{"type":"notice","seq":{seq},"body":"hello"}}'
             else:
                 pad = "x" * max(int(size), 1)
-                packet = (
-                    f'42{NAMESPACE},["msg",{{"type":"request","seq":{seq},'
-                    f'"command":"status","arguments":{{"pad":"{pad}"}}}}]'
+                document = (
+                    f'{{"type":"request","seq":{seq},"command":"status",'
+                    f'"arguments":{{"pad":"{pad}"}}}}'
                 )
-                source = waiter
-            self._raw_frame(packet)
-            box = source if source is not None else self.uncorrelated
+            self._raw_frame(f"42{NAMESPACE}," + json.dumps(["msg", document]))
+            box = waiter if frame == "oversize" else self.uncorrelated
             try:
                 resp = box.get(timeout=RESPONSE_TIMEOUT_S)
             except queue.Empty:

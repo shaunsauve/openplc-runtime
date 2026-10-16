@@ -19,6 +19,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -344,6 +345,59 @@ class InjectTest(unittest.TestCase):
         with self.assertRaises(Blocked) as caught:
             self._endpoint().inject("sigstopRuntime", {"process": "postgres"})
         self.assertIn("is not a runtime process", str(caught.exception))
+
+    @staticmethod
+    def _stream(sent: List[str]) -> SocketIOSession:
+        """A session whose transport only records what it was given."""
+
+        class Stream(SocketIOSession):  # pylint: disable=super-init-not-called
+            def __init__(self) -> None:
+                self.seq = 0
+                self.lock = threading.Lock()
+                self.pending: dict = {}
+
+            def _raw_frame(self, text: str) -> None:
+                sent.append(text)
+
+        return Stream()
+
+    def test_a_raw_frame_is_a_message_document_the_gateway_parses_and_the_harness_never_sends(self) -> None:
+        sent: List[str] = []
+        stream = self._stream(sent)
+        for frame, needle in (("truncated", '"command":'), ("invalid", '"type":"notice"')):
+            with self.subTest(frame=frame):
+                # A message the gateway cannot read is refused with no seq to correlate on
+                # (gateway.py `_failure` with request_seq=None), so the answer is uncorrelated.
+                stream.uncorrelated.put({"success": False, "error": {"code": "BAD_REQUEST"}})
+                answer = stream.inject_frame("rawFrame", {"frame": frame})
+                self.assertEqual(answer["error"]["code"], "BAD_REQUEST")
+                # The wire form is a Socket.IO event whose argument is the message document, so
+                # the fault lands in the gateway's own parser and not in the framing above it.
+                self.assertTrue(sent[-1].startswith("42/api/debug-session,["), sent[-1][:40])
+                name, document = json.loads(sent[-1].split(",", 1)[1])
+                self.assertEqual(name, "msg")
+                self.assertIn(needle, document)
+
+    def test_an_oversize_frame_waits_for_its_own_refusal_and_a_garbage_burst_for_nothing(self) -> None:
+        sent: List[str] = []
+        stream = self._stream(sent)
+        # A message over P6 is refused correlated: the refusal carries the seq it refused, so the
+        # harness waits for that seq rather than for any response at all.
+        threading.Timer(0.2, lambda: stream.pending[1].put(
+            {"success": False, "error": {"code": "LIMIT_EXCEEDED"}})).start()
+        reply = stream.inject_frame("rawFrame", {"frame": "oversize", "bytes": 4096})
+        self.assertEqual(reply["error"]["code"], "LIMIT_EXCEEDED")
+        self.assertEqual(len(json.loads(json.loads(sent[0].split(",", 1)[1])[1]
+                                        )["arguments"]["pad"]), 4096)
+        # Frames that are not messages answer nothing, and the harness does not wait for one.
+        self.assertEqual(stream.inject_frame("rawFrame", {"frame": "garbage", "count": 3, "bytes": 8}),
+                         {"frames": 3, "bytes": 24})
+        self.assertEqual(sent[-3:], ["!" * 8] * 3)
+
+    def test_a_frame_it_does_not_know_is_refused_rather_than_approximated(self) -> None:
+        with self.assertRaises(Blocked) as caught:
+            self._stream([]).inject_frame("rawFrame", {"frame": "sideways"})
+        self.assertIn("is not a frame this harness builds", str(caught.exception))
 
 
 class RunnerTest(unittest.TestCase):
