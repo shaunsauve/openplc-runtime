@@ -519,10 +519,6 @@ and the lock off; `admin` requests need an administrator account.
 | `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout |
 | `evaluate` | - | - | planned |
 | `setVariable` | `modify`, `write` | control | planned |
-| `force` | `modify`, `force` | control | planned |
-| `unforce` | `modify`, `force` | control | planned |
-| `unforceAll` | `modify`, `force` | control | planned |
-| `listForces` | `force` | - | planned |
 | `subscribe` | `liveWatch` | - | planned |
 | `unsubscribe` | `liveWatch` | - | planned |
 | `traceStart` | `trace` | - | planned |
@@ -539,8 +535,8 @@ and the lock off; `admin` requests need an administrator account.
 ### Events
 
 Pushed, never polled. The controller receives every event; observers receive `stopped`,
-`continued`, `runState`, `output`, `values`, `time`, `control`, `sessionEnded` and
-`programReplaced`.
+`continued`, `runState`, `output`, `values`, `time`, `control`, `sessionEnded`,
+`programReplaced` and `forces`.
 
 | Event | Body |
 |---|---|
@@ -573,6 +569,7 @@ Breakpoint   = {id: int|null, verified: bool, line: int, col: int|null, requeste
 Step         = {task: str, taskId: int}
 StackFrame   = {id: int, name: str, pou: str|null, kind: str|null, instance: str|null, location: Location|null, line: int, column: int|null, source: {path: str}|null}
 Variable     = {name: str, variablesReference: int, value: any, type: str, data?: any, evaluateName?: str, namedVariables?: int}
+Force        = {path: str, leaf: int, value: any, owner: str, reason: str, remaining: num|null, ...}
 
 stopped                 evt {reason: str, task: str, taskId: int, since: num, vt?: num, scan?: int, location?: Location, depth?: int, breakpointIds?: [int], hits?: int, heldAtBoundary?: bool, exception?: obj}
 continued               evt {allThreadsContinued?: bool, task?: str, taskId?: int}
@@ -580,10 +577,11 @@ runState                evt RunState
 output                  evt {category: str, kind?: str, count?: int, task?: str, taskId?: int, scan?: int, text?: str}
 control                 evt {controller: str|null, observers: int}
 sessionEnded            evt {reason: str}
+forces                  evt {list: [Force]}
 
 initialize              req {protocol: str, role?: str, token?: str, identity?: obj, resumeToken?: str} -> Handshake
 attach                  req {} -> {role: str}
-detach                  req {} -> {forces: list, safeStopped?: bool}
+detach                  req {} -> {forces: [Force], safeStopped?: bool}
 terminate               req {} -> {}
 heartbeat               req {} -> {}
 status                  req {} -> RunState
@@ -604,10 +602,39 @@ runToCursor             req {file: str, line: int, task?: str} -> {}
 stop                    req {} -> {}
 stackTrace              req {task?: str, startFrame?: int, levels?: int} -> {stackFrames: [StackFrame], totalFrames: int, truncated: bool, task: str|null, taskId: int}
 scopes                  req {frameId: int} -> {scopes: [{name: str, variablesReference: int, namedVariables: int, expensive: bool}]}
-variables               req {variablesReference?: int, path?: str, frameId?: int} -> {variables: [Variable]} | {path: str, type: str, value: any} | {path: str, type: str, variablesReference: int, children: [Variable]}
+variables               req {variablesReference?: int, path?: str, frameId?: int} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool} | {path: str, type: str, variablesReference: int, children: [Variable]}
 restart                 req {kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {mode: str} -> {mode: str}
+force                   req {path: str, value: any, reason: str, ttlMs?: num} -> {}
+unforce                 req {path: str} -> {}
+unforceAll              req {} -> {removed: int}
+listForces              req {} -> {forces: [Force]}
 ```
+
+### Forces
+
+`force` pins a variable to a value; the program cannot write it, and for a located variable the
+image slot is pinned too, so the value is what the plant sees. It is the same operation, and the
+same wire semantics, as the legacy `0x42` force (`docs/DEBUG_PROTOCOL.md`, "0x42 - DEBUG_SET"), and
+it carries the three things ADR-005 D5 requires (F103):
+
+- **`owner`** is the session's user, taken from the login — not an argument, so a client cannot
+  name someone else and "who left this forced" always has an answer.
+- **`reason`** is the client's own words and is required; an empty one is `BAD_REQUEST`.
+- **`ttlMs`** is how long the force lives. Absent means P5's default, 10 min; more than 8 h is
+  `RANGE_ERROR`. It runs on the wall clock (D5.2): an expired force is removed within one
+  dispatcher tick of expiry, including while every task is halted, and its removal is reported in
+  a `forces` event.
+
+A force outlives the session that made it — a reload, a reconnect and a detach all keep it (D5.3)
+— and is cleared when the program is unloaded (stop, restart, download) or the runtime restarts.
+Nothing is persisted. A force made through the legacy `0x42` is listed with owner `legacy` and no
+TTL, and `unforceAll` (which needs `modify`, D5.5) clears it with everyone else's.
+
+`listForces` and the `forces` event carry the same list in the same shape. `remaining` is
+milliseconds, or `null` for a force with no TTL. `path` is the symbolic path of the leaf;
+`leaf` is the flat debug-table index the core holds it by, so a client that knows neither can
+still identify the force, and it is what `variables`' `forced` mark is keyed on.
 
 ### Error codes
 

@@ -53,6 +53,7 @@ FULL_CAPS: JsonObj = {
     "nonStop": True,
     "control": True,
     "modify": True,
+    "force": True,
     "trace": True,
     "liveWatch": True,
 }
@@ -141,6 +142,9 @@ class FakeCore:
         self.halt_reason: Optional[str] = None
         self.next_bp = 1
         self.exception_filters: List[str] = []
+        # ADR-005 D5: leaf -> (value hex, owner, reason, expiresAt or None). A force outlives
+        # its session, so this is not keyed by one.
+        self.forces: Dict[int, Tuple[str, str, str, Optional[float]]] = {}
         self.sessions: Dict[str, str] = {}  # session -> role
         self.users: Dict[str, str] = {}  # session -> user
         self.since = 0.0
@@ -388,7 +392,7 @@ class FakeCore:
                     self.push("continued", {"allThreadsContinued": True})
             if command == "terminate":
                 return {}
-            return {"forces": [], "safeStopped": safe_stopped}
+            return {"forces": self._forces_list(), "safeStopped": safe_stopped}
         if command == "beatClient":
             return {}
         if "task" in args and _task(args["task"]) is None:
@@ -461,7 +465,53 @@ class FakeCore:
         if command == "setExceptionBreakpoints":
             self.exception_filters = [str(f) for f in _list(args.get("filters"))]
             return {"filters": list(self.exception_filters)}
+        if command == "listForces":
+            return {"forces": self._forces_list()}
+        if command == "force":
+            return self._force(int(_num(args.get("leaf"))), str(args.get("value")),
+                               str(args.get("owner")), str(args.get("reason")),
+                               args.get("ttlS"))
+        if command == "unforce":
+            leaf = int(_num(args.get("leaf")))
+            if leaf not in self.forces:
+                raise _Refusal("INVALID_LOCATION", "There is no variable at that leaf.")
+            self.forces.pop(leaf, None)
+            self.push("forces", {"list": self._forces_list()})
+            return {}
+        if command == "unforceAll":
+            removed = len(self.forces)
+            self.forces.clear()
+            self.push("forces", {"list": []})
+            return {"removed": removed}
         raise _Refusal("UNSUPPORTED", f"The core does not implement {command}.")
+
+    def _forces_list(self) -> List[Json]:
+        out: List[Json] = []
+        for leaf in sorted(self.forces):
+            value, owner, reason, expires = self.forces[leaf]
+            item: JsonObj = {"leaf": leaf, "value": value, "owner": owner, "reason": reason}
+            if expires is not None:
+                item["expiresAt"] = expires
+            out.append(item)
+        return out
+
+    def _force(self, leaf: int, value: str, owner: str, reason: str, ttl_s: Json) -> JsonObj:
+        # Leaf 0 is the only leaf this fake program has, and it is the one a
+        # force of the right width would land on.
+        if leaf != 0:
+            raise _Refusal("INVALID_LOCATION", "There is no variable at that leaf.")
+        if self.state == "SAFE_STOPPED":
+            raise _Refusal("SAFE_STOPPED", "The runtime is safe-stopped.")
+        expires: Optional[float] = None
+        if ttl_s is not None:
+            if float(ttl_s) <= 0:
+                raise _Refusal("BAD_REQUEST", "force ttlS must be a positive number of seconds.")
+            if float(ttl_s) * 1000.0 > 28800000.0:
+                raise _Refusal("RANGE_ERROR", "A force's TTL may not exceed 8 hours.")
+            expires = time.time() * 1000.0 + float(ttl_s) * 1000.0
+        self.forces[leaf] = (value, owner, reason, expires)
+        self.push("forces", {"list": self._forces_list()})
+        return {}
 
     def _set_breakpoints(self, file_id: int, items: List[Json]) -> JsonObj:
         """Replaces file_id's set; per-item results with ids stable per armed probe (pm ruling 6)."""

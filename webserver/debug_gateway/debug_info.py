@@ -79,6 +79,12 @@ _FORMATS: Dict[str, str] = {
 }
 # STRING/WSTRING leaves are fixed windows: a length byte, then 126 UTF-8 bytes or 252 UTF-16LE.
 _STRING_SIZES = {"STRING": 127, "WSTRING": 253}
+# The range each scalar struct format admits, for an RANGE_ERROR that names the constraint.
+_FORMAT_BOUNDS: Dict[str, Tuple[int, int]] = {
+    "<b": (-128, 127), "<B": (0, 255), "<h": (-32768, 32767), "<H": (0, 65535),
+    "<i": (-2147483648, 2147483647), "<I": (0, 4294967295),
+    "<q": (-9223372036854775808, 9223372036854775807), "<Q": (0, 18446744073709551615),
+}
 # The only string capacity the debug table registers (debug-table-gen.ts DISPATCH_STRING_CAPACITY).
 _DISPATCH_STRING_CAPACITY = 254
 # Scope names by declaration section (ADR-002 F074).
@@ -231,6 +237,8 @@ class DebugInfo:
             if isinstance(e_obj.get("pou"), int) and isinstance(e_obj.get("name"), str):
                 self.externals.setdefault(e_obj["pou"], []).append(e_obj["name"])
         self._leaf_counts: Dict[Tuple[int, bool], int] = {}
+        # flat leaf index -> its debug-information path, built on demand by path_of_leaf.
+        self._leaf_paths: Dict[int, str] = {}
 
     @classmethod
     def load(cls, path: Path) -> Optional["DebugInfo"]:
@@ -623,3 +631,147 @@ class DebugInfo:
             f"information does not describe the running program.",
             {"reason": "debugInfo", "leaf": leaf},
         )
+
+    # -- writing a leaf's bytes (ADR-005 D5: a force carries a value)
+
+    def encode(self, type_id: int, value: Json, leaf: int) -> str:
+        """A JSON value as the lowercase hex of the bytes a force pins the leaf to: the same
+        bytes `decode` reads, so the round trip is exact and the core's `validate_payload`
+        (STruCpp) sees a length it accepts.
+
+        A refusal is `TYPE_ERROR` for a value the variable's type cannot hold and `RANGE_ERROR`
+        for one of the right type outside its range, naming the constraint, as
+        docs/DEBUG_PROTOCOL.md's two codes require."""
+        t = self.types.get(type_id)
+        if t is None:
+            raise Refusal(
+                ErrorCode.STALE_BUILD, f"Leaf {leaf} has no type in the debug information."
+            )
+        if t.kind in ("enum", "subrange") and t.base is not None:
+            # An enum's display value is its label; its stored value is the base type's.
+            if isinstance(value, str):
+                named = next((v for n, v in t.values if n.casefold() == value.casefold()), None)
+                if named is None:
+                    raise Refusal(
+                        ErrorCode.RANGE_ERROR,
+                        f"Leaf {leaf} is a {self.type_name(type_id)}; {value!r} is not one of its "
+                        f"labels ({', '.join(n for n, _ in t.values)}).",
+                        {"leaf": leaf, "type": self.type_name(type_id)},
+                    )
+                return self.encode(t.base, named, leaf)
+            return self.encode(t.base, value, leaf)
+        name = (t.name or "").upper() if t.kind == "elementary" else "STRING"
+        if name in _STRING_SIZES:
+            width = _STRING_SIZES[name]
+            unit = 2 if name == "WSTRING" else 1
+            max_chars = (width - 1) // unit
+            if not isinstance(value, str):
+                raise Refusal(
+                    ErrorCode.TYPE_ERROR,
+                    f"Leaf {leaf} is a {name}, which takes text, not {value!r}.",
+                    {"leaf": leaf, "type": name},
+                )
+            try:
+                body = value.encode("utf-16-le" if name == "WSTRING" else "utf-8")
+            except UnicodeEncodeError as exc:
+                raise Refusal(
+                    ErrorCode.RANGE_ERROR,
+                    f"Leaf {leaf} is a {name} of at most {max_chars} characters, and this text "
+                    "does not fit it.",
+                    {"leaf": leaf, "maxChars": max_chars},
+                ) from exc
+            count = len(body) // unit
+            if count > max_chars:
+                raise Refusal(
+                    ErrorCode.RANGE_ERROR,
+                    f"Leaf {leaf} is a {name} of at most {max_chars} characters; this text "
+                    f"needs {count}.",
+                    {"leaf": leaf, "maxChars": max_chars},
+                )
+            return (bytes([count]) + body).ljust(width, b"\x00").hex()
+        fmt = _FORMATS.get(name)
+        if fmt is None:
+            raise Refusal(
+                ErrorCode.TYPE_ERROR,
+                f"Leaf {leaf} is a {self.type_name(type_id)}, which this build cannot write.",
+                {"leaf": leaf, "type": self.type_name(type_id)},
+            )
+        if name == "BOOL":
+            if isinstance(value, bool):
+                number = 1 if value else 0
+            elif isinstance(value, int):
+                number = value
+            else:
+                raise Refusal(
+                    ErrorCode.TYPE_ERROR,
+                    f"Leaf {leaf} is a BOOL, which takes true or false, not {value!r}.",
+                    {"leaf": leaf, "type": "BOOL"},
+                )
+            if number not in (0, 1):
+                raise Refusal(
+                    ErrorCode.RANGE_ERROR,
+                    f"Leaf {leaf} is a BOOL; {value!r} is neither FALSE (0) nor TRUE (1).",
+                    {"leaf": leaf, "constraint": "FALSE..TRUE"},
+                )
+            return struct.pack("<B", number).hex()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise Refusal(
+                ErrorCode.TYPE_ERROR,
+                f"Leaf {leaf} is a {name}, which takes a number, not {value!r}.",
+                {"leaf": leaf, "type": name},
+            )
+        if fmt not in ("<f", "<d") and isinstance(value, float) and not float(value).is_integer():
+            raise Refusal(
+                ErrorCode.RANGE_ERROR,
+                f"Leaf {leaf} is a {name}, an integer type; {value!r} is not a whole number.",
+                {"leaf": leaf, "type": name, "constraint": "an integer"},
+            )
+        try:
+            packed = struct.pack(fmt, value)
+        except (struct.error, OverflowError, ValueError) as exc:
+            lo, hi = _FORMAT_BOUNDS[fmt]
+            raise Refusal(
+                ErrorCode.RANGE_ERROR,
+                f"Leaf {leaf} is a {name}; {value!r} is outside its range {lo} to {hi}.",
+                {"leaf": leaf, "type": name, "min": lo, "max": hi},
+            ) from exc
+        return packed.hex()
+
+    def path_of_leaf(self, leaf: int) -> Optional[str]:
+        """The debug information's own path for a flat leaf index, for a report that names the
+        variable a force is on rather than the leaf the core holds. The walk is the reverse of
+        `resolve`: every instance and global, depth-first in the same order `children` lists
+        them, so the paths are the ones a client would have written."""
+        if leaf < 0:
+            return None
+        cached = self._leaf_paths.get(leaf)
+        if cached is not None:
+            return cached
+        roots: List[Node] = [
+            Node(path, tid, base, program=True,
+                 pou=(pou.id if (pou := self.pou_of_type(tid)) else None))
+            for path, tid, base in self.instances
+        ]
+        roots += [Node(g[0], g[1], g[2]) for g in self.globals.values()]
+        for root in roots:
+            self._walk_paths(root, leaf)
+            if leaf in self._leaf_paths:
+                break
+        return self._leaf_paths.get(leaf)
+
+    def _walk_paths(self, node: Node, leaf: int) -> None:
+        # A frame node's leaves are `__dbg_locals` slots, not flat leaves, so its children
+        # would answer with a slot index that collides with a static leaf.
+        if node.frame is not None:
+            return
+        for _name, child in self.children(node):
+            if self.is_elementary(child.type_id):
+                if child.leaf == leaf:
+                    self._leaf_paths[leaf] = child.path
+                    return
+                continue
+            # A composite's own `.leaf` is its first member's, so it never names a variable
+            # that can be forced; the path wanted is somewhere inside it.
+            self._walk_paths(child, leaf)
+            if leaf in self._leaf_paths:
+                return

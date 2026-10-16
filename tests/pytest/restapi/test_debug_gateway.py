@@ -688,6 +688,17 @@ def test_every_message_on_the_wire_is_in_the_spec_and_back(serve, admin_token):
                     "clearAllBreakpoints", "setExceptionBreakpoints", "setHaltMode", "stop",
                     "restart"):
         ok(command, VALID_ARGS.get(command, {}))
+    # Forces: force, listForces, unforce and cancel-all, each with its `forces` event.
+    ok("listForces")
+    ok("force", {"path": "PROG0.witness", "value": 7, "reason": "A109"})
+    c.event("forces")
+    ok("listForces")
+    ok("unforce", {"path": "PROG0.witness"})
+    c.event("forces")
+    ok("force", {"path": "PROG0.witness", "value": 7, "reason": "A109"})
+    c.event("forces")
+    ok("unforceAll")
+    c.event("forces")
     assert _refusal(c.request("next"))[0] in STATE_REFUSALS
     assert c.raw("{not json}")["request_seq"] is None
     assert watcher.event("sessionEnded", timeout=3 * P.p2_s)["reason"] == "heartbeat_timeout"
@@ -733,6 +744,10 @@ VALID_ARGS: Dict[str, JsonObj] = {
     "pause": {"task": "Main"},
     "scopes": {"frameId": 0},
     "variables": {"path": "PROG0.witness"},
+    "force": {"path": "PROG0.witness", "value": 7, "reason": "A109"},
+    "unforce": {"path": "PROG0.witness"},
+    "unforceAll": {},
+    "listForces": {},
 }
 # Refusals that mean "valid, but not in this run state", which an advertised request may answer.
 STATE_REFUSALS = {"NOT_HALTED", "NOT_RUNNING"}
@@ -898,6 +913,13 @@ def test_the_fake_core_speaks_the_link_spec():
         for command, args in [
             ("stackTrace", s), ("readLeaves", {**s, "leaves": [0, 7]}), ("status", {}), ("beatClient", s), ("setExceptionBreakpoints", {**s, "filters": ["divByZero"]}),
             ("setHaltMode", {**s, "mode": "allStop"}), ("clearAllBreakpoints", s), ("continue", s),
+            ("listForces", s),
+            ("force", {**s, "leaf": 0, "value": "01000000", "owner": "t", "reason": "spec",
+                       "ttlS": 600}),
+            ("listForces", s),
+            ("unforce", {**s, "leaf": 0}),
+            ("force", {**s, "leaf": 0, "value": "01000000", "owner": "t", "reason": "spec"}),
+            ("unforceAll", s),
         ]:
             assert link.call(command, args)["success"] is True, command
             driven.add(command)

@@ -58,6 +58,7 @@ class WireServer:
         info_path: Optional[Path] = None,
         tls: bool = True,
         params: Optional[HeartbeatParams] = None,
+        p5_s: Optional[float] = None,
         image: Optional[JsonObj] = None,
     ) -> None:
         """`core_path`/`info_path` serve a real core (plc_main's plc_debug.socket and its
@@ -79,7 +80,8 @@ class WireServer:
         self.socketio = init_debug_websocket(app, self.legacy)
         self.link = UnixCoreLink(self.core_path)
         # params=None reads <data dir>/debug.conf, as the runtime does.
-        self.gateway = init_debug_gateway(self.socketio, self.link, self.info_path, params=params)
+        self.gateway = init_debug_gateway(self.socketio, self.link, self.info_path, params=params,
+                                       p5_s=p5_s)
         self.server: BaseWSGIServer = make_server(
             host, port, app, threaded=True, ssl_context=_certificate() if tls else None
         )

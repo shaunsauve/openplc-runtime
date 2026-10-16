@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <arpa/inet.h>
+#include <cctype>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -44,6 +45,8 @@
 
 #include "../lib/strucpp_abi.hpp"
 #include "debug_agent.h"
+#include "debug_force.h"
+#include "debug_write_journal.h"
 #include "image_tables.h"
 #include "plc_state_manager.h"
 
@@ -248,6 +251,10 @@ cJSON *hello_locked(void)
     cJSON_AddBoolToObject(caps, "conditional", false);
     cJSON_AddBoolToObject(caps, "control", true);
     cJSON_AddBoolToObject(caps, "cycleStep", true);
+    /* ADR-005 D5: this core owns the force registry, so it serves force, unforce, unforceAll
+     * and listForces, and gates them on the controller and the lock as the gateway does. */
+    cJSON_AddBoolToObject(caps, "force", true);
+    cJSON_AddBoolToObject(caps, "modify", true);
     /* F037: this core restarts the program and can arm the halt at its first statement. */
     cJSON_AddBoolToObject(caps, "startHalted", true);
     cJSON_AddItemToObject(b, "capabilities", caps);
@@ -410,11 +417,72 @@ bool cycle_on_hold_locked(size_t i, const char *name, int64_t since)
 
 void expire_sessions_locked(void);
 
-/* One agent pass: P2 expiry, hello, stops, boundary holds, resumes, counters, run state. */
+/* ---------------------------------------------------------------- forces
+ * ADR-005 D5. The registry is debug_force.cpp's; what is here is the wire
+ * shape and the rule that every change to it is reported as a `forces` event
+ * (D5.3), so a client never has to poll to learn a force has gone. */
+
+std::string hex_of(const uint8_t *bytes, uint16_t len)
+{
+    static const char kHex[] = "0123456789abcdef";
+    std::string       s((size_t)len * 2u, '0');
+    for (uint16_t i = 0; i < len; ++i)
+    {
+        s[2 * i]     = kHex[bytes[i] >> 4];
+        s[2 * i + 1] = kHex[bytes[i] & 0xF];
+    }
+    return s;
+}
+
+cJSON *force_body(const dbgforce_t &f)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "leaf", (double)f.leaf);
+    cJSON_AddStringToObject(o, "value", hex_of(f.value, f.len).c_str());
+    cJSON_AddStringToObject(o, "owner", f.owner);
+    cJSON_AddStringToObject(o, "reason", f.reason);
+    /* Absent means no TTL: a legacy 0x42 force (ADR-005 D5.4) is the only kind
+     * the runtime makes without an end. */
+    if (f.expires_ms != 0) cJSON_AddNumberToObject(o, "expiresAt", (double)f.expires_ms);
+    return o;
+}
+
+cJSON *forces_list(void)
+{
+    static dbgforce_t buf[256];
+    cJSON           *list = cJSON_CreateArray();
+    for (int at = 0; at < dbgforce_count();)
+    {
+        const int n = dbgforce_copy(&buf[0], (int)(sizeof buf / sizeof buf[0]));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i) cJSON_AddItemToArray(list, force_body(buf[i]));
+        at += n;
+    }
+    return list;
+}
+
+void push_forces(void)
+{
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddItemToObject(b, "list", forces_list());
+    send_event("forces", b);
+    cJSON_Delete(b);
+}
+
+/* ADR-005 D5.2: the TTL runs on the wall clock and an expired force is removed
+ * within one dispatcher tick of expiry. The agent's tick is that window: it
+ * runs whether or not any task is, including while every task is halted. */
+void expire_forces_locked(void)
+{
+    if (dbgforce_expire(wall_ms_of(mono_ns())) > 0) push_forces();
+}
+
+/* One agent pass: P2 expiry, force TTLs, hello, stops, boundary holds, resumes, counters, state. */
 void agent_pass(void)
 {
     std::lock_guard<std::mutex> g(g_mu);
     expire_sessions_locked();
+    expire_forces_locked();
     push_hello_locked();
     char   names[DBG_MAX_TASKS][32];
     size_t n = plc_get_state() == PLC_STATE_RUNNING ? task_count(names) : 0;
@@ -934,6 +1002,109 @@ Reply read_frame_locals(size_t task, cJSON *frame, cJSON *list)
     return success(b);
 }
 
+/* ADR-005 D5.1: a force carries an owner (the gateway passes the session's
+ * user, so the core never has to be told whose it is), a reason and a TTL.
+ * `owner` is required here too: a force with no owner is exactly what R7
+ * exists to prevent, and the legacy 0x42 path has its own `legacy` entry
+ * point. `ttlS` absent means no end (a legacy force, re-registered as one);
+ * a session force always carries one. */
+Reply force_leaf(cJSON *args)
+{
+    cJSON *leaf = arg(args, "leaf"), *value = arg(args, "value"), *owner = arg(args, "owner"),
+         *reason = arg(args, "reason"), *ttl = arg(args, "ttlS");
+    if (!is_int(leaf) || leaf->valuedouble < 0) return fail("BAD_REQUEST", "force needs a leaf index");
+    if (!cJSON_IsString(value)) return fail("BAD_REQUEST", "force needs the value as hex bytes");
+    if (!cJSON_IsString(owner) || !owner->valuestring[0])
+        return fail("BAD_REQUEST", "force needs the owner's name");
+    if (!cJSON_IsString(reason)) return fail("BAD_REQUEST", "force needs a reason");
+
+    uint8_t  bytes[DBGF_MAX_VALUE];
+    const std::string hex = value->valuestring;
+    if (hex.size() % 2 != 0 || hex.size() / 2 == 0 || hex.size() / 2 > sizeof bytes)
+        return fail("BAD_REQUEST", "force needs a non-empty even-length hex value");
+    for (size_t i = 0; i < hex.size() / 2; ++i)
+    {
+        const std::string pair = hex.substr(2 * i, 2);
+        if (!std::isxdigit((unsigned char)pair[0]) || !std::isxdigit((unsigned char)pair[1]))
+            return fail("BAD_REQUEST", "force's value is not hexadecimal");
+        bytes[i] = (uint8_t)std::stoul(pair, nullptr, 16);
+    }
+    const uint16_t len = (uint16_t)(hex.size() / 2);
+
+    /* A TTL past the maximum is refused before anything is pinned, naming the
+     * constraint (DEBUG_PROTOCOL's RANGE_ERROR). */
+    int64_t expires = 0;
+    if (ttl)
+    {
+        if (!cJSON_IsNumber(ttl) || ttl->valuedouble <= 0)
+            return fail("BAD_REQUEST", "force ttlS must be a positive number of seconds");
+        expires = wall_ms_of(mono_ns()) + (int64_t)(ttl->valuedouble * 1000.0);
+        if ((int64_t)(ttl->valuedouble * 1000.0) > DBGF_MAX_TTL_MS)
+            return fail("RANGE_ERROR", "a force's TTL may not exceed 8 hours");
+    }
+
+    uint8_t  arr = 0;
+    uint16_t elem = 0;
+    if (dbgforce_arr_elem_of((uint32_t)leaf->valuedouble, &arr, &elem) != 0)
+        return fail("INVALID_LOCATION", "there is no variable at that leaf in the running program");
+    /* SAFE_STOPPED: no program is running, so there is nothing for a force to override. (D5.2's
+     * safe-stopped rule is about a TTL expiring there, not about making one.) */
+    if (plc_get_state() == PLC_STATE_SAFE_STOPPED)
+        return fail("SAFE_STOPPED", "the runtime is safe-stopped, so there is no program to force");
+    /* Enqueue first: the registry must not list a force the journal refused. */
+    if (runtime_external_write(arr, elem, DBGW_OP_FORCE, bytes, len) != 0)
+        return fail("LIMIT_EXCEEDED", "the external-write queue is full; try again shortly");
+    if (dbgforce_set((uint32_t)leaf->valuedouble, owner->valuestring, reason->valuestring, bytes,
+                     len, expires) != 0)
+    {
+        runtime_external_write(arr, elem, DBGW_OP_UNFORCE, nullptr, 0);
+        return fail("LIMIT_EXCEEDED", "the force registry is full; try again shortly");
+    }
+    push_forces();
+    return success();
+}
+
+/* One leaf's release. Absent is not an error: a force that is already gone is
+ * the state the caller asked for. */
+Reply unforce_leaf(cJSON *args)
+{
+    cJSON *leaf = arg(args, "leaf");
+    if (!is_int(leaf) || leaf->valuedouble < 0) return fail("BAD_REQUEST", "unforce needs a leaf index");
+    const int held = dbgforce_clear((uint32_t)leaf->valuedouble);
+    uint8_t   arr = 0;
+    uint16_t  elem = 0;
+    if (dbgforce_arr_elem_of((uint32_t)leaf->valuedouble, &arr, &elem) != 0)
+        return fail("INVALID_LOCATION", "there is no variable at that leaf in the running program");
+    runtime_external_write(arr, elem, DBGW_OP_UNFORCE, nullptr, 0);
+    if (held) push_forces();
+    return success();
+}
+
+/* ADR-005 D5.5: one action clears every force, every owner's and legacy ones
+ * included; the count is the audit log's number. */
+Reply unforce_all(void)
+{
+    static dbgforce_t buf[256];
+    for (int at = 0; at < dbgforce_count();)
+    {
+        const int n = dbgforce_copy(&buf[0], (int)(sizeof buf / sizeof buf[0]));
+        if (n <= 0) break;
+        for (int i = 0; i < n; ++i)
+        {
+            uint8_t  arr = 0;
+            uint16_t elem = 0;
+            if (dbgforce_arr_elem_of(buf[i].leaf, &arr, &elem) == 0)
+                runtime_external_write(arr, elem, DBGW_OP_UNFORCE, nullptr, 0);
+        }
+        at += n;
+    }
+    const int removed = dbgforce_clear_all();
+    push_forces();
+    cJSON *b = cJSON_CreateObject();
+    cJSON_AddNumberToObject(b, "removed", (double)removed);
+    return success(b);
+}
+
 bool is_command(const char *c, std::initializer_list<const char *> names)
 {
     for (const char *n : names)
@@ -987,7 +1158,8 @@ Reply handle(const char *command, cJSON *args)
                                             "clearAllBreakpoints", "continue", "pause", "next",
                                             "stepIn", "stepOut", "stop", "stackTrace",
                                             "readLeaves", "cycleStep", "restart",
-                                            "readFrameLocals"});
+                                            "readFrameLocals", "force", "unforce", "unforceAll",
+                                            "listForces"});
     if (!known)
         return fail("UNSUPPORTED", std::string("this runtime core does not implement ") + command);
 
@@ -1010,8 +1182,10 @@ Reply handle(const char *command, cJSON *args)
             safe_stopped = lose_session_locked(session, running);
         else
             end_session_locked(session, running);
+        /* ADR-005 D5.3: a force outlives the session, so detach reports what
+         * is still active and a new session lists the same (A113). */
         cJSON *b = cJSON_CreateObject();
-        cJSON_AddItemToObject(b, "forces", cJSON_CreateArray());
+        cJSON_AddItemToObject(b, "forces", forces_list());
         cJSON_AddBoolToObject(b, "safeStopped", safe_stopped);
         return success(b);
     }
@@ -1030,7 +1204,9 @@ Reply handle(const char *command, cJSON *args)
     {
         /* F037. The program goes away and comes back, so the request answers only once the new
          * program is RUNNING: the stop and the start both run here, on the link's socket thread,
-         * which is not a scan thread and may wait (as `stop` already does). */
+         * which is not a scan thread and may wait (as `stop` already does).
+         * ADR-005 D5.3: forces die with the program, which plc_state_manager's unload
+         * (dbgforce_reset) does; the registry is empty by the time the new one is RUNNING. */
         cJSON     *kind = arg(args, "kind"), *halt = arg(args, "startHalted");
         const bool named = kind && cJSON_IsString(kind);
         if (kind && (!named || (std::strcmp(kind->valuestring, "warm") &&
@@ -1135,6 +1311,16 @@ Reply handle(const char *command, cJSON *args)
     }
 
     if (!std::strcmp(command, "readLeaves")) return read_leaves(arg(args, "leaves"));
+
+    if (!std::strcmp(command, "force")) return force_leaf(args);
+    if (!std::strcmp(command, "unforce")) return unforce_leaf(args);
+    if (!std::strcmp(command, "unforceAll")) return unforce_all();
+    if (!std::strcmp(command, "listForces"))
+    {
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddItemToObject(b, "forces", forces_list());
+        return success(b);
+    }
 
     if (!running) return fail("NOT_RUNNING", "no program is running");
 

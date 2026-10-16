@@ -53,6 +53,8 @@ from webserver.debug_gateway.protocol import (
 )
 from webserver.debug_gateway.session_guard import (
     CONF_NAME,
+    P5_DEFAULT_S,
+    P5_MAX_S,
     ConfigError,
     HeartbeatParams,
     load_params,
@@ -67,7 +69,7 @@ logger, _ = get_logger("debug_gw", use_buffer=True)
 
 OBSERVER_EVENTS = frozenset(
     {"stopped", "continued", "runState", "output", "values", "time", "control", "sessionEnded",
-     "programReplaced"}
+     "programReplaced", "forces"}
 )
 _CODES = {c.value: c for c in ErrorCode}
 # A restart stops the program and starts it again, so the core answers it only once the new
@@ -121,6 +123,7 @@ class DebugGateway:
         debug_info_path: Path,
         runtime_version: str = RUNTIME_VERSION,
         params: HeartbeatParams = HeartbeatParams(),
+        p5_s: float = P5_DEFAULT_S,
     ) -> None:
         self.socketio = socketio
         self.link = link
@@ -130,6 +133,8 @@ class DebugGateway:
         self.ended: Dict[str, str] = {}
         self.ended_tokens: Dict[str, str] = {}  # resume hash -> why its session ended
         self.params = params
+        # ADR-005 D5.1: P5, the TTL a force with no `ttlMs` of its own gets.
+        self.p5_s = p5_s
         self._closed = threading.Event()
         self.locked = False
         self.lock = threading.Lock()
@@ -139,6 +144,10 @@ class DebugGateway:
         # variablesReference -> what it expands; stable per (debug info, key), never reused.
         self._refs: Dict[int, Tuple[str, ...]] = {}
         self._ref_ids: Dict[Tuple[str, ...], int] = {}
+        # flat leaf index -> the force the core holds on it, for `variables`'s `forced` mark.
+        # The core owns the registry and pushes a `forces` event on every change, so this is
+        # kept in step by _on_core_event and by every listForces reply.
+        self._forced: Dict[int, JsonObj] = {}
         link.set_event_sink(self._on_core_event)
 
     # ------------------------------------------------------------------ transport
@@ -352,7 +361,7 @@ class DebugGateway:
     ) -> Dict[str, Callable[[ClientSession, JsonObj, Optional[DebugInfo]], JsonObj]]:
         return {
             "attach": lambda s, a, i: {"role": s.role},
-            "detach": lambda s, a, i: self._end_by_request(s, "detach"),
+            "detach": lambda s, a, i: self._detach(s),
             "terminate": lambda s, a, i: self._end_by_request(s, "terminate"),
             "heartbeat": lambda s, a, i: self._core("beatClient", {"session": s.core_session}),
             "status": lambda s, a, i: {
@@ -366,6 +375,10 @@ class DebugGateway:
             "stackTrace": self._stack_trace,
             "scopes": self._scopes,
             "variables": self._variables,
+            "force": self._force,
+            "unforce": self._unforce,
+            "unforceAll": self._unforce_all,
+            "listForces": self._list_forces,
         }
 
     def _core(self, command: str, args: JsonObj) -> JsonObj:
@@ -582,6 +595,9 @@ class DebugGateway:
         if stamp != self._info_stamp:
             self._refs.clear()
             self._ref_ids.clear()
+            # A new build is a new leaf space: a force the core still holds names leaves this
+            # file cannot place, so the cached mapping goes with the rest.
+            self._forced.clear()
             try:
                 self._info = DebugInfo.load(self.debug_info_path)
             except ValueError as exc:
@@ -647,6 +663,141 @@ class DebugGateway:
         if "task" in args:
             forwarded["task"] = args["task"]
         return self._core("runToCursor", forwarded)
+
+    # ------------------------------------------------------------------ forces
+
+    # ADR-005 D5: owner, reason, TTL. The owner is the session's user — a client does not get
+    # to name it, which is what makes "who left this forced" answerable — and the reason is the
+    # client's own words, required and non-empty.
+
+    def _resolve(self, info: DebugInfo, path: str) -> Node:
+        """A force target: an elementary leaf in the static debug table. A composite, a frame
+        local and a stale build are refused here, by name, before anything is pinned."""
+        node = info.resolve(path)
+        if node.frame is not None:
+            raise Refusal(
+                ErrorCode.UNSUPPORTED,
+                f"'{path}' is a task's own stack variable; it is not forceable from a session.",
+                {"path": path},
+            )
+        if not info.is_elementary(node.type_id):
+            raise Refusal(
+                ErrorCode.BAD_REQUEST,
+                f"'{path}' is a {info.type_name(node.type_id)}; force one of its members.",
+                {"path": path},
+            )
+        return node
+
+    def _force(
+        self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]
+    ) -> JsonObj:
+        assert info is not None
+        path = str(args["path"])
+        reason = str(args["reason"])
+        if not reason.strip():
+            # D5.1: an empty reason is BAD_REQUEST, not a force nobody can later explain.
+            raise Refusal(
+                ErrorCode.BAD_REQUEST,
+                "A force needs a reason: it is what the listing shows its owner and anyone "
+                "else reading it.",
+                {"path": path},
+            )
+        ttl_ms = args.get("ttlMs")
+        if ttl_ms is None:
+            ttl_ms = self.p5_s * 1000.0
+        if ttl_ms > P5_MAX_S * 1000.0:
+            raise Refusal(
+                ErrorCode.RANGE_ERROR,
+                f"A force may live at most {P5_MAX_S / 3600:g} h; {ttl_ms / 3600000:g} h is longer.",
+                {"ttlMs": ttl_ms, "maxMs": P5_MAX_S * 1000.0},
+            )
+        node = self._resolve(info, path)
+        hexed = info.encode(node.type_id, args["value"], node.leaf)
+        body = self._core(
+            "force",
+            {
+                "session": session.core_session,
+                "leaf": node.leaf,
+                "value": hexed,
+                "owner": session.user,
+                "reason": reason,
+                # Seconds on the wire, the unit docs/DEBUG_CORE_LINK.md names. The TTL counts
+                # from the core's own receipt of this request, which is the force response.
+                "ttlS": ttl_ms / 1000.0,
+            },
+        )
+        return body
+
+    def _unforce(self, session: ClientSession, args: JsonObj, info: Optional[DebugInfo]) -> JsonObj:
+        assert info is not None
+        node = self._resolve(info, str(args["path"]))
+        return self._core("unforce", {"session": session.core_session, "leaf": node.leaf})
+
+    def _unforce_all(
+        self, session: ClientSession, _args: JsonObj, _info: Optional[DebugInfo]
+    ) -> JsonObj:
+        """D5.5: one action over every force, every owner's and legacy ones included."""
+        return self._core("unforceAll", {"session": session.core_session})
+
+    def _list_forces(
+        self, session: ClientSession, _args: JsonObj, _info: Optional[DebugInfo]
+    ) -> JsonObj:
+        info = self._debug_info()
+        body = self._core("listForces", {"session": session.core_session})
+        self._remember_forces({"list": body.get("forces")})
+        return {"forces": self._forces_of(info, body.get("forces"))}
+
+    def _remember_forces(self, body: Json) -> None:
+        """Adopt a `forces` body (event or reply) as the gateway's view of the registry."""
+        entries = _list(body.get("list"))
+        self._forced.clear()
+        for entry in entries:
+            item = _obj(entry)
+            leaf = item.get("leaf")
+            if isinstance(leaf, int) and not isinstance(leaf, bool):
+                self._forced[leaf] = item
+
+    def _forces_of(self, info: Optional[DebugInfo], core_forces: Json) -> List[JsonObj]:
+        """The core's registry in the terms a client reads: each entry's symbolic path, its value
+        decoded by that leaf's IEC type, its owner, its reason and the time left on it (null for
+        a force with no end, which is a legacy 0x42 one)."""
+        out: List[JsonObj] = []
+        now = time.time() * 1000.0
+        for raw in _list(core_forces):
+            item = _obj(raw)
+            leaf = item.get("leaf")
+            if not isinstance(leaf, int) or isinstance(leaf, bool):
+                continue
+            hexed = item.get("value")
+            node = None
+            path: Optional[str] = None
+            if info is not None:
+                path = info.path_of_leaf(leaf)
+                if path is not None:
+                    try:
+                        node = info.resolve(path)
+                    except Refusal:
+                        node = None
+                    if node is not None and not info.is_elementary(node.type_id):
+                        node = None  # not a leaf after all: fall back to the bytes
+            expires = item.get("expiresAt")
+            remaining: Json = None
+            if isinstance(expires, (int, float)) and not isinstance(expires, bool):
+                remaining = max(0.0, float(expires) - now)
+            entry: JsonObj = {
+                "path": path if path is not None else f"leaf {leaf}",
+                "leaf": leaf,
+                "value": (
+                    info.decode(node.type_id, hexed if isinstance(hexed, str) else None, leaf)
+                    if node is not None and isinstance(hexed, str)
+                    else hexed
+                ),
+                "owner": str(item.get("owner") or ""),
+                "reason": str(item.get("reason") or ""),
+                "remaining": remaining,
+            }
+            out.append(entry)
+        return out
 
     # ------------------------------------------------------------------ inspection
 
@@ -905,6 +1056,10 @@ class DebugGateway:
             value, pending = self._read(info, session, [node], frame[1:] if frame else None)
             out: JsonObj = {"path": node.path, "type": info.type_name(node.type_id),
                             "value": value[0]}
+            # F096/J5.1: every view of a variable says whether it is forced. The core's registry
+            # is authoritative and pushes `forces` on every change, so the mark is current.
+            if node.frame is None and node.leaf in self._forced:
+                out["forced"] = True
             if pending[0] is not None:
                 # The by-path form carries it too: a client asking for one variable by
                 # path wants the same facts the listing gives (ADR-004 D5.2), and an
@@ -946,6 +1101,18 @@ class DebugGateway:
         self._retire(session, "detached" if command == "detach" else "terminated")
         self._broadcast_control()
         return body
+
+    def _detach(self, session: ClientSession) -> JsonObj:
+        """A detach ends the session, not the forces: D5.3 keeps them, and the response lists
+        what is still active so the leaving client (and A113's next session) can see them."""
+        info = self._debug_info()
+        body = self._core("detach", {"session": session.core_session})
+        self._retire(session, "detached")
+        self._broadcast_control()
+        out: JsonObj = {"forces": self._forces_of(info, body.get("forces"))}
+        if body.get("safeStopped") is True:
+            out["safeStopped"] = True
+        return out
 
     def _retire(self, session: ClientSession, reason: str) -> bool:
         """Forget a live session; False if something else already ended it."""
@@ -996,8 +1163,19 @@ class DebugGateway:
                 if self._retire(s, "core_lost"):
                     self._event(s.sid, "sessionEnded", {"reason": "core_lost"})
             return
+        if event == "forces":
+            # ADR-005 D5.3: the core reports every change to its registry, including a TTL
+            # expiring with no client asking. The gateway's `forced` marks follow it.
+            self._remember_forces(body)
+            listed = self._forces_of(self._debug_info(), body.get("list"))
+            out = {"list": listed}
+            with self.lock:
+                recipients = list(self.sessions.values())
+            for s in recipients:
+                self._event(s.sid, "forces", out)
+            return
         # The core's session IDs are the link's, never a client's (status_block uses them).
-        out = {k: v for k, v in body.items() if k not in ("session", "probe", "sessions")}
+        out = {k: v for k, v in body.items() if k not in ("session", "probe", "sessions", "list")}
         probe = body.get("probe")
         if event == "stopped" and isinstance(probe, int):
             info = self._debug_info()
@@ -1037,20 +1215,27 @@ def init_debug_gateway(
     debug_info_path: Path,
     params: Optional[HeartbeatParams] = None,
     conf_path: Optional[Path] = None,
+    p5_s: Optional[float] = None,
 ) -> DebugGateway:
-    """`params` None reads P1/P2 from `conf_path` (default `<data dir>/debug.conf`)."""
-    if params is None:
+    """`params` None reads P1/P2 and P5 from `conf_path` (default `<data dir>/debug.conf`)."""
+    if params is None or p5_s is None:
         if conf_path is None:
             from webserver.config import PERSISTENT_DATA_DIR  # noqa: PLC0415 - import side effects
 
             conf_path = PERSISTENT_DATA_DIR / CONF_NAME
         try:
-            params = load_params(conf_path)
+            loaded_params, loaded_p5 = load_params(conf_path)
         except ConfigError as exc:
-            # ADR-005 D4.2: refused at load; the defaults apply, never the bad values.
-            logger.error("Refusing %s: %s; using P1 = 2 s, P2 = 15 s", conf_path, exc)
-            params = HeartbeatParams()
-    gateway = DebugGateway(socketio, link, debug_info_path, params=params)
+            # ADR-005 D4.2 / D5.1: refused at load; the defaults apply, never the bad values.
+            logger.error(
+                "Refusing %s: %s; using P1 = 2 s, P2 = 15 s, P5 = 600 s", conf_path, exc
+            )
+            loaded_params, loaded_p5 = HeartbeatParams(), P5_DEFAULT_S
+        if params is None:
+            params = loaded_params
+        if p5_s is None:
+            p5_s = loaded_p5
+    gateway = DebugGateway(socketio, link, debug_info_path, params=params, p5_s=p5_s)
     gateway.register()
     logger.info("Debug session gateway initialized at %s", NAMESPACE)
     return gateway

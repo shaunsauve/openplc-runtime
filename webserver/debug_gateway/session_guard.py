@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Autonomy®
 
-"""Session liveness settings and resume tokens for the debug gateway (ADR-005 D2.4, D4.1-D4.2).
+"""Session liveness settings and resume tokens for the debug gateway (ADR-005 D2.4, D4.1-D4.2),
+and the force TTL default P5 (D5.1).
 
 P1 is the heartbeat interval and P2 the single value that is both the heartbeat timeout and the
-reconnect window. Both are read from `<data dir>/debug.conf` as `P1 = <s>` and `P2 = <s>` lines;
-other keys belong to other settings and are ignored here.
+reconnect window. P5 is how long a force with no `ttlMs` of its own lasts. All three are read from
+`<data dir>/debug.conf` as `P1 = <s>`, `P2 = <s>` and `P5 = <s>` lines; other keys belong to other
+settings and are ignored here.
 
 See also:
   webserver/debug_gateway/gateway.py - applies P2 to every session and serves resume.
@@ -25,6 +27,12 @@ from webserver.debug_gateway.protocol import JsonObj
 
 P1_RANGE_S: Tuple[float, float] = (0.5, 30.0)
 P2_RANGE_S: Tuple[float, float] = (5.0, 600.0)
+# ADR-005 D5.1: P5, the force TTL. Its default (10 min) is what a force with no
+# `ttlMs` gets, and 8 h is the maximum the runtime accepts; the runtime's core
+# refuses the same maximum again (debug_force.h DBGF_MAX_TTL_MS), so a gateway
+# that forwards a larger one is not the only line of defence.
+P5_DEFAULT_S: float = 600.0
+P5_MAX_S: float = 28800.0
 CONF_NAME = "debug.conf"
 
 
@@ -45,8 +53,10 @@ def _number(v: float) -> float:
     return int(v) if float(v).is_integer() else v
 
 
-def parse_params(text: str) -> HeartbeatParams:
-    """`key = value` lines, `#` comments. Raises ConfigError on a bad value or P2 < 3 x P1."""
+def _values(text: str) -> Dict[str, float]:
+    """`key = value` lines, `#` comments. P1, P2 and P5 are this runtime's settings; other keys
+    belong to other settings and are ignored here. Raises ConfigError on a malformed line or a
+    value that is not a number."""
     values: Dict[str, float] = {}
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
@@ -56,12 +66,18 @@ def parse_params(text: str) -> HeartbeatParams:
         key = key.strip()
         if not sep:
             raise ConfigError(f"line {n}: expected key = value")
-        if key not in ("P1", "P2"):
+        if key not in ("P1", "P2", "P5"):
             continue
         try:
             values[key] = float(value.strip())
         except ValueError as exc:
             raise ConfigError(f"line {n}: {key} is not a number of seconds") from exc
+    return values
+
+
+def parse_params(text: str) -> HeartbeatParams:
+    """P1 and P2 from `debug.conf`. Raises ConfigError on a bad value or P2 < 3 x P1."""
+    values = _values(text)
     default = HeartbeatParams()
     params = HeartbeatParams(values.get("P1", default.p1_s), values.get("P2", default.p2_s))
     for name, value, (low, high) in (
@@ -75,15 +91,29 @@ def parse_params(text: str) -> HeartbeatParams:
     return params
 
 
-def load_params(path: Path) -> HeartbeatParams:
-    """The defaults when the file is absent; ConfigError when it is present and invalid."""
+def parse_force_ttl(text: str) -> float:
+    """ADR-005 D5.1's P5: the TTL a force with no `ttlMs` gets, in seconds. The default is
+    10 min and 8 h is the maximum; a value outside it is refused here rather than clamped, so a
+    mis-set debug.conf is logged instead of silently changing every force's lifetime."""
+    value = _values(text).get("P5", P5_DEFAULT_S)
+    if not P5_DEFAULT_S <= value <= P5_MAX_S:
+        raise ConfigError(
+            f"P5 = {value:g} s is outside {P5_DEFAULT_S:g}-{P5_MAX_S:g} s "
+            f"({P5_DEFAULT_S / 60:g} min to {P5_MAX_S / 3600:g} h)"
+        )
+    return value
+
+
+def load_params(path: Path) -> Tuple[HeartbeatParams, float]:
+    """The defaults when the file is absent; ConfigError when it is present and invalid. The
+    second value is P5, the force TTL default (ADR-005 D5.1)."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return HeartbeatParams()
+        return HeartbeatParams(), P5_DEFAULT_S
     except OSError as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
-    return parse_params(text)
+    return parse_params(text), parse_force_ttl(text)
 
 
 def mint_resume_token() -> Tuple[str, str]:

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "debug_handler.h"
+#include "debug_force.h"
 #include "debug_write_journal.h"
 #include "image_tables.h"
 #include "utils/log.h"
@@ -149,6 +150,14 @@ static void debugSetTrace(uint8_t *frame, size_t *frame_len, size_t length)
     const uint8_t *vp = (force != 0) ? val_ptr : NULL;
     uint16_t       vl = (force != 0) ? val_len : 0;
     int rc = runtime_external_write(arr, elem, op, vp, vl);
+    /* ADR-005 D5.4 / ADR-003 D4.4: a force made through 0x42 is listed with
+     * owner `legacy` and no TTL. The registry follows the journal's own
+     * acceptance, so a dropped entry is not listed as a force. */
+    if (rc == 0)
+    {
+        if (force != 0) dbgforce_legacy_set(arr, elem, vp, vl);
+        else           dbgforce_legacy_clear(arr, elem);
+    }
     uint8_t status = (rc == 0) ? MB_DEBUG_SUCCESS : MB_DEBUG_ERROR_OUT_OF_MEMORY;
     respond_short(frame, frame_len, MB_FC_DEBUG_SET, status);
 }

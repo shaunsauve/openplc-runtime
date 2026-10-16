@@ -65,10 +65,23 @@ def _deployed_params() -> HeartbeatParams | None:
         if not sep:
             raise SystemExit(f"OPENPLC_DEBUG_PARAMS: {raw!r} is not `key = value`")
         values[key.strip()] = float(value.strip())
-    unknown = set(values) - {"P1", "P2"}
+    unknown = set(values) - {"P1", "P2", "P5"}
     if unknown:
         raise SystemExit(f"OPENPLC_DEBUG_PARAMS: unknown key(s) {sorted(unknown)}")
     return HeartbeatParams(values.get("P1", 2.0), values.get("P2", 15.0))
+
+
+def _deployed_p5() -> float | None:
+    """OPENPLC_DEBUG_PARAMS's `P5` (ADR-005 D5.1), the TTL a force with no `ttlMs` of its own
+    gets. None leaves the gateway on debug.conf's P5, as the runtime does; A210 measures the
+    default on a default debug.conf, so no oracle states it."""
+    text = os.environ.get("OPENPLC_DEBUG_PARAMS", "")
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "P5":
+            return float(value.strip())
+    return None
 
 
 def main() -> None:
@@ -96,6 +109,7 @@ def main() -> None:
         core_path=real[0] if real else None,
         info_path=Path(real[1]) if len(real) > 1 else None,
         params=_deployed_params(),
+        p5_s=_deployed_p5(),
     )
     # GET /api/status's `debug` block (ADR-003 D9), as the webserver's status handler adds it
     # from the gateway (webserver/app.py handle_status; this server does not import app.py,

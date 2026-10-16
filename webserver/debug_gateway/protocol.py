@@ -179,6 +179,21 @@ COMMANDS: Mapping[str, Command] = {
             ("control", "exceptionBreakpoints"),
             {"filters": Arg("list[str]", True)},
         ),
+        # Forces (ADR-005 D5). `force`/`unforce`/`unforceAll` are MODIFY: the controller, the
+        # lock off, and (D5.5) cancel-all is one audited action over every owner's forces.
+        _cmd("listForces", Kind.READ, ("force",), local=True),
+        _cmd(
+            "force",
+            Kind.MODIFY,
+            ("modify", "force"),
+            {"path": Arg("str", True), "value": Arg("any", True), "reason": Arg("str", True),
+             "ttlMs": Arg("num", minimum=1)},
+            probe_dependent=True,
+            local=True,
+        ),
+        _cmd("unforce", Kind.MODIFY, ("modify", "force"), {"path": Arg("str", True)},
+             probe_dependent=True, local=True),
+        _cmd("unforceAll", Kind.MODIFY, ("modify", "force"), local=True),
         _cmd("continue", Kind.CONTROL, ("control",), _TASK),
         _cmd("pause", Kind.CONTROL, ("control",), _TASK),
         _cmd("next", Kind.CONTROL, ("control",), _TASK),
@@ -257,7 +272,7 @@ CAPABILITY_FLAGS: Tuple[str, ...] = (
 )
 SERVED_FLAGS: FrozenSet[str] = frozenset(
     {"probes", "maxBreakpoints", "exceptionBreakpoints", "nonStop", "cycleStep", "runScans",
-     "startHalted", "control"}
+     "startHalted", "control", "force", "modify"}
 )
 
 
@@ -332,6 +347,10 @@ def _has_kind(value: Json, kind: str) -> bool:
         return isinstance(value, list) and all(_is_int(v) for v in value)
     if kind == "list[str]":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "num":
+        return not isinstance(value, bool) and isinstance(value, (int, float))
+    if kind == "any":
+        return True
     raise ValueError(f"unknown argument kind {kind}")
 
 

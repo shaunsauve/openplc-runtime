@@ -33,6 +33,7 @@ extern "C" {
 #include "../lib/strucpp_abi.hpp"
 
 #include "debug_agent.h"
+#include "debug_force.h"
 #include "debug_link.h"
 #include "debug_write_journal.h"
 #include "image_tables.h"
@@ -1691,6 +1692,10 @@ static int unload_plc_program_locked(PluginManager *pm, bool restart)
 
         journal_cleanup();
         debug_write_journal_reset();
+        /* ADR-005 D5.3: forces are cleared when the program is unloaded (stop,
+         * restart, download) and never persisted; the leaves they pinned are
+         * going with it, so the registry goes first. */
+        dbgforce_reset();
         log_info("Journal buffer cleaned up");
 
         plugin_driver_stop(plugin_driver);

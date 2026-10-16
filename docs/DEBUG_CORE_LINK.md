@@ -12,7 +12,8 @@ it receives and is itself checked message by message (`tests/pytest/restapi/test
 end run (`tests/debug/plant/runctl_e2e.py`). The checker is `tests/debug/wire/link_spec.py`.
 
 Code: `core/src/plc_app/debug_link.cpp` (the core end), `core/src/plc_app/debug_agent.cpp`
-(breakpoint table, probe slow path), `core/src/plc_app/plc_state_manager.cpp` (park, resume,
+(breakpoint table, probe slow path), `core/src/plc_app/debug_force.cpp` (the force registry),
+`core/src/plc_app/plc_state_manager.cpp` (park, resume,
 pause), `webserver/debug_gateway/core_link.py` and `gateway.py` (the gateway end).
 Tests: `tests/host/test_run_control.cpp` (core, host), `tests/pytest/restapi/test_debug_gateway.py`
 (gateway against `tests/debug/wire/fake_core.py`), `tests/debug/plant/runctl_e2e.sh` (real
@@ -88,6 +89,7 @@ Location     = {task: str, taskId: int, probe?: int}
 RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, location?: Location, since?: num, sessions?: [str]}
 BpResult     = {id: int|null, probe: int, verified: bool, error?: Error}
 Frame        = {pou: int, at: int, leaf: int|null}
+Force        = {leaf: int, value: str, owner: str, reason: str, expiresAt?: num}
 
 hello                   evt {link: str, engineAbi: int, capabilities: Caps, probes: int, image: Image, params?: Params}
 beat                    evt {t: num}
@@ -96,6 +98,7 @@ continued               evt {allThreadsContinued?: bool, task?: str, taskId?: in
 runState                evt RunState
 output                  evt {category: str, kind?: str, count?: int, task?: str, taskId?: int, scan?: int, text?: str}
 sessionEnded            evt {session: str, reason: str}
+forces                  evt {list: [Force]}
 
 attach                  req {user: str, role: str, p2?: num} -> {session: str}
 detach                  req {session: str, reason?: str} -> {forces: list, safeStopped?: bool}
@@ -119,6 +122,10 @@ setHaltMode             req {session: str, mode: str} -> {mode: str}
 stackTrace              req {session: str, task?: TaskRef} -> {task: str, taskId: int, frames: [Frame], truncated: bool}
 readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]}
 readFrameLocals         req {session: str, task?: TaskRef, frame: int, leaves: [{slot: int, size: int}]} -> {values: [str|null]}
+force                   req {session: str, leaf: int, value: str, owner: str, reason: str, ttlS?: num} -> {}
+unforce                 req {session: str, leaf: int} -> {}
+unforceAll              req {session: str} -> {removed: int}
+listForces              req {session: str} -> {forces: [Force]}
 ```
 
 ### Requests, in words
@@ -140,6 +147,10 @@ readFrameLocals         req {session: str, task?: TaskRef, frame: int, leaves: [
 | `readLeaves` | Each leaf's value, by flat leaf index (the `DebugMapV2` leaf order: array 0's elements, then array 1's, …, the numbering of `instances.leafBase`), as lowercase hex of the bytes `strucpp_debug_read` writes (little-endian scalars; STRING 1+126 and WSTRING 1+252 byte windows). An index the program does not have reads `null`. At most 1024 per request. Read without stopping the program, as the legacy `0x44` read is | `BAD_REQUEST` |
 | `readFrameLocals` | One frame's own variables — a function's VAR_INPUT, VAR_IN_OUT and VAR_TEMP, an FB's or a program's VAR_TEMP — which live on the halted task's stack, not in the program's static debug table, so `readLeaves` cannot name them. `frame` indexes the halted `task`'s `stackTrace` frames (0 is the innermost); `leaves` asks for slots of that frame's `__dbg_locals` table (`debug-info.json` `pous[].frameLeaves`, index = slot), each with the byte size to read. Values are lowercase hex of those bytes, as `readLeaves` writes them; a slot, size or frame that is not there reads `null`. At most 1024 leaves. The task must be halted: the table lives on its stack. A core that predates this answers `UNSUPPORTED`, and the gateway passes that on rather than reading a static leaf that is not the local | `BAD_REQUEST`, `NOT_HALTED` |
 | `cycleStep` | Runs only `task` (absent: the task of the most recent stop) for exactly one scan (ADR-001 D4.9). Halted at probe P in scan k: the rest of scan k runs to its boundary, then one released scan runs with a trap on P, so the stop is at P in scan k+1 (reason `step`), or, if that scan never reaches P, a hold at its boundary (reason `step`, `heldAtBoundary`). Held at a boundary: one released scan, then a hold (reason `step`, `heldAtBoundary`). A breakpoint reached first stops there and ends the cycle step. The dispatcher holds the task before its next release (a scan budget), so its virtual time moves exactly one interval (ADR-004 D4). `continued {task, taskId}` follows | `NOT_RUNNING`, `NOT_HALTED`, `BAD_REQUEST` |
+| `force` | Pins the flat leaf `leaf` to `value` — the same lowercase-hex bytes `readLeaves` returns, so the gateway encodes and the core applies one format — with the same 0x42 semantics the legacy handler has: the IECVar is pinned (the program's own assignment to it becomes a no-op, so program reads see the forced value) and, for a located leaf, the image slot is pinned too, so `copy_in` / `copy_out` and plugin writes to it are dropped and the value reaches the plant. Enqueued on the write journal, so it is applied at the next no-task-running window rather than mid-scan. `owner` is the gateway's user (ADR-005 D5.1: a force always has one) and `reason` its text; `ttlS` is the force's lifetime in seconds, absent only for a force with no end (a legacy one, which `debug_handler.c` registers through `dbgforce_legacy_set`, owner `legacy`). A TTL past 8 h is refused `RANGE_ERROR`. The registry entry is added only once the journal accepted the write, and the whole registry is reported in a `forces` event. Refused while safe-stopped: no program is running to take the force | `BAD_REQUEST`, `RANGE_ERROR`, `INVALID_LOCATION`, `LIMIT_EXCEEDED`, `SAFE_STOPPED` |
+| `unforce` | Releases one leaf: the registry entry goes and the journal unforce is enqueued, so the pin lifts at the next drain and the point returns to the program's value or the halt policy's (ADR-004 D1.4). A leaf with no force succeeds — it is already in the state asked for | `BAD_REQUEST`, `INVALID_LOCATION` |
+| `unforceAll` | Releases **every** force, every owner's and legacy ones included, in one action (ADR-005 D5.5), and answers how many went, which is the number the audit log records. The program is not reloaded: only the pins are lifted | — |
+| `listForces` | Every active force, with its owner, reason and absolute `expiresAt` (absent when the force has no TTL). Forces survive a session, so this answers the same set after a detach and after a new attach | — |
 | `setExceptionBreakpoints`, `runScans`, `runToCursor`, `restart`, `setHaltMode` | Defined by the link; the real core does not implement them yet and answers `UNSUPPORTED` (their capabilities are `false` in `hello`) | `UNSUPPORTED` |
 
 A frame's own variables are read with `readFrameLocals`: STruCpp emits the `__dbg_locals` table in
@@ -176,6 +187,7 @@ stack. It has no variable loads, so `capabilities.conditional` is `false`.
 | `runState` | On every change, and once to a newly connected peer. `state` is one of `RUNNING PAUSED HALTED_AT_BP STOPPED ERROR SAFE_STOPPED EMPTY INIT TRANSITIONING`: `HALTED_AT_BP` when any task is parked at a breakpoint, `PAUSED` when any task is otherwise halted. A task's `state` is `running held parked abandoning` |
 | `output` | `category: "runtime"` with `kind` (`conditionError`, `breakpointSkippedLocked`) and `count`; `category: "print"` with `task`, `taskId`, `scan` and `text` |
 | `sessionEnded` | The core ended `session` on its own: `reason` `heartbeat_timeout` when its P2 expired |
+| `forces` | The active-force set changed: a force added or re-forced, one released, `unforceAll`, or a TTL expiring (ADR-005 D5.3). The body is the whole set, not a delta, so a client that missed one is still correct. Broadcast, with no `session`, because a force outlives any one session |
 
 An event whose body has `session` goes only to that session's client; otherwise it is broadcast.
 
@@ -208,8 +220,9 @@ pm: please fold them into ADR-003 D1.3.
    IDs; `probe` is carried separately for the gateway's resolution.
 8. **`continue` is all-stop** and answers `{allThreadsContinued: true}`; **a step without a
    `task`** steps the task of the most recent stop.
-9. **`terminate`** ends the session and stops the program; **`detach`** answers `{forces: []}`
-   until the force registry exists.
+9. **`terminate`** ends the session and stops the program; **`detach`** answers the forces still
+   active, because a force outlives its session (ADR-005 D5.3). Superseded 2026-10-15, when the
+   force registry landed; the `forces: []` placeholder is gone.
 10. **The frame cap is 1 MiB in both directions** (the gateway had 16 MiB).
 11. *Retired* (was: interim md5-only build binding while STruCpp did not emit
     `strucpp_dbg_build_id`). STruCpp emits it in every build (9728166). The gateway binds
@@ -237,6 +250,6 @@ from everything it forwards to clients. `webserver/app.py` `handle_status` adds 
 
 ## Not built here
 
-The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), forces, writes,
+The gateway's status cache, `staleness_ms` and `NOT_RESPONDING` (D9.3-D9.4), writes,
 exception breakpoints,
 `runScans`, `runToCursor`, `restart`, and non-stop halt mode (pause and breakpoints are all-stop).
