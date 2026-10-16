@@ -41,8 +41,10 @@
     "kind": {
       "enum": [
         "runtime",
-        "build"
-      ]
+        "build",
+        "diagnostic"
+      ],
+      "description": "`runtime` drives a debug endpoint, `build` reads compiler outputs, and `diagnostic` is a bisect: another scenario with steps cut out, to show that the rest of its evidence still holds. A diagnostic is the only scenario whose `criteria` may be empty, and it must say in `notes` which scenario it is a bisect of and how many steps it removed (validate.py checks the number against that scenario's own step count, so it cannot rot)."
     },
     "criteria": {
       "type": "array",
@@ -51,7 +53,7 @@
         "type": "string",
         "pattern": "^A[0-9]{3}$"
       },
-      "description": "The criteria this scenario discharges (a subset of the program's header `criteria`) — the claim this file earns, not a label on it. The key is always present, so an oracle can never leave its coverage unstated; a diagnostic scenario that discharges nothing lists it empty (`[]`) and says in its title or notes which steps it excludes. An empty list writes no `runs/*.jsonl` row, so such a scenario can never be counted as coverage for a criterion."
+      "description": "The criteria this scenario discharges (a subset of the program's header `criteria`) — the claim this file earns, not a label on it. The key is always present, so an oracle can never leave its coverage unstated; the only scenario allowed to list it empty is a `diagnostic`, which writes a `criterion: null` row so its verdict is visible in the ledger as a bisect rather than invisible there."
     },
     "title": {
       "type": "string",

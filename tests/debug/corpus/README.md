@@ -29,8 +29,18 @@ tests/debug/corpus/
 ends by running `validate.py`.
 
 Run `python3 tests/debug/corpus/validate.py` (add `--acceptance <root>/docs/ACCEPTANCE.md
---catalog <root>/docs/drafts/feature-catalog.md` to cross-check criteria and FC tags), and
+--catalog <root>/docs/drafts/feature-catalog.md` to cross-check criteria and FC tags,
+`--strict` to count the warnings below as problems), and
 `python3 -m unittest tests/debug/corpus/test_validate.py`.
+
+Three things are reported as warnings rather than problems, because each says the corpus has not
+caught up with something outside itself and a run that fails on them cannot be made green without
+doing that work: the oracle ↔ `ACCEPTANCE.md` join (a scenario claims a criterion whose `Test:` is
+`—`, names other scenarios, or does not name it; and a `Test:` naming a scenario that does not cite
+it), a `build-record.txt` whose sources or compiler have moved since the build, and an absent
+`build/` directory. `--write-coverage` regenerates `tests/debug/harness/coverage.txt`'s index block,
+which is checked as a problem, because a file this script owns can only be wrong by not being
+regenerated.
 
 ## Program contract
 
@@ -70,8 +80,9 @@ One JSON file per scenario, `<name>/<id>.oracle.json`, `scenario` = `<name>/<id>
 {
   "format": "openplc-debug-oracle", "major": 1, "minor": 1,
   "scenario": "plant-io/bp-before-statement", "corpus": "plant-io",
-  "kind": "runtime",                 // "build": a debug-info / generated-code inspection, no runtime
-  "criteria": ["A034", "A031"],      // the criteria this scenario discharges (⊆ the header's); [] for a diagnostic
+  "kind": "runtime",                 // "build": a debug-info / generated-code inspection, no runtime;
+                                     // "diagnostic": a bisect (§ Coverage)
+  "criteria": ["A034", "A031"],      // the criteria this scenario discharges (⊆ the header's); [] only for a diagnostic
   "title": "...",
   "setup": {                          // all optional
     "build": {"probes": true, "variant": "variant-inplace.st", "path": "library|cli|editor", "control": true},
@@ -258,11 +269,26 @@ except where a `noEvent` step forbids them.
 A program header lists every criterion that cites the program; each oracle lists the ones it
 discharges. That list is the claim an oracle earns, not a label on the file: an oracle that cites
 a criterion is asserting that its steps cover that criterion's check, so cut a scenario down and
-it stops citing the criterion. A **diagnostic** scenario — another scenario with the broken steps
-removed, to show that the rest still holds — cites none (`"criteria": []`) and names in its title
-and notes the steps it excludes. It writes no `runs/*.jsonl` row, so no verdict path can count it
-as coverage; a PASS from it is a bisect, never evidence for a criterion. Criteria listed in a
-header but in no oracle still need a scenario (E13.4: every A# gets a `Test:` naming one).
-`validate.py` reports nothing for those: the gap is tracked in `docs/STATUS.md`, not here.
-`tests/debug/harness/coverage.txt` maps each criterion to the scenarios that cite it, marks the
-partial ones, and lists the MVP criteria no oracle can express.
+it stops citing the criterion. `ACCEPTANCE.md`'s `Test:` is what says the claim was paid for, and
+`validate.py --acceptance` reads both and reports every way they disagree, in either direction.
+
+A **diagnostic** scenario — `"kind": "diagnostic"`, another scenario with the broken steps removed,
+to show that the rest still holds — is the only scenario allowed to cite none, and it says so
+structurally rather than in prose: its `notes` must end with two lines,
+
+```
+Diagnostic of: <corpus>/<scenario>
+Steps removed: <n>
+```
+
+and `validate.py` checks that `n` equals the difference in step count between the two files, so a
+diagnostic cannot quietly stop being a bisect when the scenario it cuts grows. Its run writes one
+`runs/*.jsonl` row with `"criterion": null`: a PASS from it is a bisect, visible in the ledger as
+one and never evidence for a criterion. Criteria listed in a header but in no oracle still need a
+scenario (E13.4: every A# gets a `Test:` naming one). `validate.py` reports nothing for those: the
+gap is tracked in `docs/STATUS.md`, not here.
+
+`tests/debug/harness/coverage.txt` maps each criterion to the scenarios that cite it. Its index
+block is generated (`validate.py --write-coverage`) and checked; the sections around it — what a
+scenario discharges only in part, and the MVP and core criteria no oracle can express — are
+hand-written, because a generator cannot know what a scenario leaves out.

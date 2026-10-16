@@ -750,5 +750,48 @@ class EventStreamTest(unittest.TestCase):
         self.assertIn("log.count", caught.exception.reason)
 
 
+class DiagnosticLedgerTest(unittest.TestCase):
+    """A diagnostic scenario's verdict is a bisect, and the ledger has to say so.
+
+    It used to write no row at all, because `results_lines()` emitted one row per criterion a scenario
+    listed and a diagnostic lists none. A bisect that leaves no trace cannot be told from a scenario
+    nobody ran -- which is how a stale one goes unnoticed. Now it writes one `criterion: null` row.
+    """
+
+    ORACLE = "all-scopes-types/scopes-tail"
+
+    def test_a_bisect_writes_one_null_criterion_row(self) -> None:
+        oracle = _oracle(self.ORACLE)
+        doc = json.loads(oracle.read_text())
+        self.assertEqual(doc["kind"], "diagnostic")
+        self.assertEqual(doc["criteria"], [])
+        result = runner.RunResult(self.ORACLE, [], runner.Verdict("PASS", None, "all 9 steps matched"))
+        result.diagnostic = True
+        rows = runner.results_lines(result, ran_on="test", commit="0000000")
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["criterion"])
+        self.assertEqual(rows[0]["test"], f"tests/debug/harness/runner.py::{self.ORACLE}")
+        # The same row set as any other run: a reader parses one shape whatever ran.
+        self.assertEqual(
+            set(rows[0]),
+            {"criterion", "verdict", "test", "ran_on", "commit", "repo", "timestamp", "evidence"},
+        )
+
+    def test_a_scenario_that_claims_nothing_and_is_not_a_bisect_still_writes_nothing(self) -> None:
+        # validate.py refuses that combination; the runner does not invent a row for it either, so a
+        # scenario can never be counted as coverage by being empty.
+        rows = runner.results_lines(
+            runner.RunResult("x/y", [], runner.Verdict("PASS", None, "ok")), "test", "0000000"
+        )
+        self.assertEqual(rows, [])
+
+    def test_a_scenario_is_flagged_as_a_bisect_when_it_is_loaded_as_one(self) -> None:
+        result = _run_fake(self.ORACLE)
+        self.assertEqual(result.scenario, self.ORACLE)
+        self.assertTrue(result.diagnostic)
+        self.assertEqual(result.criteria, [])
+        self.assertEqual(len(runner.results_lines(result, "test", "0000000")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

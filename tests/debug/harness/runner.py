@@ -133,6 +133,10 @@ class RunResult:
     criteria: List[str]
     verdict: Verdict
     trace: List[StepTrace] = field(default_factory=list)
+    # A diagnostic scenario (a bisect with steps cut out) discharges no criterion. It writes one
+    # `criterion: null` row rather than none: a bisect that leaves no trace in the ledger cannot be
+    # told apart from a scenario that was never run, which is how a stale one goes unnoticed.
+    diagnostic: bool = False
 
 
 # ---------------------------------------------------------------- markers
@@ -798,6 +802,7 @@ def run_scenario(
         doc = _load(path)
         result.scenario = str(doc.get("scenario", result.scenario))
         result.criteria = [str(c) for c in cast(List[Json], doc.get("criteria", []))]
+        result.diagnostic = doc.get("kind") == "diagnostic"
         run = _Run(doc, _marker_table(path.parent), endpoint, plant, clock, build)
     except Exception as exc:  # noqa: BLE001 - a broken oracle is a verdict, not a crash
         result.verdict = Verdict("BLOCKED", None, f"cannot load oracle: {exc}")
@@ -850,8 +855,12 @@ def format_trace(result: RunResult) -> str:
 
 
 def results_lines(result: RunResult, ran_on: str, commit: str) -> List[JsonObj]:
-    """One status/README.md `runs/*.jsonl` row per criterion the scenario discharges."""
+    """One status/README.md `runs/*.jsonl` row per criterion the scenario discharges, and one
+    `criterion: null` row for a diagnostic scenario (a bisect), so a run of it is visible as one."""
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    claimed: List[Optional[str]] = list(result.criteria)
+    if result.diagnostic and not claimed:
+        claimed = [None]
     return [
         {
             "criterion": c,
@@ -863,7 +872,7 @@ def results_lines(result: RunResult, ran_on: str, commit: str) -> List[JsonObj]:
             "timestamp": stamp,
             "evidence": result.verdict.reason[:300],
         }
-        for c in result.criteria
+        for c in claimed
     ]
 
 
