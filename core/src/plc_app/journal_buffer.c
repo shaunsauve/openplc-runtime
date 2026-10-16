@@ -221,6 +221,25 @@ void journal_force_set(journal_buffer_type_t type, uint16_t index,
     apply_write_raw(&e); /* seed — must land, so it bypasses the drop check */
 }
 
+/* Mark a slot forced without writing it (an input force: ADR-004 D6.3 puts
+ * the forced value on the IECVar and only locks the image slot, so the field
+ * device's value survives the force and comes back when it is released).
+ * Called under image_lock from the debug drain. */
+void journal_force_hold(journal_buffer_type_t type, uint16_t index, uint8_t bit)
+{
+    if ((uint8_t)type >= JOURNAL_TYPE_COUNT || index >= JBUF_FORCE_SIZE) {
+        return;
+    }
+    if (type_is_bool((uint8_t)type) && bit >= 8) {
+        return;
+    }
+    const uint8_t mask = type_is_bool((uint8_t)type) ? (uint8_t)(1u << bit) : (uint8_t)0x01;
+    if (!(g_forced[type][index] & mask)) {
+        g_forced[type][index] |= mask;
+        g_force_count++;
+    }
+}
+
 /* Release a forced image slot. The next journal write (program copy_out or a
  * plugin) is no longer dropped, so the slot tracks the live value again. */
 void journal_force_clear(journal_buffer_type_t type, uint16_t index, uint8_t bit)

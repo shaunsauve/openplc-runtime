@@ -131,8 +131,14 @@ void apply_located(const DbgwEntry *e, uint8_t area, uint8_t size,
         /* Program view: pin the IECVar so get() returns the forced value. */
         if (ext_strucpp_debug_set)
             ext_strucpp_debug_set(e->arr, e->elem, true, e->bytes, e->len);
-        /* Image view: seed + pin the slot; copy_out and plugin writes drop. */
-        journal_force_set(jt, byte_index, bit_index, val);
+        /* Image view: seed + pin the slot; copy_out and plugin writes drop. An
+         * INPUT is pinned without being seeded (ADR-004 D6.3): the forced value
+         * is the IECVar's, and seeding the slot would destroy the field
+         * device's value with nothing held to restore it at the unforce. */
+        if (area == AREA_INPUT)
+            journal_force_hold(jt, byte_index, bit_index);
+        else
+            journal_force_set(jt, byte_index, bit_index, val);
         break;
     case DBGW_OP_UNFORCE:
         if (ext_strucpp_debug_set)

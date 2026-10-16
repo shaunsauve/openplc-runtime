@@ -226,6 +226,25 @@ void journal_force_set(journal_buffer_type_t type, uint16_t index,
                        uint8_t bit, uint64_t value);
 
 /**
+ * @brief Lock out writes to an image slot without changing what it holds
+ *
+ * Marks the slot forced, exactly as journal_force_set does, but writes nothing
+ * into it. This is the input half of a force (ADR-004 D6.3): the forced value
+ * lives on the IECVar, whose force wins over the raw member write copy-in
+ * performs, and the image slot is only locked so the field device's own write
+ * cannot replace what the program is about to read. Seeding an input would
+ * destroy the device's value, and nothing in the runtime holds a copy to put
+ * back when the force is released.
+ *
+ * @param type  Buffer type (an *_INPUT one; anything else is ignored)
+ * @param index Buffer array index
+ * @param bit   Bit index (0-7) for BOOL types; ignored otherwise
+ *
+ * @note Same calling constraint as journal_force_set.
+ */
+void journal_force_hold(journal_buffer_type_t type, uint16_t index, uint8_t bit);
+
+/**
  * @brief Release a forced image slot (writes flow through again)
  *
  * @param type  Buffer type
