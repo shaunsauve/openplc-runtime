@@ -88,7 +88,7 @@ open(p, "w").write(s.replace(a, '                "owner": "",\n', 1))
 PY
     ;;
   forcettl)  # A116 red-proof: a TTL is recorded but never expires
-    sed -i 's/    if (expires_ms != 0 \&\& expires_ms <= now_ms) gone.push_back(f.leaf);/    if (false \&\& f.expires_ms != 0 \&\& f.expires_ms <= now_ms) gone.push_back(f.leaf);/' \
+    sed -i 's/            if (f.expires_ms != 0 \&\& f.expires_ms <= now_ms) gone.push_back(f.leaf);/            if (false \&\& f.expires_ms != 0 \&\& f.expires_ms <= now_ms) gone.push_back(f.leaf);/' \
       core/src/plc_app/debug_force.cpp
     grep -q 'if (false && f.expires_ms' core/src/plc_app/debug_force.cpp \
       || { echo "SEED forcettl not applied"; exit 1; } ;;
