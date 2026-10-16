@@ -14,27 +14,133 @@ See also:
 from __future__ import annotations
 
 import json
+import os
 import queue
+import signal
 import socket
 import ssl
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Dict, List, Optional, cast
 from urllib.parse import urlparse
 
 from interfaces import Blocked, Json, JsonObj
+from reference_plant import _LineClient
 
 NAMESPACE = "/api/debug-session"
 RESPONSE_TIMEOUT_S = 5.0
 # `restart` stops the program and starts it again before it answers (F037), which is the
 # program's lifecycle rather than a control request and can outlast any control deadline.
 RESPONSE_TIMEOUTS_S = {"restart": 30.0}
+CORE_SOCKET = "/run/runtime/plc_runtime.socket"
+PLANT_NAME = "reference-plant"
+# How long `killRuntime`/`restartRuntime` wait for the runtime to open its sockets again.
+RUNTIME_UP_TIMEOUT_S = 30.0
+# The processes a scenario may signal or kill, by the name its args name.
+RUNTIME_PROCESSES = ("plc_main", "webserver")
+WEBERVER_ABSENT = (
+    "no process named 'webserver' in this container: the session driver serves the gateway "
+    "(tests/debug/wire/serve.py over webserver/debug_gateway/gateway.py), not webserver/app.py, "
+    "whose own RuntimeManager and EtherDog would be a second PLC runtime. So there is no "
+    "webserver process here to signal — that half of A047 needs a deployment of app.py."
+)
+# The fault kinds this endpoint drives itself, each with the document that says what it is.
+# Every other kind still refuses, by name: a kind that reports success without injecting
+# anything is worse than the stub, because it turns a loud BLOCK into a silent wrong answer.
+REFUSED = {
+    "rest": (
+        "the runtime REST API is only reachable through webserver/app.py's run_https() "
+        "(webserver/app.py:558), and importing app.py starts its own RuntimeManager, EtherDog "
+        "and discovery responder — a second PLC runtime, which this container already has. "
+        "The gateway here (tests/debug/wire/serve.py:97) registers a stub GET callback that "
+        "answers 200 {\"error\": \"Unknown argument\"} for every command, so an inject that "
+        "called it would pass an oracle's status matcher without a start ever happening. "
+        "Wiring the product's own handlers behind the gateway is runtime-deployment work "
+        "(a second RuntimeManager attached to the running plc_main), not harness work."
+    ),
+    "upload": (
+        "the upload path is webserver/app.py:374 handle_upload_file over "
+        "webserver/plcapp_management.py (run_compile, apply_retain_conf, "
+        "update_plugin_configurations), reachable only through the same run_https() as `rest`. "
+        "A harness that zipped a variant and swapped the build itself would be measuring its "
+        "own download, not the runtime's."
+    ),
+}
 
 
 def _obj(value: Json) -> JsonObj:
     """The object in `value`, or an empty one: a body that is not an object says nothing."""
     return cast(JsonObj, value) if isinstance(value, dict) else {}
+
+
+# The core command socket speaks one line per request, the same protocol the reference plant's
+# socket does; one line client serves both, so `inject: socket` reuses it rather than growing a
+# second implementation of the same thing.
+_Line = _LineClient
+
+
+def _cmdline(entry: Path) -> List[str]:
+    raw = (entry / "cmdline").read_bytes()
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _processes(name: str) -> List[int]:
+    """Every pid whose command line names `name`: the runtime processes a scenario may signal."""
+    found: List[int] = []
+    for entry in sorted(Path("/proc").iterdir()):
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = _cmdline(entry)
+        except OSError:
+            continue
+        if name == "webserver":
+            # `python3 -m webserver.app` or `python3 webserver/app.py`: the runtime's own REST
+            # server, which this container does not run (see WEBERVER_ABSENT).
+            hit = any("webserver.app" in a or a.endswith("webserver/app.py") for a in argv)
+        else:
+            hit = any(Path(a).name == name for a in argv)
+        if hit:
+            found.append(int(entry.name))
+    return found
+
+
+def _runtime_cwd() -> Optional[str]:
+    pids = _processes("plc_main")
+    if not pids:
+        return None
+    try:
+        return str(Path(f"/proc/{pids[0]}/cwd").resolve())
+    except OSError:
+        return None
+
+
+def _proc_spawn(pid: int) -> "tuple[List[str], str, Dict[str, str]]":
+    """The argv, working directory and environment a process was started with, out of /proc."""
+    try:
+        argv = _cmdline(Path(f"/proc/{pid}"))
+        cwd = str(Path(f"/proc/{pid}/cwd").resolve())
+        env_raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return [], "", {}
+    env: Dict[str, str] = {}
+    for part in env_raw.split(b"\0"):
+        key, sep, value = part.partition(b"=")
+        if sep:
+            env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return argv, cwd, env
+
+
+def _signal(pid: int, number: int, name: str) -> None:
+    try:
+        os.kill(pid, number)
+    except OSError as exc:
+        raise Blocked(f"inject: cannot signal pid {pid} ({exc.strerror or exc})") from exc
+    del name
 
 
 class SocketIOEndpoint:
@@ -48,6 +154,9 @@ class SocketIOEndpoint:
         deployed_params: Optional[Dict[str, float]] = None,
         deployed_build: Optional[Dict[str, str]] = None,
         deployed_halt_policy: Optional[str] = None,
+        plant: Optional[object] = None,
+        net: Optional[object] = None,
+        core_socket: str = CORE_SOCKET,
     ) -> None:
         parsed = urlparse(url)
         # The task intervals (ms) of the program the caller deployed (T-VER-TASKDEPLOY): a
@@ -86,6 +195,13 @@ class SocketIOEndpoint:
         # Set by prepare() from setup.haltMode: the mode the session must be in before step 0.
         # `haltMode` needs no deploy step — it is a request, sent the moment the session is up.
         self.halt_mode: Optional[str] = None
+        # The seams `inject` drives besides the session's own transport: the reference plant
+        # (run control through its test hook), the client link (netfault.NetFault, the splice
+        # that can add an RTT or cut a connection) and the runtime's core command socket.
+        self.plant = plant
+        self.net = net
+        self.core_socket = core_socket
+        self._core: Optional["_Line"] = None
         self.description = f"endpoint {self.host}:{self.port}"
 
     def _probe(self) -> None:
@@ -318,8 +434,198 @@ class SocketIOEndpoint:
     def log(self) -> JsonObj:
         raise Blocked("no log read-back path is defined for the runtime yet")
 
+    # -- fault injection (F154)
+
+    def core(self) -> "_Line":
+        """The runtime's core command socket, opened on first use (`inject: socket`)."""
+        if self._core is None:
+            self._core = _Line(self.core_socket)
+        return self._core
+
+    def _plant(self) -> object:
+        if self.plant is None:
+            raise Blocked(
+                "inject plugin: this run has no reference plant (--plant SOCKET), so the plant's "
+                "test hook is not there to hold or resume a task"
+            )
+        return self.plant
+
+    def _net(self) -> object:
+        if self.net is None:
+            raise Blocked(
+                f"inject {self._pending}: this run has no link splice in front of the endpoint, "
+                "so the harness cannot shape or cut what it is connected over"
+            )
+        return self.net
+
     def inject(self, kind: str, args: JsonObj) -> Json:
-        raise Blocked(f"inject {kind}: fault injection (F154) not built")
+        """Every fault kind F154 asks for, on the seam that carries it.
+
+        A kind this endpoint cannot drive refuses, by name and with the file and line that would
+        have to change. It never answers as though it had injected something.
+        """
+        self._pending = kind
+        if kind in REFUSED:
+            raise Blocked(f"inject {kind}: {REFUSED[kind]}")
+        if kind == "socket":
+            return self.core().ask(str(args.get("command", "")))
+        if kind == "plugin":
+            return self._inject_plugin(args)
+        if kind in ("delayNetwork", "dropNetwork", "restoreNetwork"):
+            return self._inject_link(kind, args)
+        if kind in ("sigstopRuntime", "sigcontRuntime", "killRuntime", "restartRuntime"):
+            return self._inject_process(kind, args)
+        if kind == "writeFile":
+            return self._inject_write(args)
+        raise Blocked(
+            f"inject {kind}: no seam in this harness drives that fault, so nothing was injected"
+        )
+
+    def _inject_plugin(self, args: JsonObj) -> Json:
+        """A plugin drive. Only the reference plant's own test hook is a harness seam: the
+        other plugins a scenario names (host_io, vpp-switch, opcua_server, test-plugin) are
+        product code with actions of their own, and answering for them would be the harness
+        inventing the runtime's behaviour."""
+        name = str(args.get("name", ""))
+        if name != PLANT_NAME:
+            raise Blocked(
+                f"inject plugin: no plugin named {name!r} is loaded in this runtime "
+                f"(plugins.conf loads {PLANT_NAME} alone), and its `"
+                f"{args.get('action', '?')}` would be that plugin's own action to implement — "
+                "product code, not a fault the harness injects"
+            )
+        plant = self._plant()
+        action = str(args.get("action", ""))
+        task = str(args.get("task", "all"))
+        run_control = getattr(plant, "run_control", None)
+        if run_control is None:
+            raise Blocked(
+                f"inject plugin: the plant at {getattr(plant, 'path', '?')} has no run-control hook"
+            )
+        return run_control(action, task)
+
+    def _inject_link(self, kind: str, args: JsonObj) -> Json:
+        """The client link: an added RTT, a cut, or the link as it was."""
+        net = self._net()
+        if kind == "delayNetwork":
+            rtt = args.get("rttMs")
+            jitter = args.get("jitterMs", 0)
+            if not isinstance(rtt, (int, float)) or isinstance(rtt, bool):
+                raise Blocked(f"inject delayNetwork: rttMs must be a number, not {rtt!r}")
+            net.delay(float(rtt), float(jitter) if isinstance(jitter, (int, float)) else 0.0)
+        elif kind == "dropNetwork":
+            net.drop()
+        else:
+            net.restore()
+        return net.shape()
+
+    def _find_process(self, name: str) -> int:
+        """The pid of a runtime process, by the name its args name (`plc_main`, `webserver`)."""
+        if name not in RUNTIME_PROCESSES:
+            raise Blocked(
+                f"inject: {name!r} is not a runtime process this harness may signal; it knows "
+                f"{list(RUNTIME_PROCESSES)}"
+            )
+        if not Path("/proc").is_dir():
+            raise Blocked(
+                f"inject: this host has no /proc, so the harness cannot find the {name} process "
+                "to signal; the injection runs in the container the runtime does"
+            )
+        matches = _processes(name)
+        if not matches:
+            raise Blocked(WEBERVER_ABSENT if name == "webserver" else
+                          f"inject: no process named {name!r} is running in this container")
+        if len(matches) > 1:
+            raise Blocked(
+                f"inject: {len(matches)} processes named {name!r} are running "
+                f"({matches}); the injection cannot say which one it signalled"
+            )
+        return matches[0]
+
+    def _inject_process(self, kind: str, args: JsonObj) -> Json:
+        """Signals the harness can deliver, and the process lifetimes behind them."""
+        pid = self._find_process(str(args.get("process", "plc_main")) if kind.startswith("sig") else "plc_main")
+        if kind == "sigstopRuntime":
+            _signal(pid, signal.SIGSTOP, str(args.get("signal", "SIGSTOP")))
+        elif kind == "sigcontRuntime":
+            _signal(pid, signal.SIGCONT, str(args.get("signal", "SIGCONT")))
+        elif kind == "killRuntime":
+            self._kill_runtime(pid, str(args.get("signal", "SIGKILL")))
+        else:
+            # The argv, cwd and environment are read before the kill: /proc keeps nothing after.
+            spawn = _proc_spawn(pid)
+            self._kill_runtime(pid, str(args.get("signal", "SIGKILL")))
+            self._start_runtime(spawn)
+        return {"process": "plc_main" if kind in ("killRuntime", "restartRuntime") else
+                str(args.get("process", "plc_main")), "pid": pid, "state": self._state(pid)}
+
+    @staticmethod
+    def _state(pid: int) -> str:
+        """`T` (stopped), `R`/`S` (running) or `gone`, read out of /proc."""
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return "gone"
+        return stat.rpartition(")")[2].split()[0] or "?"
+
+    def _kill_runtime(self, pid: int, name: str) -> None:
+        _signal(pid, signal.SIGKILL, name)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and self._state(pid) != "gone":
+            time.sleep(0.05)
+
+    def _start_runtime(self, spawn: "tuple[List[str], str, Dict[str, str]]") -> None:
+        """Relaunch the runtime the way session_inner.sh launched it: the same argv, the same
+        working directory and the same environment, read out of /proc of the process just killed.
+        Nothing here invents a command line, so the runtime that comes back is the one that died.
+        """
+        argv, cwd, env = spawn
+        if not argv:
+            raise Blocked(
+                "inject restartRuntime: the killed process is gone, so its argv, working "
+                "directory and environment cannot be read back out of /proc; the driver must "
+                "pass them (--runtime-argv) for a restart to be the same runtime"
+            )
+        proc = subprocess.Popen(  # noqa: S603 - the argv is the one the killed process had
+            argv, cwd=cwd, env=env, start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + RUNTIME_UP_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if Path("/run/runtime/plc_debug.socket").exists() and self._state(proc.pid) != "gone":
+                return
+            time.sleep(0.1)
+        raise Blocked(
+            f"inject restartRuntime: pid {proc.pid} is running but "
+            f"{CORE_SOCKET} never reappeared within {RUNTIME_UP_TIMEOUT_S:g} s"
+        )
+
+    def _inject_write(self, args: JsonObj) -> Json:
+        """Replace a file under the runtime's data directory, as an operator or a crash would.
+
+        The path is the one a scenario names, resolved the way the runtime itself resolves it:
+        relative to the running runtime's working directory. What the runtime makes of the
+        content afterwards is its own business; this only reports what it wrote.
+        """
+        rel = str(args.get("path", ""))
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            raise Blocked(
+                f"inject writeFile: {rel!r} is not a path under the runtime's data directory"
+            )
+        root = Path(_runtime_cwd() or ".")
+        path = root / rel
+        content = args.get("content", "")
+        blob = content if isinstance(content, str) else json.dumps(content, sort_keys=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(blob, encoding="utf-8")
+        return {
+            "path": str(path),
+            "bytes": len(blob.encode("utf-8")),
+            "existed": True,
+            "readBack": json.loads(path.read_text(encoding="utf-8"))
+            if blob.strip().startswith(("{", "["))
+            else None,
+        }
 
     def credential(self, kind: str) -> Json:
         if kind == "none":
@@ -347,6 +653,10 @@ class SocketIOSession:
     # (tests/debug/wire/run_harness.py's WssSession) still has them.
     non_stop = False
     halt_mode_deployed = False
+    # Refusals that carried no request_seq to correlate on; `inject_frame` reads them. Class
+    # attribute, so a subclass that swaps the transport and does not call super().__init__()
+    # (tests/debug/wire/run_harness.py's WssSession) gets one too.
+    uncorrelated: "queue.Queue[JsonObj]" = queue.Queue()
 
     def __init__(self, endpoint: SocketIOEndpoint) -> None:
         try:
@@ -385,6 +695,11 @@ class SocketIOSession:
                 waiter = self.pending.get(rseq) if isinstance(rseq, int) else None
             if waiter is not None:
                 waiter.put(msg)
+            elif rseq is None:
+                # A refusal to a message the gateway could not parse carries no seq to correlate
+                # on (gateway.py `_failure` with request_seq=None). An injected frame is exactly
+                # such a message, so it is kept here for inject_frame to answer with.
+                self.uncorrelated.put(msg)
         elif msg.get("type") == "event":
             self.inbox.put({"event": msg.get("event"), "body": msg.get("body")})
 
@@ -530,6 +845,75 @@ class SocketIOSession:
     def close(self) -> None:
         self.stop.set()
         self.sio.disconnect()
+
+    # -- a raw frame on this stream's own transport
+
+    def _raw_frame(self, text: str) -> None:
+        """Put one text frame carrying `text` on the wire, through whatever transport this
+        session has. A subclass whose transport cannot be written at raises Blocked instead."""
+        raise Blocked(
+            "inject rawFrame: this session's transport cannot be written frame by frame; "
+            "only the harness's own WSS client (tests/debug/wire/run_harness.py) can"
+        )
+
+    def inject_frame(self, kind: str, args: JsonObj) -> Json:
+        """Send a frame the Socket.IO client would never build, and answer with what the gateway
+        said about it (ADR-003 D2, the refusal codes A087 and A129 read).
+
+        `truncated` is a Socket.IO packet cut off inside its JSON, so the gateway cannot parse it
+        and refuses BAD_REQUEST without a seq to correlate on; `invalid` is a whole packet that
+        is not a request; `oversize` is a well-formed request whose message is over P6, so it
+        does carry a seq and the refusal is correlated; `garbage` is a burst of frames that are
+        not messages at all, which is the A087 burst and answers nothing.
+        """
+        frame = str(args.get("frame", ""))
+        size = args.get("bytes", 2 * 1024 * 1024)
+        if not isinstance(size, (int, float)) or isinstance(size, bool):
+            raise Blocked(f"inject rawFrame: bytes must be a number, not {size!r}")
+        if frame not in ("truncated", "invalid", "oversize", "garbage"):
+            raise Blocked(
+                f"inject rawFrame: {frame!r} is not a frame this harness builds; it builds "
+                "truncated, invalid, oversize and garbage"
+            )
+        if frame == "garbage":
+            count = args.get("count", 1)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise Blocked(f"inject rawFrame: count must be a non-negative integer, not {count!r}")
+            for _ in range(count):
+                self._raw_frame("!" * max(int(size) if isinstance(size, (int, float)) else 64, 1))
+            return {"frames": count, "bytes": int(size) * count}
+        with self.lock:
+            self.seq += 1
+            seq = self.seq
+            waiter: "queue.Queue[JsonObj]" = queue.Queue()
+            self.pending[seq] = waiter
+        try:
+            if frame == "truncated":
+                packet = f'42{NAMESPACE},["msg",{{"type":"request","seq":{seq},"command":'
+                source = None
+            elif frame == "invalid":
+                packet = f'42{NAMESPACE},["msg",{{"type":"notice","seq":{seq},"body":"hello"}}]'
+                source = None
+            else:
+                pad = "x" * max(int(size), 1)
+                packet = (
+                    f'42{NAMESPACE},["msg",{{"type":"request","seq":{seq},'
+                    f'"command":"status","arguments":{{"pad":"{pad}"}}}}]'
+                )
+                source = waiter
+            self._raw_frame(packet)
+            box = source if source is not None else self.uncorrelated
+            try:
+                resp = box.get(timeout=RESPONSE_TIMEOUT_S)
+            except queue.Empty:
+                raise Blocked(
+                    f"inject rawFrame {frame}: the gateway answered nothing on this stream in "
+                    f"{RESPONSE_TIMEOUT_S:g} s"
+                ) from None
+        finally:
+            with self.lock:
+                self.pending.pop(seq, None)
+        return resp
 
     def kill(self) -> None:
         # ASSUMED: python-engineio's abort drops the socket with no Socket.IO disconnect packet,

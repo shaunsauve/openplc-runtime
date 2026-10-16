@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -29,6 +30,7 @@ sys.path.insert(0, str(HERE))
 import runner  # noqa: E402
 from fake_endpoint import FakeWorld  # noqa: E402
 from interfaces import Blocked  # noqa: E402
+from netfault import NetFault  # noqa: E402
 from socketio_endpoint import SocketIOEndpoint, SocketIOSession  # noqa: E402
 
 CORPUS = HERE.parent / "corpus"
@@ -244,6 +246,104 @@ class DeployTest(unittest.TestCase):
         with self.assertRaises(Blocked) as caught:
             session._deploy_halt_mode()
         self.assertIn("refused setHaltMode", str(caught.exception))
+
+
+class InjectTest(unittest.TestCase):
+    """What each fault kind of F154 does, and what the ones without a seam still say.
+
+    The rule these hold: a kind either acts on a seam the harness owns or refuses by name. None
+    of them may answer as though it had injected something, because that turns a loud BLOCK into
+    a silent wrong answer (a `rest` call to the gateway's stub callback answers 200 to a start it
+    never made, which passes an oracle's status matcher).
+    """
+
+    @staticmethod
+    def _endpoint(**kwargs) -> SocketIOEndpoint:
+        endpoint = SocketIOEndpoint("https://127.0.0.1:1", token=None, insecure=True, **kwargs)
+        endpoint._probe = lambda: None
+        return endpoint
+
+    def test_a_kind_with_no_seam_refuses_by_name_and_says_what_would_have_to_change(self) -> None:
+        endpoint = self._endpoint()
+        for kind in ("rest", "upload"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(Blocked) as caught:
+                    endpoint.inject(kind, {})
+                self.assertIn(f"inject {kind}", str(caught.exception))
+        with self.assertRaises(Blocked) as caught:
+            endpoint.inject("rest", {})
+        self.assertIn("webserver/app.py", str(caught.exception))
+        with self.assertRaises(Blocked) as caught:
+            endpoint.inject("upload", {})
+        self.assertIn("handle_upload_file", str(caught.exception))
+
+    def test_a_kind_nobody_named_is_refused_too(self) -> None:
+        with self.assertRaises(Blocked) as caught:
+            self._endpoint().inject("meltdown", {})
+        self.assertIn("nothing was injected", str(caught.exception))
+
+    def test_plugin_run_control_is_the_plants_own_hook_and_nothing_else(self) -> None:
+        asked = []
+
+        class Plant:
+            def run_control(self, action: str, task: str) -> bool:
+                asked.append((action, task))
+                return True
+
+        endpoint = self._endpoint(plant=Plant())
+        self.assertIs(endpoint.inject("plugin", {"name": "reference-plant", "action": "hold",
+                                                 "task": "Main"}), True)
+        self.assertEqual(asked, [("hold", "Main")])
+        # A product plugin's own action is not a fault the harness injects.
+        with self.assertRaises(Blocked) as caught:
+            endpoint.inject("plugin", {"name": "vpp-switch", "action": "run"})
+        self.assertIn("no plugin named 'vpp-switch'", str(caught.exception))
+
+    def test_the_link_faults_change_the_link_and_answer_what_it_now_is(self) -> None:
+        net = NetFault("127.0.0.1", 9)  # a port nothing answers: nothing is spliced through yet
+        try:
+            endpoint = self._endpoint(net=net)
+            self.assertEqual(
+                endpoint.inject("delayNetwork", {"rttMs": 300, "jitterMs": 20}),
+                {"rttMs": 300.0, "jitterMs": 20.0, "drops": 0},
+            )
+            self.assertEqual(endpoint.inject("restoreNetwork", {}),
+                             {"rttMs": 0.0, "jitterMs": 0.0, "drops": 0})
+            endpoint.inject("dropNetwork", {})
+            self.assertEqual(net.shape()["drops"], 1)
+            with self.assertRaises(Blocked) as caught:
+                endpoint.inject("delayNetwork", {"rttMs": "soon"})
+            self.assertIn("rttMs must be a number", str(caught.exception))
+        finally:
+            net.close()
+
+    def test_the_link_faults_refuse_when_there_is_no_link_splice(self) -> None:
+        with self.assertRaises(Blocked) as caught:
+            self._endpoint().inject("dropNetwork", {})
+        self.assertIn("no link splice", str(caught.exception))
+
+    def test_a_write_names_the_file_it_wrote_and_reads_it_back(self) -> None:
+        endpoint = self._endpoint()
+        record = {"kind": "warm", "md5": "0", "version": 99, "writer": "upload"}
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch("socketio_endpoint._runtime_cwd", return_value=tmp):
+                result = endpoint.inject("writeFile", {"path": "core/retain_prev/record.json",
+                                                       "content": record})
+            self.assertEqual(result["readBack"], record)
+            self.assertEqual(result["path"], str(Path(tmp) / "core/retain_prev/record.json"))
+        # A path out of the runtime's data directory is not one the harness may write.
+        with self.assertRaises(Blocked) as caught:
+            endpoint.inject("writeFile", {"path": "/etc/passwd", "content": record})
+        self.assertIn("data directory", str(caught.exception))
+
+    def test_signalling_a_process_that_is_not_there_says_so_by_name(self) -> None:
+        if Path("/proc").is_dir():  # the runtime processes are only findable on Linux
+            with self.assertRaises(Blocked) as caught:
+                self._endpoint().inject("sigstopRuntime", {"process": "webserver"})
+            self.assertIn("webserver/app.py", str(caught.exception))
+        with self.assertRaises(Blocked) as caught:
+            self._endpoint().inject("sigstopRuntime", {"process": "postgres"})
+        self.assertIn("is not a runtime process", str(caught.exception))
 
 
 class RunnerTest(unittest.TestCase):

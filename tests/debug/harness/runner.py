@@ -741,6 +741,15 @@ class _Run:
                     raise Diverge(f"killClient: no open stream {client!r}")
                 stream.session.kill()
             return f"inject {kind}"
+        if kind == "rawFrame":
+            # A frame is written on a named stream's own transport, the way killClient acts on
+            # one: the step's `client` says whose, and the answer is what the gateway refused.
+            client = self._clients(step)[0]
+            result = self._stream(client).session.inject_frame(kind, args)
+            self._drain()
+            if "expect" in step:
+                self._check(step["expect"], result, f"inject.{kind}")
+            return f"inject {kind}"
         result = self.endpoint.inject(kind, args)
         if "expect" in step:
             self._check(step["expect"], result, f"inject.{kind}")

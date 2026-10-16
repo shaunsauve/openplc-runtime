@@ -15,11 +15,13 @@ See also:
 from __future__ import annotations
 
 import argparse
+import json
 import queue
 import sys
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -36,8 +38,14 @@ from interfaces import (  # noqa: E402
     UnavailablePlant,
     WallClock,
 )
+from netfault import NetFault  # noqa: E402
 from reference_plant import ReferencePlant  # noqa: E402
-from socketio_endpoint import NAMESPACE, SocketIOEndpoint, SocketIOSession  # noqa: E402
+from socketio_endpoint import (  # noqa: E402
+    CORE_SOCKET,
+    NAMESPACE,
+    SocketIOEndpoint,
+    SocketIOSession,
+)
 from wss_client import WssSio  # noqa: E402
 
 
@@ -64,11 +72,40 @@ class WssSession(SocketIOSession):
         except (ConnectionError, OSError) as exc:
             raise Blocked(f"cannot attach to {NAMESPACE} at {endpoint.url}: {exc}") from exc
 
+    def _raw_frame(self, text: str) -> None:
+        """One text frame carrying `text`, on this connection's own TLS socket.
+
+        simple_websocket masks and frames a string for us, so this is exactly what `emit` sends
+        except that the harness chooses the payload: a message the Socket.IO client would never
+        build, which is what `inject rawFrame` is.
+        """
+        with self.sio.lock:
+            ws = self.sio.ws
+            if ws is None:
+                raise Blocked("inject rawFrame: this stream's transport is closed")
+            ws.send(text)
+
 
 class WssEndpoint(SocketIOEndpoint):
     def open_session(self) -> WssSession:
         self._probe()
         return WssSession(self)
+
+
+LINK_FAULTS = ("delayNetwork", "dropNetwork", "restoreNetwork")
+
+
+def _needs_link(oracles: List[Path]) -> bool:
+    """Whether any of these oracles shapes or cuts the client link (F154's network kinds)."""
+    for path in oracles:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for step in runner._flat(doc.get("steps")):
+            if step.get("inject") in LINK_FAULTS:
+                return True
+    return False
 
 
 def run(
@@ -82,18 +119,39 @@ def run(
     deployed_params: Optional[Dict[str, float]] = None,
     deployed_build: Optional[Dict[str, str]] = None,
     deployed_halt_policy: Optional[str] = None,
+    core_socket: Optional[str] = None,
 ) -> List[runner.RunResult]:
-    endpoint = WssEndpoint(
-        url, token=token, insecure=insecure, deployed_tasks=deployed_tasks,
-        deployed_params=deployed_params, deployed_build=deployed_build,
-        deployed_halt_policy=deployed_halt_policy,
-    )
-    return [
-        runner.run_scenario(
-            p, endpoint, plant or UnavailablePlant(), WallClock(), build or UnavailableBuild()
+    # The client link (N013's tunnel profile, F154's network faults) is a splice the harness owns:
+    # the gateway is reached through it, so `delayNetwork`, `dropNetwork` and `restoreNetwork` act
+    # on the real transport rather than on the runtime's opinion of one. `delayNetwork` is step 0
+    # of the scenarios that want it, so the splice has to be in place before the first connect —
+    # and a run that asks for no link fault gets the gateway itself, unspliced.
+    net: Optional[NetFault] = None
+    if _needs_link(oracles):
+        target = urlparse(url)
+        net = NetFault(
+            target.hostname or "127.0.0.1",
+            target.port or (443 if target.scheme == "https" else 80),
         )
-        for p in oracles
-    ]
+        endpoint_url = f"{target.scheme}://{net.host}:{net.port}"
+    else:
+        endpoint_url = url
+    endpoint = WssEndpoint(
+        endpoint_url, token=token, insecure=insecure,
+        deployed_tasks=deployed_tasks, deployed_params=deployed_params,
+        deployed_build=deployed_build, deployed_halt_policy=deployed_halt_policy,
+        plant=plant, net=net, core_socket=core_socket or CORE_SOCKET,
+    )
+    try:
+        return [
+            runner.run_scenario(
+                p, endpoint, plant or UnavailablePlant(), WallClock(), build or UnavailableBuild()
+            )
+            for p in oracles
+        ]
+    finally:
+        if net is not None:
+            net.close()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -117,6 +175,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--deployed-halt-policy", default="none", metavar="KIND:N",
                     help="the halt policy the core itself reported it loaded at start "
                          "(`safe:4`, `hold:0`), or `none` when no policy was deployed")
+    ap.add_argument("--core-socket", default=CORE_SOCKET, metavar="PATH",
+                    help="the runtime's core command socket, which `inject socket` writes a "
+                         "line to (the default is plc_main's)")
     opts = ap.parse_args(argv)
     plant = ReferencePlant(opts.plant) if opts.plant else None
     build = build_views.DirectoryBuild(opts.build_dir) if opts.build_dir else None
@@ -133,7 +194,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         key, _, value = item.partition("=")
         deployed_build[key] = value
     results = run(opts.oracles, opts.endpoint, opts.token, opts.insecure, plant, build, deployed,
-                  deployed_params, deployed_build, opts.deployed_halt_policy)
+                  deployed_params, deployed_build, opts.deployed_halt_policy, opts.core_socket)
     rows = []
     for result in results:
         print(runner.format_trace(result), flush=True)
