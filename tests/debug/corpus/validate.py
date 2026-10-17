@@ -408,6 +408,10 @@ def client_problem(step: Dict[str, Json]) -> Optional[str]:
 #   (`notBeforeMs`) is safe to assert, and its absence leaves a safety claim half-stated: a runtime
 #   that safe-stops at once satisfies every ceiling in the corpus.
 #
+# "Absence" is not "the key is missing". A floor has to name an instant, so `notBeforeMs: 0` is no
+# floor at all -- it is the absence wearing one, and a rule that accepted it would be satisfied by
+# typing nothing down.
+#
 # The converse is not a defect. A step waiting for a *response* to a request the harness just sent
 # (`stopped` after `continue`, `programReplaced` after `upload`) has no floor worth asserting: the
 # right answer is as fast as possible, and on a loaded host the interval is longer for reasons that
@@ -450,19 +454,31 @@ def _flat_nodes(node: Json, prefix: str = "") -> Iterator[Tuple[str, Json]]:
 
 
 def missing_floor(step: Dict[str, Json]) -> Optional[str]:
-    """The complaint on an event step whose ceiling is asserted and whose floor is not."""
+    """The complaint on an event step whose ceiling is asserted and whose floor is not.
+
+    A floor only counts if it is an instant: `notBeforeMs: 0` says the event may not arrive before
+    the step before it finished, which every event satisfies, so reading it as a floor would make
+    this a spelling check that `0` walks past. Anything not above zero is treated as no floor at
+    all, and says which it was.
+    """
     within = step.get("withinMs")
     if not isinstance(within, (int, float)) or isinstance(within, bool) or within < FLOOR_MIN_MS:
         return None
-    if "notBeforeMs" in step:
+    floor = step.get("notBeforeMs")
+    if isinstance(floor, (int, float)) and not isinstance(floor, bool) and floor > 0:
         return None
     what = _waits_out_something(step)
     if what is None:
         return None
-    return (f"waits for {what} within {within:g} ms but sets no notBeforeMs: the ceiling is "
-            "asserted and the floor is not, so a runtime that gets there at once passes. Add "
-            "notBeforeMs with the earliest instant the declared interval allows (README § Timing "
-            "bounds), or re-word the claim if that instant is not knowable here.")
+    if floor is None:
+        how = "but sets no notBeforeMs"
+    else:
+        how = (f"but sets notBeforeMs {floor!r}, which is not a floor: a floor of zero says the event "
+               "may not arrive before the step before it finished, and every event satisfies that")
+    return (f"waits for {what} within {within:g} ms {how}: the ceiling is asserted and the floor is "
+            "not, so a runtime that gets there at once passes. Add notBeforeMs with the earliest "
+            "instant the declared interval allows (README § Timing bounds), or re-word the claim if "
+            "that instant is not knowable here.")
 
 
 def marker_lines(prog: Program, marker: str, programs: Dict[str, Program],

@@ -650,12 +650,46 @@ class TimingFloorTest(unittest.TestCase):
         self.assertIsNone(validate.missing_floor(
             {"event": "runState", "withinMs": 500, "expect": {"body": {"state": "STOPPED"}}}))
 
-    def test_a_floor_under_the_threshold_is_refused_by_the_schema_and_reported_here(self) -> None:
+    def test_a_floor_that_is_a_real_instant_is_accepted(self) -> None:
         step = self._floor_step()
         step["notBeforeMs"] = 13000
         self.assertIsNone(validate.missing_floor(step))
-        step["notBeforeMs"] = -1
-        self.assertIsNone(validate.missing_floor(step))  # absent-equivalent: nothing to police
+
+    def test_a_floor_of_zero_asserts_nothing_and_is_reported(self) -> None:
+        # Zero is a legal number and the worst possible floor: it says the event may not arrive
+        # before the step before it finished, which every event satisfies. A rule that accepts it is
+        # a spelling check, satisfied by typing nothing down -- and the runner's own floor test
+        # (`delta >= floor`, runner.py `_check_floor`) can never fire on it either, so the claim
+        # would be one-sided in the harness too, silently.
+        step = self._floor_step()
+        step["notBeforeMs"] = 0
+        complaint = validate.missing_floor(step)
+        self.assertIsNotNone(complaint)
+        assert complaint is not None
+        self.assertIn("notBeforeMs 0", complaint)
+        self.assertIn("is not a floor", complaint)
+
+    def test_a_floor_of_zero_is_red_in_situ_not_only_to_the_unit(self) -> None:
+        doc = json.loads(self.pristine)
+        for step in _steps(doc):
+            if isinstance(step, dict) and "notBeforeMs" in step:
+                step["notBeforeMs"] = 0
+        self.path.write_text(json.dumps(doc))
+        code, out = run(self.tmp)
+        self.assertEqual(code, 1, out)
+        self.assertIn("notBeforeMs 0", out)
+        self.assertIn("is not a floor", out)
+
+    def test_a_negative_floor_is_refused_by_the_schema(self) -> None:
+        # `-1` is where the *shape* ends: the schema's `minimum: 0` has no notion of a floor being
+        # worth anything, only of a number being negative, so this is the schema's answer and not
+        # `missing_floor`'s -- which is why the two are separate assertions on separate subjects.
+        doc = json.loads(self.pristine)
+        for step in _steps(doc):
+            if isinstance(step, dict) and "notBeforeMs" in step:
+                step["notBeforeMs"] = -1
+        found = validate.Schema(json.loads(validate.SCHEMA_PATH.read_text())).errors(doc)
+        self.assertTrue(any("below minimum 0" in e and "notBeforeMs" in e for e in found), found)
 
 
 class ValidatorRedGreen(unittest.TestCase):

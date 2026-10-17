@@ -288,9 +288,12 @@ therefore has no consumer here, and no coverage is claimed for it.
 
 `validate.py missing_floor` keeps the four from being the only ones: an event step that waits out
 a terminal run state, a `*_timeout` reason or an emptied force list, past the responsiveness
-bound, with no `notBeforeMs`, is a problem. It is a backstop, not proof of coverage — it cannot
-see the control-request decline in `control-handover`, which has neither shape and was found by
-reading the steps.
+bound, with no floor that asserts anything, is a problem. "No floor" includes `notBeforeMs: 0` —
+zero says the event may not arrive before the step before it finished, which every event satisfies,
+so it is the absence of a floor wearing one (the schema's `minimum: 0` is the shape check and says
+nothing about the number being worth asserting). It is a backstop, not proof of coverage — it
+cannot see the control-request decline in `control-handover`, which has neither shape and was found
+by reading the steps.
 
 ### Inspect views
 
