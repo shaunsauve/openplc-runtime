@@ -118,7 +118,7 @@ Each step has exactly one action key, plus optional `note`, and on `request`, `e
 | Step | Meaning |
 |---|---|
 | `{"request": <command>, "args": {…}, "expect": {"success": b, "error": <code>, "body": <match>}, "repeat": n}` | Send an ADR-003 D4 request (`initialize`, `setBreakpoints`, `continue`, `next`, `cycleStep`, `force`, …). `error` is an ADR-003 D2 code. Lines in `args` may be markers; values may be argument symbols (§ Argument symbols). `repeat` is a batch (§ Repetition) |
-| `{"event": <name>, "withinMs": t, "notBeforeMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches, on every stream the step names; with `count`, the number of those streams that receive a matching one must match it instead. `repeat` waits for n successive events; `thenContinue` sends `continue` after each repetition (loop hit counts; one stream only). `notBeforeMs` is the floor of the same interval and only for a must-not-fire-early claim (§ Timing bounds) |
+| `{"event": <name>, "withinMs": t, "notBeforeMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b, "first": bool}` | An event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches, on every stream the step names; which event of the name it means is `first`, and the default is the first stop for `stopped` and a matching one otherwise (§ Which stop a step means); with `count`, the number of those streams that receive a matching one must match it instead. `repeat` waits for n successive events; `thenContinue` sends `continue` after each repetition (loop hit counts; one stream only). `notBeforeMs` is the floor of the same interval and only for a must-not-fire-early claim (§ Timing bounds) |
 | `{"loop": n, "steps": [ … ]}` | Run the body steps in order, n times: the alternating form (§ Repetition). Bodies may nest |
 | `{"noEvent": <name>, "forMs": t \| "forScans": n, "task": …}` | No such event in the window (scans counted by the plant) |
 | `{"plant": {"set": {addr: v}, "sequence": [{…}, …], "failExchanges": n}}` | Drive plant inputs: one write, or successive writes (latest-wins tests, A055) |
@@ -262,6 +262,51 @@ re-worded if its claim is a two-sided band on a measured RTT — see
 on either side from a clock it controls (a 300 ms ± 20 ms tunnel RTT) is not made assertable by
 inventing a matcher for it; the scenario's `title` stops claiming the number and says what the
 file does evidence.
+
+### Which stop a step means
+
+An `event` step reads one event of its name, and which one is a property of the *stream* as much as
+of the step. So it has a default, and `first` says otherwise per step
+(`oracle.schema.json` § `$defs.eventStep.properties.first`). The default is resolved in exactly one
+place, `firstness.takes_first`, which the matcher (`harness/runner.py`) and the gate (`validate.py`)
+both read: a default stated twice is how `first` became a field that was documented, validated and
+never once read.
+
+| `first` | The step means |
+|---|---|
+| `true` | the FIRST event of that name the stream still holds; nothing earlier of that name is walked past, so one that does not match is the answer and the step fails on it |
+| `false` | any event of that name that matches, with earlier non-matching ones of the same name walked past to the deadline |
+| omitted | `true` for `stopped`, `false` for every other event name |
+
+**Why `stopped` is the one that takes the first.** One halt, one `stopped` event: A038's criterion
+is that a step landing on an armed breakpoint yields EXACTLY ONE stop, which is a claim about order
+and cardinality and not about a matching body. So a runtime that stops at the wrong line three times
+and then at the right one fails a `stopped` step instead of satisfying it — which is the reading
+A038(a)(b) are written against and the only one they can be.
+
+**Why every other name keeps the loosening.** `forces` is sent on every force and `runState` on every
+state change (ADR-005 D5.3), so several of a name are queued before any step reads them; taking the
+oldest made A116 read the force that was *added* where it meant the one that *expired*
+(`plant-io/force-ttl` steps[13]). The check is not weakened either way: a stream with no matching
+event still fails, and with none at all the earliest comes back so the failure says what actually
+arrived.
+
+**The register.** `first: false` on a `stopped` step is the only place a verdict can still be handed
+on a later stop. It is a warning from `validate.py firstness_warnings` (a problem under `--strict`),
+and it owes a `note` saying why, so a decision reads differently from an oversight. Measured over
+this corpus:
+
+| | Count |
+|---|---|
+| oracles | 121 |
+| … carrying at least one `stopped` event step | 86 |
+| `stopped` event steps (loop bodies included) | 237 |
+| … that take the first stop (no `first`, or `first: true`) | 237 |
+| … that opt out (`first: false`) | 0 |
+
+`harness/test_runner.py` is what keeps the number at 0 being meaningful rather than lucky: its
+`stop_at_wrong_line_first` defect makes `plant-io/bp-before-statement` stop one line past the
+breakpoint first, which is the whole population's failure mode in one scenario.
 
 ### Population
 

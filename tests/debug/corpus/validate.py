@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
+from firstness import FIRST_STOP_EVENT, takes_first
+
 Json = Union[None, bool, int, float, str, List["Json"], Dict[str, "Json"]]
 
 ROOT = Path(__file__).resolve().parent
@@ -479,6 +481,74 @@ def missing_floor(step: Dict[str, Json]) -> Optional[str]:
             "not, so a runtime that gets there at once passes. Add notBeforeMs with the earliest "
             "instant the declared interval allows (README § Timing bounds), or re-word the claim if "
             "that instant is not knowable here.")
+
+
+# ------------------------------------------------------------------ which stop
+#
+# `stopped` is the one event name whose ORDER and CARDINALITY are the semantics: one halt, one
+# `stopped` event, and A038's whole criterion is that a step landing on an armed breakpoint yields
+# exactly one stop. So the matcher does not get to pick which stop a step reads. `first: true` on an
+# event step says "the first event of that name this stream still holds", and it is the DEFAULT for
+# `stopped` precisely because it is the reading that cannot turn a defect into a pass: a runtime
+# that stops at the wrong line three times and then at the right one fails a first-stop step instead
+# of satisfying it.
+#
+# The loosening the runner used to carry is still right for the streams that push on every change
+# (`forces` on every force, `runState` on every state change, ADR-005 D5.3): there an oracle that
+# wants the force that EXPIRED cannot take the oldest, which is the one that was ADDED. So the
+# default is the other way for every other event name, and `first` says either per step.
+#
+# What is left is the register: every `stopped` step that opts out of firstness, where a verdict can
+# still be handed on a later stop. That is a warning and not a failure — an opt-out can be right, if
+# it is a decision — but it is a number, so it can be counted and worked down like `missing_floor`'s
+# population (README § Which stop a step means).
+#
+# WHICH event of a name a step means is not stated here: `firstness.takes_first` (this directory) is
+# where the default is resolved, and the matcher reads the same function, so the gate cannot end up
+# reporting a population the runner does not have.
+
+
+def steps_over_a_stop(step: Dict[str, Json]) -> Optional[str]:
+    """The complaint on a `stopped` step the runner will step over earlier stops to satisfy.
+
+    A step that says nothing is NOT one of these: the default for `stopped` is the first stop, and
+    the whole point of the default is that the safe reading needs no typing down. Only an explicit
+    `"first": false` opens the matcher back up, so only that is reported — and a note saying why is
+    what separates a decision from an oversight. `takes_first` is what decides it, not a second
+    reading of the key.
+    """
+    if step.get("event") != FIRST_STOP_EVENT or takes_first(step):
+        return None
+    note = step.get("note")
+    told = isinstance(note, str) and bool(note.strip())
+    how = ("and its note says why" if told else
+           "and records no reason for stepping over the stops in between")
+    return (f"means a stop matching this, not the first stop ({how}): the runner walks past every "
+            f"earlier `stopped` on this stream until one matches, so a runtime that stops at the "
+            f"wrong line and then at the right one still passes. Drop `first: false` unless this "
+            f"step is about a later stop in a stream that really carries several "
+            f"(README § Which stop a step means).")
+
+
+def firstness_warnings(loaded: List[Tuple[Path, Json]]) -> List[str]:
+    """One warning per scenario that opts a `stopped` step out of firstness, naming every one.
+
+    The count of these warnings is the population that can still pass on a later stop. It is the
+    deliverable, the way `missing_floor`'s is: today it is the number of deliberate opt-outs, and it
+    only goes up when somebody writes one.
+    """
+    out: List[str] = []
+    for path, doc in loaded:
+        loose = [(where, step) for where, step in flat_steps_of(doc)
+                 if isinstance(step, dict) and steps_over_a_stop(step)]
+        if not loose:
+            continue
+        where = ", ".join(w for w, _ in loose)
+        out.append(
+            f"{path}: {len(loose)} `stopped` step(s) do not take the first stop ({where}): "
+            f"{loose[0][1] and steps_over_a_stop(loose[0][1])}"
+        )
+    return out
 
 
 def marker_lines(prog: Program, marker: str, programs: Dict[str, Program],
@@ -982,6 +1052,10 @@ def main(argv: List[str]) -> int:
         for prog in programs.values():
             problems.extend(f"{prog.directory}: unknown FC tag {t}" for t in sorted(prog.fc - known))
     warnings.extend(build_record_warnings(root, args.build_out.resolve()))
+    # The register of `stopped` steps that do not take the first stop: the population that can still
+    # be handed a verdict on a later stop. It goes with the rest of the warnings, so --strict is
+    # what turns it into a problem and an opt-out cannot be a quiet habit.
+    warnings.extend(firstness_warnings(loaded))
     coverage = args.coverage
     if coverage is None:
         default = root.parent / "harness" / COVERAGE_FILE

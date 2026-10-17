@@ -692,6 +692,102 @@ class TimingFloorTest(unittest.TestCase):
         self.assertTrue(any("below minimum 0" in e and "notBeforeMs" in e for e in found), found)
 
 
+class StopFirstnessTest(unittest.TestCase):
+    """`validate.py firstness_warnings`: the register of `stopped` steps that do not take the first
+    stop.
+
+    `stopped` is the one event name where order and cardinality ARE the claim: one halt, one event,
+    and A038 says a step landing on an armed breakpoint yields exactly one stop. So the step takes
+    the first `stopped` on its stream by default, and a runtime that stops at the wrong line three
+    times and then at the right one fails rather than passing. `first: false` is the opt-out, and
+    this is where the opt-outs are counted: a warning, because an opt-out can be right, but a
+    number, so it is not a place a verdict can quietly start passing again."""
+
+    ORACLE = "bp-before-statement.oracle.json"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        shutil.copytree(ROOT / "plant-io", self.tmp / "plant-io")
+        for extra in (self.tmp / "plant-io").glob("*.oracle.json"):
+            if extra.name != self.ORACLE:
+                extra.unlink()
+        self.path = self.tmp / "plant-io" / self.ORACLE
+        self.pristine = self.path.read_text()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def _opt_out(self, note: str = "") -> None:
+        doc = json.loads(self.pristine)
+        step = next(s for s in _steps(doc) if isinstance(s, dict) and s.get("event") == "stopped")
+        step["first"] = False
+        if note:
+            step["note"] = note
+        self.path.write_text(json.dumps(doc))
+
+    def _loaded(self) -> List[Tuple[Path, Doc]]:
+        return [(p, json.loads(p.read_text(encoding="utf-8")))
+                for p in sorted(ROOT.glob(f"*/{validate.ORACLE_GLOB}"))]
+
+    def test_a_stopped_step_that_says_nothing_takes_the_first_stop(self) -> None:
+        # The safe reading needs no typing down: a step with no `first` is already the first stop,
+        # so reporting it would be 237 warnings about the population that is doing the right thing.
+        self.assertIsNone(validate.steps_over_a_stop({"event": "stopped", "withinMs": 1000}))
+
+    def test_another_event_name_is_never_reported(self) -> None:
+        # `forces` is the case the loosening was written for: the force that expired is not the
+        # oldest, so the default there is a matching event and `first: false` is not an opt-out.
+        self.assertIsNone(validate.steps_over_a_stop({"event": "forces", "first": False}))
+        self.assertIsNone(validate.steps_over_a_stop({"event": "runState", "first": False}))
+
+    def test_an_opt_out_is_reported_and_says_what_it_costs(self) -> None:
+        complaint = validate.steps_over_a_stop({"event": "stopped", "first": False})
+        assert complaint is not None
+        self.assertIn("not the first stop", complaint)
+        self.assertIn("records no reason", complaint)
+        self.assertIn("stops at the wrong line", complaint)
+
+    def test_an_opt_out_with_a_note_is_reported_as_a_decision(self) -> None:
+        complaint = validate.steps_over_a_stop(
+            {"event": "stopped", "first": False, "note": "the loop body re-arms and re-hits"})
+        assert complaint is not None
+        self.assertIn("its note says why", complaint)
+        self.assertNotIn("records no reason", complaint)
+
+    def test_the_real_corpus_opts_no_stop_out_of_firstness(self) -> None:
+        self.assertEqual([w for w in validate.firstness_warnings(self._loaded()) if self.tmp.name in w],
+                         [])
+        self.assertEqual(validate.firstness_warnings(self._loaded()), [],
+                         "a `stopped` step that opts out is a decision; record why in a note")
+
+    def test_it_is_a_warning_and_not_a_failure(self) -> None:
+        # An opt-out may be right, so it must not make a corpus unvalidatable: the number is
+        # printed and --strict is what turns it into a problem.
+        self._opt_out()
+        code, out = run(self.tmp, ["--build-out", str(owned_build_out(self.tmp))])
+        self.assertEqual(code, 0, out)
+        self.assertIn("do not take the first stop", out)
+        self.assertIn("1 warning", out)
+
+    def test_strict_turns_it_into_a_problem(self) -> None:
+        self._opt_out()
+        code, out = run(self.tmp, ["--build-out", str(owned_build_out(self.tmp)), "--strict"])
+        self.assertEqual(code, 1, out)
+        self.assertIn("do not take the first stop", out)
+
+    def test_a_first_that_is_not_a_boolean_is_refused_by_the_schema(self) -> None:
+        # The shape ends where a JSON type ends: `"first": "yes"` is not a boolean, and a string
+        # that reads as true would be the loosest possible way to say it (the schema's answer, not
+        # firstness_warnings' -- which is about the value, and has no opinion on a typo).
+        doc = json.loads(self.pristine)
+        step = next(s for s in _steps(doc) if isinstance(s, dict) and s.get("event") == "stopped")
+        step["first"] = "yes"
+        self.path.write_text(json.dumps(doc))
+        code, out = run(self.tmp, ["--build-out", str(owned_build_out(self.tmp))])
+        self.assertEqual(code, 1, out)
+        self.assertIn("expected boolean", out)
+
+
 class ValidatorRedGreen(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())

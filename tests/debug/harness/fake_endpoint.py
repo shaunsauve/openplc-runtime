@@ -13,6 +13,8 @@ last complete scan (copy-out at scan end); virtual time is completed scans x int
 Seeded defects (FakeWorld(defects={...})):
   late_stop          pause and cycleStep take effect one scan late
   wrong_reason       a statement step reports reason "breakpoint"
+  stop_at_wrong_line_first  a `stopped` at the NEXT marked line is sent before the real one, so the
+                      stream holds two stops and only the second is the one the oracle asked for
   missing_continued  `continued` is never sent
   observer_controls  an observer's run-control request is obeyed
   events_to_first_only  events reach only the first client stream
@@ -41,6 +43,7 @@ TASK = "Main"
 DEFECTS = {
     "late_stop",
     "wrong_reason",
+    "stop_at_wrong_line_first",
     "missing_continued",
     "observer_controls",
     "events_to_first_only",
@@ -287,18 +290,24 @@ class FakeWorld:
         self.halted = reason
         self._set_state("PAUSED" if reason == "pause" else "HALTED_AT_BP")
         loc = self.loc[STATEMENTS[pc].marker]
-        self._emit(
-            "stopped",
-            {
-                "reason": reason,
-                "task": TASK,
-                "location": dict(loc),
-                "scan": self._scan_number(),
-                "vt": self.completed * self.interval,
-                "wall": self.t,
-                "haltPolicy": self.halt_policy,
-            },
-        )
+        body = {
+            "reason": reason,
+            "task": TASK,
+            "location": dict(loc),
+            "scan": self._scan_number(),
+            "vt": self.completed * self.interval,
+            "wall": self.t,
+            "haltPolicy": self.halt_policy,
+        }
+        if "stop_at_wrong_line_first" in self.defects:
+            # Stopping one line past the breakpoint, and saying so in a `stopped` that arrives
+            # FIRST: the stream then holds two stops, same reason and task, and only the second is
+            # the one the oracle asked about. A matcher that walks past every earlier event of the
+            # name that fails `expect` reads the second and hands this scenario a PASS, which is the
+            # whole defect `first` exists to close.
+            ahead = STATEMENTS[pc + 1 if pc + 1 < len(STATEMENTS) else pc - 1]
+            self._emit("stopped", {**body, "location": dict(self.loc[ahead.marker])})
+        self._emit("stopped", body)
 
     def _resume(self) -> None:
         self.halted = None

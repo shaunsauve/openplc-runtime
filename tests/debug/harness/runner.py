@@ -72,6 +72,14 @@ __all__ = [
 
 CORPUS = HERE.parent / "corpus"
 TEST_ID = "tests/debug/harness/runner.py"
+# The oracle format belongs to the corpus, and so does the one fact about it this file and the gate
+# must agree on: which event of a name a step means when it says nothing. It is resolved THERE, in
+# one place (`firstness.takes_first`), because the runner once carried its own idea of it -- and a
+# default stated twice is how `first` became a field that was documented, validated and never read.
+sys.path.insert(0, str(CORPUS))
+
+import firstness  # noqa: E402
+
 POLL_MS = 5.0
 DEFAULT_WITHIN_MS = 5000.0
 MARKER = re.compile(r"^@[A-Za-z0-9_]+$")
@@ -440,42 +448,56 @@ class _Run:
             observed: JsonObj = body if success else {**error, **body}
             self._check(expect["body"], _fold_identifiers(expect["body"], observed), f"{where}.body")
 
-    def _next_event(self, client: str, name: str, expect: JsonObj,
-                    deadline: float) -> Tuple[Optional[JsonObj], Optional[Diverge], float]:
-        """The next event of `name` that satisfies `expect`, with the first one that does not as
-        the fallback, and the instant it was observed.
+    def _next_event(self, client: str, name: str, expect: JsonObj, deadline: float, first: bool,
+                    ) -> Tuple[Optional[JsonObj], Optional[Diverge], float]:
+        """The event of `name` this step means, with the first one that does not match as the
+        fallback, and the instant it was observed.
 
-        An oracle says "an event like this arrives within N ms", so an earlier event of the same
-        name that does not match is not a divergence — it is not the one being waited for. A
+        `first` says which event of the name the step means, and `firstness.takes_first` is where a
+        step's own `first` key (or its absence) is resolved -- it is the oracle format's default, not
+        this file's.
+
+        With `first` the answer is the FIRST event of that name the stream still holds, and nothing
+        earlier of that name is stepped over. That is the default for `stopped`, where one halt means
+        one event and A038's claim that a step landing on an armed breakpoint yields exactly one stop
+        is a claim about order and cardinality: a runtime that stops at the wrong line and then at the
+        right one fails here instead of being handed a verdict on the stop it got right last. An
+        earlier stop that does not match is the answer, so the failure says what actually arrived.
+
+        Without `first` the answer is the first event of the name that satisfies `expect`, walking
+        past earlier ones that do not: an oracle says "an event like this arrives within N ms", and a
         stream that emits `forces` on every change (ADR-005 D5.3) and `runState` on every state
-        change queues several before any step reads them, and taking the oldest made A116 read
-        the force that was *added* where it meant the one that *expired*. The check is not
-        weakened: a stream with no matching event still fails, and with none at all the earliest
+        change queues several before any step reads them, so taking the oldest made A116 read the
+        force that was *added* where it meant the one that *expired*. The check is not weakened
+        either way: a stream with no matching event still fails, and with none at all the earliest
         one is returned so the failure says what actually arrived.
         """
         stream = self._stream(client)
-        first: Optional[JsonObj] = None
-        first_at = 0.0
-        first_problem: Optional[Diverge] = None
+        earliest: Optional[JsonObj] = None
+        earliest_at = 0.0
+        earliest_problem: Optional[Diverge] = None
         while True:
             self._drain()
             for i, (_, ev, at) in enumerate(stream.inbox):
                 if ev.get("event") != name:
                     continue
-                if first is None:
-                    first, first_at = ev, at
-                    if not expect:
-                        return first, None, at
+                if earliest is None:
+                    earliest, earliest_at = ev, at
+                if not expect:
+                    del stream.inbox[i]
+                    return earliest, None, at
                 del stream.inbox[i]
                 try:
                     self._check_event(client, name, expect, _obj(ev.get("body")))
                     return ev, None, at
                 except Diverge as exc:
-                    if first_problem is None:
-                        first_problem = exc
+                    if earliest_problem is None:
+                        earliest_problem = exc
+                    if first:
+                        return ev, exc, at
             if self.clock.now_ms() >= deadline:
-                if first is not None:
-                    return first, first_problem, first_at
+                if earliest is not None:
+                    return earliest, earliest_problem, earliest_at
                 return None, None, 0.0
             self.clock.sleep_ms(POLL_MS)
 
@@ -492,13 +514,16 @@ class _Run:
         count = step.get("count")
         expect = _obj(step.get("expect"))
         repeat = int(_num(step.get("repeat"), 1))
+        # Which event of the name this step means, resolved in one place with the gate: a step that
+        # says nothing takes the first `stopped` and a matching event of every other name.
+        take_first = firstness.takes_first(step)
         for r in range(repeat):
             rep = f" (repetition {r + 1})" if repeat > 1 else ""
             deadline = self.clock.now_ms() + within
             received = 0
             for client in clients:
                 on = "" if client == MAIN else f" on {client}"
-                ev, problem, at = self._next_event(client, name, expect, deadline)
+                ev, problem, at = self._next_event(client, name, expect, deadline, take_first)
                 try:
                     if ev is None:
                         raise Diverge(f"no '{name}' event{on} within {within:g} ms{rep}")

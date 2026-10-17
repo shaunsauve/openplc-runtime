@@ -390,6 +390,10 @@
         "expect": {
           "$ref": "#/$defs/eventExpect"
         },
+        "first": {
+          "type": "boolean",
+          "description": "Which event of that name this step means. true: the FIRST event of that name the stream still holds -- nothing earlier is stepped over, so a stop at the wrong line is a divergence and not something the harness walks past. false: any event of that name that matches, with earlier non-matching ones of the same name walked past to the deadline (a stream that pushes on every change, `forces` on every force and `runState` on every state change, queues several). Omitted, the default is true for `stopped` -- one halt, one event, and A038's claim that a step landing on an armed breakpoint yields exactly one stop is a claim about order and cardinality -- and false for every other event name. A `stopped` step that says false is the only place the matcher may still hand a verdict on a later stop, so it owes a note saying why (validate.py firstness_warnings)."
+        },
         "note": {
           "type": "string"
         },

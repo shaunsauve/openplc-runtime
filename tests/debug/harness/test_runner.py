@@ -53,6 +53,7 @@ DEFECTS: List[Tuple[str, str, int, str]] = [
     ("late_stop", "plant-io/cycle-step", 7, "witness.Main"),
     ("late_stop", "plant-io/pause-resume-stop", 3, "within 600"),
     ("wrong_reason", "plant-io/bp-before-statement", 6, "reason"),
+    ("stop_at_wrong_line_first", "plant-io/bp-before-statement", 3, "stopped.location.line"),
     ("missing_continued", "plant-io/pause-resume-stop", 9, "continued"),
     ("zero_in_halt_samples", "plant-io/halt-holds-outputs", 8, "plant@"),
 ]
@@ -730,9 +731,16 @@ class _ScriptedPlant:
 
 
 class EventStreamTest(unittest.TestCase):
-    """`_next_event`: an event the oracle did not ask for is not a divergence, and a stream that
-    never sends the one it asked for still fails. Nothing tested this, which is how two loosening
-    commits and a fold that erased every bound landed in a row."""
+    """`_next_event`: an event the oracle did not ask for is not a divergence (where the step
+    means a matching event), and a stream that never sends the one it asked for still fails.
+    Nothing tested this, which is how two loosening commits and a fold that erased every bound
+    landed in a row.
+
+    Every call here states which reading the row is about, because `first` is no longer a default
+    inside the runner: `_step_event` resolves a step's reading with `firstness.takes_first` and
+    passes it down. `False` is the reading for every name except `stopped` (StopFirstnessTest
+    covers the other one), and these rows are about a stream that queues several events of a name.
+    """
 
     @staticmethod
     def _run(events: List[dict]):
@@ -762,7 +770,7 @@ class EventStreamTest(unittest.TestCase):
             _event("forces", {"list": [{"name": "PW", "state": "expired"}]}),
         ])
         got, problem, _at = run._next_event(
-            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 500.0
+            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 500.0, False
         )
         self.assertIsNone(problem)
         self.assertEqual(got["body"], {"list": [{"name": "PW", "state": "expired"}]})
@@ -772,7 +780,9 @@ class EventStreamTest(unittest.TestCase):
         stream = run._stream("main")
         run._drain()
         self.assertEqual([e["event"] for _, e, _at in stream.inbox], ["log", "stopped"])
-        got, problem, _at = run._next_event("main", "stopped", {"reason": "breakpoint"}, 500.0)
+        got, problem, _at = run._next_event(
+            "main", "stopped", {"reason": "breakpoint"}, 500.0, True
+        )
         self.assertIsNone(problem)
         self.assertEqual(got["body"], {"reason": "breakpoint"})
         self.assertEqual([e["event"] for _, e, _at in stream.inbox], ["log"])
@@ -782,7 +792,7 @@ class EventStreamTest(unittest.TestCase):
         # back with its own problem so the verdict names what actually arrived.
         run = self._run([_event("forces", {"list": [{"name": "PW", "state": "added"}]})])
         got, problem, _at = run._next_event(
-            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 50.0
+            "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 50.0, False
         )
         self.assertEqual(got["body"], {"list": [{"name": "PW", "state": "added"}]})
         assert problem is not None
@@ -804,7 +814,7 @@ class EventStreamTest(unittest.TestCase):
 
     def test_an_event_step_with_no_expectation_takes_the_first_that_arrives(self) -> None:
         run = self._run([_event("heartbeat", {"n": 1})])
-        got, problem, _at = run._next_event("main", "heartbeat", {}, 500.0)
+        got, problem, _at = run._next_event("main", "heartbeat", {}, 500.0, False)
         self.assertIsNone(problem)
         self.assertEqual(got["body"], {"n": 1})
 
@@ -819,6 +829,174 @@ class EventStreamTest(unittest.TestCase):
             run._step_event({"event": "log", "count": 1, "withinMs": 50,
                              "expect": {"body": {"line": "wanted"}}})
         self.assertIn("log.count", caught.exception.reason)
+
+
+def _corpus_step(scenario: str, event: str) -> dict:
+    """The real event step of that name, straight out of the corpus file, unmodified.
+
+    Reading a default off a hand-written step proves the default, not the corpus: the row has to run
+    the step the corpus actually ships, or what it guards is the test's own spelling.
+    """
+    doc = json.loads(_oracle(scenario).read_text())
+    for step in doc["steps"]:
+        if isinstance(step, dict) and step.get("event") == event:
+            return step
+    raise AssertionError(f"{scenario} has no {event!r} step")
+
+
+class StopFirstnessTest(unittest.TestCase):
+    """Which event of that name a step means (`oracle.schema.json` § first, `corpus/firstness.py`).
+
+    `stopped` is the one name whose order and cardinality ARE the claim: one halt, one event, and
+    A038 says a step landing on an armed breakpoint yields EXACTLY ONE stop. So a `stopped` step
+    that says nothing means the first stop the stream still holds, and a runtime that stops at the
+    wrong line three times and then at the right one fails instead of passing. Every other name
+    pushes on every change (`forces` per force, `runState` per state change, ADR-005 D5.3) and
+    keeps the loosening, because there the event an oracle wants is not the oldest one.
+
+    The corpus's own steps are fed in unmodified, so each half is measured on what ships.
+    """
+
+    @staticmethod
+    def _stops(lines: List[int]) -> List[dict]:
+        return [_event("stopped", {"reason": "breakpoint",
+                                   "location": {"file": "program.st", "line": n}})
+                for n in lines]
+
+    @staticmethod
+    def _run(events: List[dict]):
+        return StopFirstnessTest._run_on(events, lambda evs, _clock: _ScriptedEndpoint(evs))
+
+    @staticmethod
+    def _run_on(events: List[dict], make_endpoint):
+        run = object.__new__(runner._Run)
+        run.doc = {}
+        run.corpus = "plant-io"
+        run.table = {}
+        run.clock = _VirtualClock()  # type: ignore[assignment]
+        run.endpoint = make_endpoint(events, run.clock)  # type: ignore[assignment]
+        run.plant = runner.UnavailablePlant()  # type: ignore[assignment]
+        run.build = runner.UnavailableBuild()  # type: ignore[assignment]
+        run.setup = {}
+        run.captures = {}
+        run.streams = {}
+        run.arrivals = 0
+        run.last_witness = None
+        run.last_plant_ms = 0.0
+        run.last_vt = None
+        run.step_end_ms = 0.0
+        return run
+
+    # -- the hole closing
+
+    def test_a_stopped_step_that_says_nothing_takes_the_first_stop(self) -> None:
+        # The one this goal is about: the stream holds a stop at 3 and then the one the step asked
+        # for at 2. Walking to the second one hands a PASS to a runtime that stopped at the wrong
+        # line, which is what every one of the corpus's first-stop steps was willing to accept.
+        run = self._run(self._stops([3, 2]))
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "stopped", "withinMs": 500,
+                             "expect": {"reason": "breakpoint",
+                                        "location": {"file": "program.st", "line": 2}}})
+        self.assertIn("stopped.location.line", caught.exception.reason)
+        self.assertIn('observed 3', caught.exception.reason)
+
+    def test_the_first_stop_is_consumed_even_when_it_is_the_one_asked_for(self) -> None:
+        # And the other way round, or "take the first" would be a rule with no working case: the
+        # first stop matches and is read, and the SECOND is left there for the next step to mean.
+        run = self._run(self._stops([2, 3]))
+        run._step_event({"event": "stopped", "withinMs": 500,
+                         "expect": {"reason": "breakpoint",
+                                    "location": {"file": "program.st", "line": 2}}})
+        run._step_event({"event": "stopped", "withinMs": 50,
+                         "expect": {"reason": "breakpoint",
+                                    "location": {"file": "program.st", "line": 3}}})
+        stream = run._stream("main")
+        self.assertEqual([e["body"]["location"]["line"] for _, e, _a in stream.inbox], [])
+
+    def test_an_expectless_step_consumes_the_event_it_read(self) -> None:
+        # 17 steps in the corpus name an event and no expectation ("a `continued` arrives within
+        # 500 ms"), and `nested-fb-loop/control-responses` has two of them in a row. The second must
+        # not be satisfied by the FIRST's event: it is about the next one. Reading an event without
+        # consuming it left it in the stream for whoever asked next, which is the same hole as
+        # walking past stops, one step smaller.
+        run = self._run([_event("continued", {"task": "all"})])
+        run._step_event({"event": "continued", "withinMs": 50})
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "continued", "withinMs": 50})
+        self.assertIn("no 'continued' event within 50 ms", caught.exception.reason)
+
+    def test_a_stopped_step_that_says_false_reads_the_later_stop(self) -> None:
+        # The opt-out, and it is the ONLY way back to the loose reading: `validate.py
+        # firstness_warnings` counts every one of these, so the surface is a number, not a habit.
+        run = self._run(self._stops([3, 2]))
+        detail = run._step_event({"event": "stopped", "first": False, "withinMs": 500,
+                                  "expect": {"reason": "breakpoint",
+                                             "location": {"file": "program.st", "line": 2}}})
+        self.assertIn("stopped", detail)
+
+    def test_the_gate_and_the_runner_read_the_same_default(self) -> None:
+        # A default stated twice is how `first` became a field that was documented, validated and
+        # never read: the runner had its own idea of what an event step meant. One resolver, and
+        # both sides hold the same object.
+        import firstness  # noqa: PLC0415 - the corpus module the runner and the gate both import
+
+        self.assertIs(runner.firstness, firstness)
+        self.assertIs(runner.firstness.takes_first, validate.takes_first)
+        self.assertIs(validate.takes_first, firstness.takes_first)
+        for step, want in [
+            ({"event": "stopped"}, True),   # the default: one halt, one stop
+            ({"event": "stopped", "first": True}, True),
+            ({"event": "stopped", "first": False}, False),
+            ({"event": "forces"}, False),   # the loosening, kept: a stream that pushes
+            ({"event": "runState"}, False),
+            ({"event": "forces", "first": True}, True),
+            ({"event": "stopped", "first": "yes"}, True),  # a typo the schema refuses is not a mode
+        ]:
+            with self.subTest(step=step):
+                self.assertIs(firstness.takes_first(step), want)
+
+    # -- the loosening that must keep working, on the corpus's own steps
+
+    def test_a_run_state_step_that_says_nothing_still_reads_the_state_it_names(self) -> None:
+        # A047, unmodified: ADR-005 D5.3 pushes a `runState` on every state change, so the watcher's
+        # stream holds the states that came before the one this step is about.
+        # `run-state-visibility` steps[4] reads PAUSED off a stream carrying RUNNING and HALTED_AT_BP.
+        step = _corpus_step("plant-io/run-state-visibility", "runState")
+        self.assertNotIn("first", step, "the step under test must exercise the DEFAULT")
+        self.assertEqual(step["client"], "watcher")
+        run = self._run([
+            _event("runState", {"state": "RUNNING", "tasks": ["Main"]}),
+            _event("runState", {"state": "HALTED_AT_BP", "tasks": ["Main"]}),
+            _event("runState", {"state": "PAUSED", "tasks": ["Main"]}),
+        ])
+        self.assertIn("runState", run._step_event(dict(step)))
+
+    def test_the_force_that_expired_is_still_the_one_a116_reads(self) -> None:
+        # A116, unmodified: a force emits a `forces` event, so the one that was ADDED is queued
+        # before the one that EXPIRED. `force-ttl` steps[13] waits for the list to empty, and a
+        # runner that took the oldest would read the force before it had expired.
+        step = _corpus_step("plant-io/force-ttl", "forces")
+        self.assertNotIn("first", step, "the step under test must exercise the DEFAULT")
+        # The step carries notBeforeMs 9000 (the 10 s TTL less the 1 s the stopped step may take), so
+        # the two `forces` are released on the clock: the force that was ADDED at 200 ms, and the one
+        # that EXPIRED at 9500 ms. Reading the first would fail the floor and reading the oldest
+        # would fail the emptiness; only the second event is this step's event.
+        run = self._run_on([
+            _at(200, "forces", {"list": [{"name": "out_dint", "value": 2222}]}),
+            _at(9500, "forces", {"list": []}),
+        ], _TimedEndpoint)
+        self.assertIn("forces", run._step_event(dict(step)))
+
+    def test_the_opt_out_is_the_one_the_gate_names(self) -> None:
+        # The two halves of the mechanism agree on what an opt-out IS: what the runner walks past is
+        # exactly what the gate's register reports. A step in one list and not the other is a default
+        # stated twice.
+        loose = {"event": "stopped", "first": False, "withinMs": 1000}
+        run = self._run(self._stops([3, 2]))
+        run._step_event(dict(loose, expect={"location": {"file": "program.st", "line": 2}}))
+        self.assertIn("not the first stop", validate.steps_over_a_stop(loose))
+        self.assertIsNone(validate.steps_over_a_stop({"event": "stopped", "withinMs": 1000}))
 
 
 class TimingBoundTest(unittest.TestCase):
