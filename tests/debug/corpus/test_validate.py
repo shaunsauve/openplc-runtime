@@ -151,6 +151,24 @@ def run(root: Path, argv: List[str] = ()) -> Tuple[int, str]:
     return code, buf.getvalue()
 
 
+def owned_build_out(tmp: Path) -> Path:
+    """A `--build-out` inside `tmp`, holding no build record.
+
+    `validate.py`'s default is the repository's own `build/debug-corpus`, read for the per-program
+    `build-record.txt`, and each record names the STruCpp revision it was measured on -- so the
+    default makes any test that asserts on the *absence* of a warning a statement about whichever
+    compiler checkout is sitting next to this one. Three tests here did exactly that and went red
+    the next time that repo was committed, on a tree whose corpus sources had not changed at all.
+
+    An empty directory is a build-out that records nothing, so there is no revision to have moved:
+    the verdict rests on this test's own fixture. `BuildRecordTest` is where the records are the
+    subject, and it seeds them itself.
+    """
+    out = tmp / "build" / "debug-corpus"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 CLAIMS = "openplc-runtime:tests/debug/corpus/plant-io/bp-before-statement.oracle.json"
 
 # One ACCEPTANCE.md block per criterion the program header cites, as the real file has. The
@@ -206,12 +224,16 @@ class JoinTest(unittest.TestCase):
             if extra.name != ORACLE:
                 extra.unlink()
         self.oracle = self.tmp / "plant-io" / ORACLE  # claims A034, A031
+        self.out = owned_build_out(self.tmp)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
 
+    def _run(self, *argv: str) -> Tuple[int, str]:
+        return run(self.tmp, [*argv, "--build-out", str(self.out)])
+
     def _run_with(self, **tests: str) -> Tuple[int, str]:
-        return run(self.tmp, ["--acceptance", str(acceptance(self.tmp, **tests))])
+        return self._run("--acceptance", str(acceptance(self.tmp, **tests)))
 
     def test_a_claim_the_acceptance_names_is_not_reported(self) -> None:
         code, out = self._run_with()
@@ -239,23 +261,23 @@ class JoinTest(unittest.TestCase):
     def test_a_claim_no_criterion_block_names_at_all_is_reported(self) -> None:
         # Defensive branch: `--acceptance` already refuses a header criterion nothing cites, so this
         # can only be reached with a document that is not the real one. It still has to say so.
-        _, out = run(self.tmp, ["--acceptance", str(acceptance(self.tmp, **{"A031": None}))])
+        _, out = self._run("--acceptance", str(acceptance(self.tmp, **{"A031": None})))
         self.assertIn("claims A031", out)
 
     def test_strict_turns_every_warning_into_a_problem(self) -> None:
         code, out = self._run_with(A031="—")
         self.assertEqual(code, 0, out)
-        code, out = run(self.tmp, ["--acceptance", str(acceptance(self.tmp, A031="—")), "--strict"])
+        code, out = self._run("--acceptance", str(acceptance(self.tmp, A031="—")), "--strict")
         self.assertEqual(code, 1, out)
         self.assertIn("claims A031", out)
         self.assertIn("FAIL: 1 programs, 1 scenarios, 1 problems", out)
         # One switch, both directions: A033 names this scenario but the scenario does not cite it.
         doc = acceptance(self.tmp, A033=CLAIMS)
-        code, out = run(self.tmp, ["--acceptance", str(doc), "--strict"])
+        code, out = self._run("--acceptance", str(doc), "--strict")
         self.assertEqual(code, 1, out)
         self.assertIn("A033's Test: names plant-io/bp-before-statement, which does not cite it", out)
         # And --strict with nothing to join against is still green.
-        code, out = run(self.tmp, ["--strict"])
+        code, out = self._run("--strict")
         self.assertEqual(code, 0, out)
 
     def test_a_test_naming_a_scenario_that_does_not_exist_is_reported(self) -> None:
@@ -288,6 +310,16 @@ class BuildRecordTest(unittest.TestCase):
         self.out = self.tmp / "build" / "debug-corpus"
         (self.out / "plant-io").mkdir(parents=True)
         self._record(("plant-io/program.st",))
+        # These records name a compiler revision, so every one of these tests asks whether that
+        # revision is still the one in reach -- and `STRUCPP` (the variable `build_all.sh` reads) or
+        # a sibling checkout is what `validate.py` reaches for. Pinned to a directory that is not a
+        # checkout, the only tests in this class that can compare do it deliberately, against the
+        # checkout they build themselves; the rest assert on the record alone. Left ambient, a
+        # developer who exports STRUCPP gets a red that says nothing about the record.
+        pinned = unittest.mock.patch.dict(
+            os.environ, {"STRUCPP": str(self.tmp / "no-compiler-here")})
+        pinned.start()
+        self.addCleanup(pinned.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
@@ -398,6 +430,7 @@ class CoverageIndexTest(unittest.TestCase):
             if extra.name != ORACLE:
                 extra.unlink()
         self.path = self.tmp / "harness" / "coverage.txt"
+        self.out = owned_build_out(self.tmp)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp)
@@ -409,7 +442,8 @@ class CoverageIndexTest(unittest.TestCase):
     def _run(self, *argv: str) -> Tuple[int, str]:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = validate.main(["--root", str(self.root), *argv])
+            code = validate.main(["--root", str(self.root), *argv,
+                                  "--build-out", str(self.out)])
         return code, buf.getvalue()
 
     def test_a_block_that_matches_the_oracles_is_green(self) -> None:
