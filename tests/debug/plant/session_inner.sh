@@ -94,12 +94,14 @@ PY
       core/src/plc_app/debug_force.cpp
     grep -q 'if (false && f.expires_ms' core/src/plc_app/debug_force.cpp \
       || { echo "SEED forcettl not applied"; exit 1; } ;;
-  safestop-early)  # A057/A177 red-proof: the P2 timer fires at a tenth of P2, so a lost controller
-    # safe-stops seconds early. The ceiling in every A057 assertion (P2 + 1 s) is still met, so
-    # this is the defect only a floor can see.
-    sed -i 's/        if (now - s.second.last_beat_ns > s.second.p2_ns) lost.push_back(s.first);/        if (now - s.second.last_beat_ns > s.second.p2_ns \/ 10) lost.push_back(s.first);/' \
+  safestop-early)  # A057/A177 red-proof: the P2 timer fires at a tenth of P2 for the CONTROLLER,
+    # so a lost controller safe-stops seconds early. The ceiling in every A057 assertion (P2 + 1 s)
+    # is still met, so this is the defect only a floor can see. Scoped to the controller on purpose:
+    # shrinking every session's timer also expires the observer that has to watch the safe-stop, and
+    # the scenario then fails on a missing event instead of on the floor.
+    sed -i 's/        if (now - s.second.last_beat_ns > s.second.p2_ns) lost.push_back(s.first);/        if (now - s.second.last_beat_ns > (s.second.controller ? s.second.p2_ns \/ 10 : s.second.p2_ns)) lost.push_back(s.first);/' \
       core/src/plc_app/debug_link.cpp
-    grep -q 'last_beat_ns > s.second.p2_ns / 10' core/src/plc_app/debug_link.cpp \
+    grep -q 's.second.controller ? s.second.p2_ns / 10' core/src/plc_app/debug_link.cpp \
       || { echo "SEED safestop-early not applied"; exit 1; } ;;
   forceallowner)  # A188 red-proof: cancel-all clears only the caller's own forces
     python3 - <<'PY' || { echo "SEED forceallowner not applied"; exit 1; }
