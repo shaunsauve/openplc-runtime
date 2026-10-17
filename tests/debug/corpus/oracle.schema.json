@@ -378,6 +378,11 @@
           "type": "number",
           "minimum": 0
         },
+        "notBeforeMs": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The matching event must not arrive earlier than this many ms after the step before this one finished. ONLY for a 'must not fire early' claim (a safe-stop before P2 elapses, a force that expires before its TTL, a heartbeat timeout that must not precede P2): the interval is one the runtime waits out, so contention and load can only lengthen it and never shorten it, and that is what makes a floor safe to assert here. NOT for a responsiveness claim ('stops within 1 s of continue'), where the same contention lengthens the interval and a floor is a false failure on a slow host. The instant is the harness's poll clock at one poll granularity (POLL_MS), which every wait loop drains to keep. With `withinMs` this makes the bound two-sided."
+        },
         "count": {
           "$ref": "#/$defs/match",
           "description": "number of the step's client streams that receive a matching event; absent means every one must"
@@ -671,6 +676,14 @@
           "additionalProperties": {
             "$ref": "#/$defs/match"
           }
+        },
+        "sinceVtMs": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/match"
+          },
+          "description": "per task: how much PLC virtual time the task gained since the previous plant observation (the scenario's opening plant read for the first one). PLC-time claims only -- 'the virtual clock advanced by N', 'the halt cost N of virtual time'. Virtual time is the PLC's own clock (ADR-004 D4), so the delta is exact whatever the wall clock and the host's load did, which is why it is safe to assert two-sided. A task the plant has reported for neither reading is absent, not zero."
         },
         "outputs": {
           "$ref": "#/$defs/varMatches"

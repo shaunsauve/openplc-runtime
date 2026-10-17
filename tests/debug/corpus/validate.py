@@ -476,7 +476,7 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
                 if isinstance(task, str) and tasks and task not in tasks:
                     out.append(f"{where}: task {task!r} is not a task of {prog.name}")
         expect = step.get("expect") if isinstance(step, dict) and "observe" in step else None
-        for key in ("witness", "scanDelta", "vtMs", "maxGapMs"):
+        for key in ("witness", "scanDelta", "vtMs", "maxGapMs", "sinceVtMs"):
             per_task = expect.get(key) if isinstance(expect, dict) else None
             if isinstance(per_task, dict) and tasks:
                 out.extend(f"{here}.expect.{key}: task {t!r} is not a task of {prog.name}" for t in per_task if t not in tasks)

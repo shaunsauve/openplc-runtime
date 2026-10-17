@@ -200,10 +200,16 @@ def _flat(steps: Json) -> Iterator[JsonObj]:
 
 @dataclass
 class _Stream:
-    """One client stream and the events it received but no step has consumed yet."""
+    """One client stream and the events it received but no step has consumed yet.
+
+    Each entry is (arrival sequence, event, observed at ms). The instant is the harness's poll
+    clock, not the runtime's: `notBeforeMs` reads it, and every loop that can outlast an event's
+    arrival (a wait, a scan count, a noEvent window) drains, so the stamp is within one poll of
+    the arrival it stands for.
+    """
 
     session: Session
-    inbox: List[Tuple[int, JsonObj]] = field(default_factory=list)
+    inbox: List[Tuple[int, JsonObj, float]] = field(default_factory=list)
 
 
 class _Run:
@@ -229,6 +235,10 @@ class _Run:
         self.arrivals = 0
         self.last_witness: Optional[Dict[str, int]] = None
         self.last_plant_ms = clock.now_ms()  # `throughout` and `maxGapMs` window start
+        # `sinceVtMs` window start: the same instant as `last_witness`, so both windows agree.
+        self.last_vt: Optional[Dict[str, float]] = None
+        # `notBeforeMs` baseline: when the step before this one finished (see _step_event).
+        self.step_end_ms = clock.now_ms()
 
     # -- plumbing
 
@@ -255,10 +265,11 @@ class _Run:
         return names
 
     def _drain(self) -> None:
+        now = self.clock.now_ms()
         for stream in self.streams.values():
             for ev in stream.session.events():
                 self.arrivals += 1
-                stream.inbox.append((self.arrivals, ev))
+                stream.inbox.append((self.arrivals, ev, now))
 
     def _request(self, client: str, command: str, args: JsonObj) -> JsonObj:
         resp = self._stream(client).session.request(command, args)
@@ -336,8 +347,11 @@ class _Run:
         if inputs:
             self.plant.set_inputs(inputs)
         if self._uses_plant():
-            self.last_witness = dict(self._sample().witness)
+            opening = self._sample()
+            self.last_witness = dict(opening.witness)
+            self.last_vt = dict(opening.vt_ms)
         self.last_plant_ms = self.clock.now_ms()
+        self.step_end_ms = self.clock.now_ms()
         deployed = []
         if self.setup.get("startHalted") is True:
             deployed.append("verified setup.startHalted (every task held, no scan run)")
@@ -371,6 +385,9 @@ class _Run:
             raise Blocked(f"step has no known action ({sorted(step)})")
         detail = handler(step)
         self._drain()
+        # The `notBeforeMs` baseline is the end of the step before this one, so it is stamped after
+        # the handler and the drain: everything this step caused has been read by now.
+        self.step_end_ms = self.clock.now_ms()
         return detail
 
     def _step_loop(self, step: JsonObj) -> str:
@@ -424,9 +441,9 @@ class _Run:
             self._check(expect["body"], _fold_identifiers(expect["body"], observed), f"{where}.body")
 
     def _next_event(self, client: str, name: str, expect: JsonObj,
-                    deadline: float) -> Tuple[Optional[JsonObj], Optional[Diverge]]:
+                    deadline: float) -> Tuple[Optional[JsonObj], Optional[Diverge], float]:
         """The next event of `name` that satisfies `expect`, with the first one that does not as
-        the fallback.
+        the fallback, and the instant it was observed.
 
         An oracle says "an event like this arrives within N ms", so an earlier event of the same
         name that does not match is not a divergence — it is not the one being waited for. A
@@ -438,32 +455,39 @@ class _Run:
         """
         stream = self._stream(client)
         first: Optional[JsonObj] = None
+        first_at = 0.0
         first_problem: Optional[Diverge] = None
         while True:
             self._drain()
-            for i, (_, ev) in enumerate(stream.inbox):
+            for i, (_, ev, at) in enumerate(stream.inbox):
                 if ev.get("event") != name:
                     continue
                 if first is None:
-                    first = ev
+                    first, first_at = ev, at
                     if not expect:
-                        return first, None
+                        return first, None, at
                 del stream.inbox[i]
                 try:
                     self._check_event(client, name, expect, _obj(ev.get("body")))
-                    return ev, None
+                    return ev, None, at
                 except Diverge as exc:
                     if first_problem is None:
                         first_problem = exc
             if self.clock.now_ms() >= deadline:
                 if first is not None:
-                    return first, first_problem
-                return None, None
+                    return first, first_problem, first_at
+                return None, None, 0.0
             self.clock.sleep_ms(POLL_MS)
 
     def _step_event(self, step: JsonObj) -> str:
         name = str(step["event"])
         within = _num(step.get("withinMs"), DEFAULT_WITHIN_MS)
+        # The only second half of a timing bound the corpus may use it for, and the restriction
+        # is what makes it safe: a lower bound on a *must not fire early* claim, whose interval
+        # contention can only lengthen. On a responsiveness claim ("stops within 1 s of continue")
+        # a slow machine lengthens the interval too, and there a floor is a false failure waiting
+        # to happen, so this key has no meaning there. README § Timing bounds.
+        not_before = _num(step.get("notBeforeMs"), -1.0)
         clients = self._clients(step)
         count = step.get("count")
         expect = _obj(step.get("expect"))
@@ -474,13 +498,15 @@ class _Run:
             received = 0
             for client in clients:
                 on = "" if client == MAIN else f" on {client}"
-                ev, problem = self._next_event(client, name, expect, deadline)
+                ev, problem, at = self._next_event(client, name, expect, deadline)
                 try:
                     if ev is None:
                         raise Diverge(f"no '{name}' event{on} within {within:g} ms{rep}")
                     if problem is not None:
                         raise problem
                     self._check_event(client, name, expect, _obj(ev.get("body")))
+                    if not_before >= 0.0:
+                        self._check_floor(name, at - self.step_end_ms, not_before, on, rep)
                 except Diverge:
                     if count is None:
                         raise
@@ -491,7 +517,17 @@ class _Run:
             if step.get("thenContinue") is True:
                 self._request(clients[0], "continue", {})
         who = "" if clients == [MAIN] else f" on {len(clients)} clients"
-        return (f"{name} x{repeat}" if repeat > 1 else name) + who
+        return (f"{name} x{repeat}" if repeat > 1 else name) + who + (
+            f" not before {not_before:g} ms" if not_before >= 0.0 else ""
+        )
+
+    def _check_floor(self, name: str, delta: float, floor: float, on: str, rep: str) -> None:
+        if delta >= floor:
+            return
+        raise Diverge(
+            f"'{name}' event{on} arrived {delta:.0f} ms after the step before it, "
+            f"so it fired early: notBeforeMs {floor:g} ms{rep}"
+        )
 
     def _check_event(self, client: str, name: str, expect: JsonObj, body: JsonObj) -> None:
         where = name if client == MAIN else f"{client}:{name}"
@@ -585,7 +621,7 @@ class _Run:
         def forbid() -> None:
             self._drain()
             for client in clients:
-                for seq, ev in self._stream(client).inbox:
+                for seq, ev, _at in self._stream(client).inbox:
                     if seq > start and ev.get("event") == name:
                         raise Diverge(
                             f"forbidden '{name}' event arrived on {client}: "
@@ -601,7 +637,7 @@ class _Run:
         deadline = self.clock.now_ms() + _num(step.get("forMs"), 0.0)
         while self.clock.now_ms() < deadline:
             forbid()
-            self.clock.sleep_ms(min(POLL_MS * 20, deadline - self.clock.now_ms()))
+            self._sleep(min(POLL_MS * 20, deadline - self.clock.now_ms()))
         forbid()
         return f"no {name} for {step.get('forMs')} ms"
 
@@ -617,6 +653,7 @@ class _Run:
             advanced = max((now.get(t, 0) - base.get(t, 0) for t in tasks), default=0)
             if tick is not None:
                 tick()
+            self._drain()  # an event that arrives during the wait is stamped when it arrives
             if advanced >= n:
                 return
             if self.clock.now_ms() >= deadline:
@@ -626,7 +663,7 @@ class _Run:
     def _step_wait(self, step: JsonObj) -> str:
         wait = _obj(step["wait"])
         if "wallMs" in wait:
-            self.clock.sleep_ms(_num(wait["wallMs"], 0.0))
+            self._sleep(_num(wait["wallMs"], 0.0))
         elif "scans" in wait:
             self._wait_scans(int(_num(wait["scans"], 1)), None)
         elif "vtMs" in wait:
@@ -639,8 +676,24 @@ class _Run:
             ):
                 if self.clock.now_ms() >= deadline:
                     raise Diverge(f"plant virtual time did not advance {target:g} ms")
-                self.clock.sleep_ms(POLL_MS * 2)
+                self._sleep(POLL_MS * 2)
         return json.dumps(wait)
+
+    def _sleep(self, ms: float) -> None:
+        """Sleep in poll-sized slices, draining between them.
+
+        A wait that slept in one call would hold every event that arrived during it in the
+        session's queue until it returned, and `notBeforeMs` reads the queue's stamp, not the
+        runtime's clock: a `wait wallMs 16000` before an event step would stamp an event that
+        really arrived at 200 ms as 16000 ms and let a runtime that acted early pass. The slices
+        keep every stamp within one poll of the arrival it stands for.
+        """
+        left = max(ms, 0.0)
+        while left > 0.0:
+            slice_ms = min(left, POLL_MS)
+            self._drain()
+            self.clock.sleep_ms(slice_ms)
+            left -= slice_ms
 
     def _step_plant(self, step: JsonObj) -> str:
         plant = _obj(step["plant"])
@@ -701,8 +754,15 @@ class _Run:
                 self._check(m, delta, f"plant.scanDelta.{t}")
         for t, m in _obj(expect.get("maxGapMs")).items():
             self._check(m, _max_gap(samples, t), f"plant.maxGapMs.{t}")
+        for t, m in _obj(expect.get("sinceVtMs")).items():
+            self._check(
+                m,
+                _vt_delta(final.vt_ms, self.last_vt, t),
+                f"plant.sinceVtMs.{t}",
+            )
         self.last_witness = dict(final.witness)
         self.last_plant_ms = final.t_ms
+        self.last_vt = dict(final.vt_ms)
 
     def _check_sample(
         self, expect: JsonObj, s: PlantSample, captures: Captures, where: str
@@ -777,6 +837,20 @@ def _max_gap(samples: List[PlantSample], task: str) -> Observed:
         if s.witness[task] != last:
             gap, since, last = max(gap, s.t_ms - since), s.t_ms, s.witness[task]
     return max(gap, seen[-1].t_ms - since)
+
+
+def _vt_delta(now: Dict[str, float], base: Optional[Dict[str, float]], task: str) -> Observed:
+    """How much PLC virtual time `task` gained since the previous plant observation.
+
+    Virtual time, not the plant's own `t_ms`: virtual time is the PLC's clock (ADR-004 D4), so the
+    delta is exact however long the wall clock took and however loaded the host was. That is the
+    whole reason a PLC-time claim is asserted here instead of on a wall clock. `base` is the
+    observation before this one, or the scenario's opening plant read; a task the plant has never
+    reported for either is MISSING, not zero.
+    """
+    if base is None or task not in now or task not in base:
+        return MISSING
+    return now[task] - base[task]
 
 
 def _load(path: Path) -> JsonObj:

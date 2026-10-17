@@ -118,7 +118,7 @@ Each step has exactly one action key, plus optional `note`, and on `request`, `e
 | Step | Meaning |
 |---|---|
 | `{"request": <command>, "args": {…}, "expect": {"success": b, "error": <code>, "body": <match>}, "repeat": n}` | Send an ADR-003 D4 request (`initialize`, `setBreakpoints`, `continue`, `next`, `cycleStep`, `force`, …). `error` is an ADR-003 D2 code. Lines in `args` may be markers; values may be argument symbols (§ Argument symbols). `repeat` is a batch (§ Repetition) |
-| `{"event": <name>, "withinMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches, on every stream the step names; with `count`, the number of those streams that receive a matching one must match it instead. `repeat` waits for n successive events; `thenContinue` sends `continue` after each repetition (loop hit counts; one stream only) |
+| `{"event": <name>, "withinMs": t, "notBeforeMs": t, "expect": {…}, "count": <match>, "repeat": n, "thenContinue": b}` | The next event of that name (ADR-003 D4: `stopped`, `continued`, `runState`, `output`, `values`, `forces`, `time`, `sessionEnded`, …) arrives within `t` and matches, on every stream the step names; with `count`, the number of those streams that receive a matching one must match it instead. `repeat` waits for n successive events; `thenContinue` sends `continue` after each repetition (loop hit counts; one stream only). `notBeforeMs` is the floor of the same interval and only for a must-not-fire-early claim (§ Timing bounds) |
 | `{"loop": n, "steps": [ … ]}` | Run the body steps in order, n times: the alternating form (§ Repetition). Bodies may nest |
 | `{"noEvent": <name>, "forMs": t \| "forScans": n, "task": …}` | No such event in the window (scans counted by the plant) |
 | `{"plant": {"set": {addr: v}, "sequence": [{…}, …], "failExchanges": n}}` | Drive plant inputs: one write, or successive writes (latest-wins tests, A055) |
@@ -153,6 +153,7 @@ An `observe` expectation uses these keys (any subset):
 | `witness` | plant | `{task: match}`: the plant's last received scan-witness value |
 | `scanDelta` | plant | `{task: match}`: witness increments since the previous plant observation |
 | `vtMs` | plant | `{task: match}`: task virtual time (ADR-004 D4) as the plant sees it |
+| `sinceVtMs` | plant | `{task: match}`: how much virtual time the task gained since the previous plant observation (the scenario's opening plant read for the first). PLC-time claims, two-sided (§ Timing bounds) |
 | `outputs` | plant | `{"%QW0": match}`: last value received, by address |
 | `variables` | session | `{path: match}` |
 | `state` | status | the run state (F040: `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `SAFE_STOPPED`, `ERROR`, plus `NOT_RESPONDING`) |
@@ -212,6 +213,55 @@ Two forms, never inferred from neighbouring steps:
 - **Alternating:** `{"loop": 3, "steps": [{"request": "next"}, {"event": "stopped"}]}` is
   next, stop, next, stop, next, stop. Run control is always written this way. A loop is one
   step in the trace; a failure inside it names the iteration and the body step.
+
+### Timing bounds
+
+A timing assertion is only half a fact until it is two-sided. There are three keys, and which
+one a claim may use is not a matter of taste — it is decided by **which clock the thing being
+measured runs on**, because that decides what machine load can do to the interval.
+
+| Key | Step | Measures | May be used for |
+|---|---|---|---|
+| `withinMs: t` | `event` | wall clock, from this step to the event | the **ceiling** of anything, and the whole bound of a responsiveness claim |
+| `notBeforeMs: t` | `event` | wall clock, from the previous step to the event | the **floor** of a *must not fire early* claim, and only that |
+| `sinceVtMs: {task: m}` | `observe: plant` | **PLC virtual time** (ADR-004 D4), between this observation and the previous one | **PLC-time** claims, both sides: "the virtual clock advanced by N", "the halt cost N of virtual time" |
+
+**Why `notBeforeMs` is safe where a wall-clock floor usually is not.** A floor on a wall-clock
+interval is normally rejected here because contention lengthens the interval while the thing
+measured races the clock — the measured thing comes in *under* the bound on a loaded host and the
+assertion goes flaky, so it gets deleted. That is the case for a *latency*: the right answer is
+as fast as possible and the bound is a ceiling. It is not the case for **must not fire early**.
+Here the runtime is supposed to *wait out* a timeout (P1, P2, a force TTL, a heartbeat period).
+Contention lengthens that wait; nothing makes it shorter. So the safety-critical half of a
+"within P2 + 1 s" criterion is precisely the half this key can hold, and holding it costs no
+flakiness at all.
+
+**When it does not apply.** A responsiveness claim ("the breakpoint stops the runtime within
+1 s of `continue`") has no floor worth asserting: the correct behaviour is *as fast as possible*,
+and on a loaded host the interval is longer for reasons that say nothing about the runtime. Put a
+floor there and you have bought a false failure to be deleted later. `notBeforeMs` on such a step
+is a defect, not a tighter test.
+
+**How the wall-clock floor is read.** The instant is the harness's own poll clock (`POLL_MS`,
+5 ms), stamped when the event is drained, and every loop that can outlast an event's arrival — a
+`wait`, a scan count, a `noEvent` window — drains in poll-sized slices so the stamp never drifts
+by more than one poll. Both the floor's baseline and the event's stamp come from that one clock,
+so the comparison is a difference of two readings of the same clock, not a comparison against
+another machine's notion of time. A divergence names the measured interval.
+
+**`sinceVtMs` is the right instrument for PLC time and never for wall time.** Virtual time is the
+PLC's own clock; the delta between two plant observations is exact however long the wall clock
+took and however loaded the host was. That is why a PLC-time claim belongs here rather than on
+`withinMs`. It is also why it is useless for a claim about a *network* timeout: a P2 heartbeat
+timeout elapses in wall time on the wire, and no amount of virtual time observes it. A criterion
+whose subject is the wire gets `notBeforeMs` if its claim is "must not fire early", and gets
+re-worded if its claim is a two-sided band on a measured RTT — see
+`nested-fb-loop/tunnel-j1`.
+
+**Where neither holds, the criterion is re-worded.** A claimed interval the harness cannot bound
+on either side from a clock it controls (a 300 ms ± 20 ms tunnel RTT) is not made assertable by
+inventing a matcher for it; the scenario's `title` stops claiming the number and says what the
+file does evidence.
 
 ### Inspect views
 

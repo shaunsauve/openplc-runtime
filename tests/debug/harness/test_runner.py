@@ -30,7 +30,7 @@ sys.path.insert(0, str(HERE))
 
 import runner  # noqa: E402
 from fake_endpoint import FakeWorld  # noqa: E402
-from interfaces import Blocked  # noqa: E402
+from interfaces import Blocked, PlantSample  # noqa: E402
 from netfault import NetFault  # noqa: E402
 from socketio_endpoint import SocketIOEndpoint, SocketIOSession  # noqa: E402
 
@@ -660,6 +660,75 @@ def _event(name: str, body: dict) -> dict:
     return {"event": name, "body": body}
 
 
+def _at(when_ms: float, name: str, body: dict) -> dict:
+    """An event the endpoint releases once its clock has reached `when_ms`."""
+    return {"at": when_ms, "event": name, "body": body}
+
+
+class _TimedSession:
+    """A session whose events become available at the scheduled clock reading, so a test can put
+    an event at 200 ms or at 15 s without spending 15 s."""
+
+    def __init__(self, pending: List[dict], clock) -> None:
+        self.pending = list(pending)
+        self.clock = clock
+        self.inbox: List[dict] = []
+
+    def request(self, command: str, args: dict) -> dict:
+        return {"success": True, "body": {}}
+
+    def events(self) -> List[dict]:
+        ready = [e for e in self.pending if e["at"] <= self.clock.now_ms()]
+        self.pending = [e for e in self.pending if e["at"] > self.clock.now_ms()]
+        self.inbox.extend(ready)
+        out, self.inbox = self.inbox, []
+        return out
+
+    def close(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+
+class _TimedEndpoint:
+    description = "timed"
+
+    def __init__(self, events: List[dict], clock) -> None:
+        self.events = list(events)
+        self.clock = clock
+
+    def open_session(self):
+        return _TimedSession(self.events, self.clock)
+
+
+class _ScriptedPlant:
+    """A plant that answers successive samples with the given virtual-time readings, in order,
+    the last one repeated."""
+
+    def __init__(self, vt_ms: List[float], tasks: Optional[List[str]] = None) -> None:
+        self.vt = list(vt_ms)
+        self.tasks = tasks or ["Main"]
+        self.read = 0
+
+    def prepare(self, plant_setup: dict) -> None:
+        pass
+
+    def set_inputs(self, values) -> None:
+        pass
+
+    def fail_exchanges(self, n: int) -> None:
+        raise Blocked("scripted plant cannot fail exchanges")
+
+    def sample(self):
+        value = self.vt[min(self.read, len(self.vt) - 1)]
+        self.read += 1
+        return PlantSample(0.0, {t: 1 for t in self.tasks}, {t: value for t in self.tasks}, {})
+
+    def history(self, since_ms: float):
+        return []
+
+
 class EventStreamTest(unittest.TestCase):
     """`_next_event`: an event the oracle did not ask for is not a divergence, and a stream that
     never sends the one it asked for still fails. Nothing tested this, which is how two loosening
@@ -681,6 +750,8 @@ class EventStreamTest(unittest.TestCase):
         run.arrivals = 0
         run.last_witness = None
         run.last_plant_ms = 0.0
+        run.last_vt = None
+        run.step_end_ms = 0.0
         return run
 
     def test_an_earlier_event_that_does_not_match_is_skipped_not_failed(self) -> None:
@@ -690,7 +761,7 @@ class EventStreamTest(unittest.TestCase):
             _event("forces", {"list": [{"name": "PW", "state": "added"}]}),
             _event("forces", {"list": [{"name": "PW", "state": "expired"}]}),
         ])
-        got, problem = run._next_event(
+        got, problem, _at = run._next_event(
             "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 500.0
         )
         self.assertIsNone(problem)
@@ -700,17 +771,17 @@ class EventStreamTest(unittest.TestCase):
         run = self._run([_event("log", {"line": "x"}), _event("stopped", {"reason": "breakpoint"})])
         stream = run._stream("main")
         run._drain()
-        self.assertEqual([e["event"] for _, e in stream.inbox], ["log", "stopped"])
-        got, problem = run._next_event("main", "stopped", {"reason": "breakpoint"}, 500.0)
+        self.assertEqual([e["event"] for _, e, _at in stream.inbox], ["log", "stopped"])
+        got, problem, _at = run._next_event("main", "stopped", {"reason": "breakpoint"}, 500.0)
         self.assertIsNone(problem)
         self.assertEqual(got["body"], {"reason": "breakpoint"})
-        self.assertEqual([e["event"] for _, e in stream.inbox], ["log"])
+        self.assertEqual([e["event"] for _, e, _at in stream.inbox], ["log"])
 
     def test_a_stream_that_never_sends_what_was_asked_for_still_fails(self) -> None:
         # The skip must not become a way to pass: with nothing matching, the earliest event comes
         # back with its own problem so the verdict names what actually arrived.
         run = self._run([_event("forces", {"list": [{"name": "PW", "state": "added"}]})])
-        got, problem = run._next_event(
+        got, problem, _at = run._next_event(
             "main", "forces", {"body": {"list": [{"name": "PW", "state": "expired"}]}}, 50.0
         )
         self.assertEqual(got["body"], {"list": [{"name": "PW", "state": "added"}]})
@@ -733,7 +804,7 @@ class EventStreamTest(unittest.TestCase):
 
     def test_an_event_step_with_no_expectation_takes_the_first_that_arrives(self) -> None:
         run = self._run([_event("heartbeat", {"n": 1})])
-        got, problem = run._next_event("main", "heartbeat", {}, 500.0)
+        got, problem, _at = run._next_event("main", "heartbeat", {}, 500.0)
         self.assertIsNone(problem)
         self.assertEqual(got["body"], {"n": 1})
 
@@ -748,6 +819,117 @@ class EventStreamTest(unittest.TestCase):
             run._step_event({"event": "log", "count": 1, "withinMs": 50,
                              "expect": {"body": {"line": "wanted"}}})
         self.assertIn("log.count", caught.exception.reason)
+
+
+class TimingBoundTest(unittest.TestCase):
+    """The two halves. A bound nobody has watched fail is not a bound, so each key is proved both
+    ways here: green on the interval it is for, DIVERGE on the interval it must reject.
+
+    `notBeforeMs` is the wall-clock floor and exists only for a must-not-fire-early claim, where
+    contention lengthens the interval and so cannot make the floor flaky. `sinceVtMs` is PLC
+    virtual time and exists for PLC-time claims, which are exact on that clock whatever the wall
+    clock did. Neither is a general two-sided timer and the corpus README says so."""
+
+    @staticmethod
+    def _run(events: List[dict], plant=None):
+        run = object.__new__(runner._Run)
+        run.doc = {}
+        run.corpus = "plant-io"
+        run.table = {}
+        run.endpoint = None  # type: ignore[assignment]
+        run.clock = _VirtualClock()  # type: ignore[assignment]
+        run.endpoint = _TimedEndpoint(events, run.clock)  # type: ignore[assignment]
+        run.plant = plant or runner.UnavailablePlant()  # type: ignore[assignment]
+        run.build = runner.UnavailableBuild()  # type: ignore[assignment]
+        run.setup = {}
+        run.captures = {}
+        run.streams = {}
+        run.arrivals = 0
+        run.last_witness = None
+        run.last_plant_ms = 0.0
+        run.last_vt = None
+        run.step_end_ms = 0.0
+        return run
+
+    # -- notBeforeMs
+
+    def test_an_event_that_arrives_late_enough_passes_the_floor(self) -> None:
+        run = self._run([_at(15000.0, "runState", {"state": "SAFE_STOPPED"})])
+        run.step_end_ms = 0.0
+        detail = run._step_event({"event": "runState", "withinMs": 16000, "notBeforeMs": 15000,
+                                  "expect": {"body": {"state": "SAFE_STOPPED"}}})
+        self.assertEqual(detail, "runState not before 15000 ms")
+
+    def test_an_event_that_fires_early_is_a_divergence_naming_the_interval(self) -> None:
+        # The A057 hole: safe-stopping at 200 ms instead of after P2 = 15 s. The ceiling alone
+        # cannot see it, so this is the whole point of the key.
+        run = self._run([_at(200.0, "runState", {"state": "SAFE_STOPPED"})])
+        run.step_end_ms = 0.0
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "runState", "withinMs": 16000, "notBeforeMs": 15000,
+                             "expect": {"body": {"state": "SAFE_STOPPED"}}})
+        self.assertIn("fired early", caught.exception.reason)
+        self.assertIn("200 ms", caught.exception.reason)
+
+    def test_the_floor_is_measured_from_the_step_before_not_from_the_scenario_start(self) -> None:
+        # An event 16 s into the scenario that arrives 20 ms after a step finished is early for
+        # this step even though its absolute age is large; measuring from the start would let a
+        # runtime that safe-stops at once pass by having taken its time getting there.
+        run = self._run([_at(16000.0, "runState", {"state": "SAFE_STOPPED"})])
+        run.clock.now = 15990.0
+        run.step_end_ms = 15990.0
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "runState", "withinMs": 500, "notBeforeMs": 15000,
+                             "expect": {"body": {"state": "SAFE_STOPPED"}}})
+        self.assertIn("fired early", caught.exception.reason)
+
+    def test_a_wait_does_not_hide_an_event_that_arrived_during_it(self) -> None:
+        # Without draining in slices, `wait wallMs 16000` holds a 200 ms event undrained and stamps
+        # it at 16000, and the floor passes a runtime that safe-stopped 15 s early.
+        run = self._run([_at(200.0, "runState", {"state": "SAFE_STOPPED"})])
+        run._stream("main")  # the controller is already attached when the kill lands
+        run._step_wait({"wait": {"wallMs": 16000}})
+        run.step_end_ms = 0.0  # the floor measures from the step before the wait: the kill
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "runState", "withinMs": 16000, "notBeforeMs": 15000,
+                             "expect": {"body": {"state": "SAFE_STOPPED"}}})
+        self.assertIn("fired early", caught.exception.reason)
+
+    def test_a_step_with_no_floor_is_unaffected_by_the_key_elsewhere(self) -> None:
+        run = self._run([_at(200.0, "stopped", {"reason": "breakpoint"})])
+        run.step_end_ms = 0.0
+        detail = run._step_event({"event": "stopped", "withinMs": 1000,
+                                  "expect": {"reason": "breakpoint"}})
+        self.assertEqual(detail, "stopped")
+
+    # -- sinceVtMs
+
+    def test_virtual_time_advanced_by_the_claimed_amount_matches(self) -> None:
+        run = self._run([], _ScriptedPlant([500.0]))
+        run.last_vt = {"Main": 0.0}
+        run._step_observe({"observe": "plant", "expect": {"sinceVtMs": {"Main": {"~ge": 500}}}})
+
+    def test_virtual_time_that_advanced_further_than_claimed_is_a_divergence(self) -> None:
+        # A halt that cost 5 scans of virtual time instead of 1: a ceiling on `vtMs` reads this as
+        # fine, since 5000 > 500.
+        run = self._run([], _ScriptedPlant([5000.0]))
+        run.last_vt = {"Main": 0.0}
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_observe({"observe": "plant", "expect": {"sinceVtMs": {"Main": 500}}})
+        self.assertIn("plant.sinceVtMs.Main", caught.exception.reason)
+
+    def test_the_window_advances_so_a_second_observation_measures_from_the_first(self) -> None:
+        run = self._run([], _ScriptedPlant([100.0, 100.0]))
+        run.last_vt = {"Main": 0.0}
+        run._step_observe({"observe": "plant", "expect": {"sinceVtMs": {"Main": 100}}})
+        run._step_observe({"observe": "plant", "expect": {"sinceVtMs": {"Main": 0}}})
+
+    def test_a_task_the_plant_has_never_reported_is_absent_not_zero(self) -> None:
+        run = self._run([], _ScriptedPlant([100.0], tasks=["Fast"]))
+        run.last_vt = {"Main": 0.0}
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_observe({"observe": "plant", "expect": {"sinceVtMs": {"Slow": 0}}})
+        self.assertIn("absent", caught.exception.reason)
 
 
 class DiagnosticLedgerTest(unittest.TestCase):
