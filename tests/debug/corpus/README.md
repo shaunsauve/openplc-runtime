@@ -263,6 +263,35 @@ on either side from a clock it controls (a 300 ms ± 20 ms tunnel RTT) is not ma
 inventing a matcher for it; the scenario's `title` stops claiming the number and says what the
 file does evidence.
 
+### Population
+
+Every event-step timing assertion in this corpus, classified by that rule:
+
+| | Count |
+|---|---|
+| ceilings (`withinMs`) | 305 |
+| … two-sided: a ceiling **and** a `notBeforeMs` | 4 |
+| ceiling-only | 301 |
+| … on a tunnel scenario, the bound derived from an injected RTT | 7 |
+| … genuinely one-sided | 294 |
+
+The four: `plant-io/safe-stop-client-loss` (13000), `plant-io/run-state-visibility` (13000),
+`plant-io/force-ttl` (9000), `plant-io/control-handover` (29000). Each floor is derived from a
+declared interval, not chosen: P2 − P1 for the heartbeat timeout, a force TTL less the step
+before it, a 30 s request deadline less the step before it.
+
+The 294 are not a backlog. They are the bulk of the corpus and each waits for a *response* to
+something the harness just sent — `stopped` after `continue`, `programReplaced` after `upload`,
+`runState` after `pause`. The PLC-time half needed nothing at all: all 32 `vtMs` assertions are
+already two-sided, because `~ref` + `~add` is a two-sided idiom by construction. `sinceVtMs`
+therefore has no consumer here, and no coverage is claimed for it.
+
+`validate.py missing_floor` keeps the four from being the only ones: an event step that waits out
+a terminal run state, a `*_timeout` reason or an emptied force list, past the responsiveness
+bound, with no `notBeforeMs`, is a problem. It is a backstop, not proof of coverage — it cannot
+see the control-request decline in `control-handover`, which has neither shape and was found by
+reading the steps.
+
 ### Inspect views
 
 An `inspect` step reads the program's build outputs (`build_all.sh` writes `<OUT>/<name>/debug/`;
