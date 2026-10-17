@@ -50,7 +50,7 @@
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
     {"client": "watcher", "event": "runState", "withinMs": 500, "expect": {"body": {"state": "HALTED_AT_BP"}}},
     {"inject": "killClient", "args": {"signal": "SIGKILL"}},
-    {"client": "watcher", "event": "runState", "withinMs": 17000, "expect": {"body": {"state": "SAFE_STOPPED"}}},
+    {"client": "watcher", "event": "runState", "withinMs": 17000, "notBeforeMs": 13000, "expect": {"body": {"state": "SAFE_STOPPED"}}, "note": "13000 = P2 - P1: the core expires P2 after the last beat it received (ADR-005 D4.4) and the gateway forwards one at most once per P1, so the safe-stop cannot arrive sooner after a SIGKILL than that"},
     {"observe": "status", "expect": {"state": "SAFE_STOPPED"}},
     {"observe": "plant", "expect": {"witness": {"Main": {"~ge": 1}}}}
   ]

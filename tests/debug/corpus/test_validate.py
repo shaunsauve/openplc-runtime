@@ -560,6 +560,70 @@ class DiagnosticTest(unittest.TestCase):
         self.assertIn("which has 17", buf.getvalue())
 
 
+class TimingFloorTest(unittest.TestCase):
+    """`validate.py missing_floor`: the rule that tells a two-sided timing claim from a genuinely
+    one-sided one, and so keeps the population from growing back.
+
+    Before it, every timing assertion in the corpus was a ceiling and nothing said so. The rule
+    fires on a step that waits *out* something (a terminal run state, an emptied force list) and
+    leaves alone a step waiting for a *response* to what the harness just sent -- those have no
+    floor worth asserting, and putting one there is a false failure waiting to happen."""
+
+    ORACLE = "safe-stop-client-loss.oracle.json"
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        shutil.copytree(ROOT / "plant-io", self.tmp / "plant-io")
+        for extra in (self.tmp / "plant-io").glob("*.oracle.json"):
+            if extra.name != self.ORACLE:
+                extra.unlink()
+        self.path = self.tmp / "plant-io" / self.ORACLE
+        self.pristine = self.path.read_text()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def _floor_step(self) -> Dict[str, object]:
+        doc = json.loads(self.pristine)
+        for step in _steps(doc):
+            if isinstance(step, dict) and "notBeforeMs" in step:
+                return step
+        raise AssertionError("the scenario no longer carries a floor to seed against")
+
+    def test_the_real_corpus_carries_the_floors_the_rule_asks_for(self) -> None:
+        code, out = run(ROOT)
+        self.assertEqual(code, 0, out)
+
+    def test_removing_the_floor_from_a_timeout_to_effect_is_red(self) -> None:
+        doc = json.loads(self.pristine)
+        for step in _steps(doc):
+            if isinstance(step, dict) and "notBeforeMs" in step:
+                del step["notBeforeMs"]
+        self.path.write_text(json.dumps(doc))
+        code, out = run(self.tmp)
+        self.assertEqual(code, 1, out)
+        self.assertIn("sets no notBeforeMs", out)
+        self.assertIn("a runtime that gets there at once passes", out)
+
+    def test_a_response_step_is_not_asked_for_a_floor(self) -> None:
+        # The converse is the point of the rule: `stopped` after a breakpoint is the runtime
+        # answering, and its 1000 ms ceiling is the whole claim.
+        self.assertIsNone(validate.missing_floor(
+            {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint"}}))
+
+    def test_a_terminal_state_below_the_threshold_is_left_to_the_oracle(self) -> None:
+        # A `stopped` the harness asked for, at a responsiveness bound, is not a timeout.
+        self.assertIsNone(validate.missing_floor(
+            {"event": "runState", "withinMs": 500, "expect": {"body": {"state": "STOPPED"}}}))
+
+    def test_a_floor_under_the_threshold_is_refused_by_the_schema_and_reported_here(self) -> None:
+        step = self._floor_step()
+        step["notBeforeMs"] = 13000
+        self.assertIsNone(validate.missing_floor(step))
+        step["notBeforeMs"] = -1
+        self.assertIsNone(validate.missing_floor(step))  # absent-equivalent: nothing to police
+
+
 class ValidatorRedGreen(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())

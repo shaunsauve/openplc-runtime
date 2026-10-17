@@ -397,6 +397,74 @@ def client_problem(step: Dict[str, Json]) -> Optional[str]:
     return None
 
 
+# The corpus could state that something happened *late* and never that it happened *soon*. This is
+# the rule that tells the two apart, and it is a rule about what the runtime is doing, not about how
+# the number was typed:
+#
+#   A step whose expectation names a TERMINAL run state, or a force list that has emptied, is
+#   waiting for the runtime to reach the end of something -- a P2 heartbeat timeout, a force TTL.
+#   The runtime does not get there by being fast; it gets there by waiting the interval out. So the
+#   interval is one contention can only lengthen, which is the one case where a wall-clock floor
+#   (`notBeforeMs`) is safe to assert, and its absence leaves a safety claim half-stated: a runtime
+#   that safe-stops at once satisfies every ceiling in the corpus.
+#
+# The converse is not a defect. A step waiting for a *response* to a request the harness just sent
+# (`stopped` after `continue`, `programReplaced` after `upload`) has no floor worth asserting: the
+# right answer is as fast as possible, and on a loaded host the interval is longer for reasons that
+# say nothing about the runtime. Those steps are genuinely one-sided and this rule leaves them alone.
+FLOOR_MIN_MS = 2000
+TERMINAL_STATES = ("SAFE_STOPPED", "STOPPED", "ERROR")
+
+
+def _waits_out_something(step: Dict[str, Json]) -> Optional[str]:
+    """Why this event step is a timeout-to-effect, or None if it is not one."""
+    expect = step.get("expect")
+    expect = expect if isinstance(expect, dict) else {}
+    body = expect.get("body")
+    body = body if isinstance(body, dict) else {}
+    state = body.get("state")
+    if state in TERMINAL_STATES:
+        return f"the {state} run state"
+    for _key, value in _flat_nodes(body):
+        if isinstance(value, str) and value.endswith("_timeout"):
+            return f"the {value} reason"
+    # An emptied force list is a TTL ending: the runtime waited the force's own time out.
+    forces = _obj(body.get("list"))
+    if forces.get("~len") == 0:
+        return "an emptied force list (a TTL ending)"
+    return None
+
+
+def _obj(node: Json) -> Dict[str, Json]:
+    return node if isinstance(node, dict) else {}
+
+
+def _flat_nodes(node: Json, prefix: str = "") -> Iterator[Tuple[str, Json]]:
+    yield prefix, node
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _flat_nodes(v, f"{prefix}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _flat_nodes(v, f"{prefix}[{i}]")
+
+
+def missing_floor(step: Dict[str, Json]) -> Optional[str]:
+    """The complaint on an event step whose ceiling is asserted and whose floor is not."""
+    within = step.get("withinMs")
+    if not isinstance(within, (int, float)) or isinstance(within, bool) or within < FLOOR_MIN_MS:
+        return None
+    if "notBeforeMs" in step:
+        return None
+    what = _waits_out_something(step)
+    if what is None:
+        return None
+    return (f"waits for {what} within {within:g} ms but sets no notBeforeMs: the ceiling is "
+            "asserted and the floor is not, so a runtime that gets there at once passes. Add "
+            "notBeforeMs with the earliest instant the declared interval allows (README § Timing "
+            "bounds), or re-word the claim if that instant is not knowable here.")
+
+
 def marker_lines(prog: Program, marker: str, programs: Dict[str, Program],
                  fname: Optional[str] = None) -> Tuple[List[str], List[str]]:
     """Resolve `marker` in `fname`, or in each member's primary sources: (problems, matched line texts)."""
@@ -442,6 +510,10 @@ def oracle_problems(path: Path, doc: Json, programs: Dict[str, Program]) -> List
             bad = client_problem(step)
             if bad:
                 out.append(f"{here}: {bad}")
+            if "event" in step:
+                bad = missing_floor(step)
+                if bad:
+                    out.append(f"{here}: {bad}")
             for where, node in walk(step.get("args"), f"{here}.args"):
                 if isinstance(node, dict) and node and all(k.startswith("~") for k in node):
                     bad = symbol_problem(node, prog)

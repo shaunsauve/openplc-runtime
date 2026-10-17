@@ -20,7 +20,7 @@
     {"client": "b", "request": "takeControl", "args": {}, "expect": {"success": false, "error": "FORBIDDEN"}, "note": "userb lacks take_control"},
     {"client": "b", "request": "requestControl", "args": {}, "expect": {"success": true}},
     {"event": "control", "withinMs": 1000, "note": "never answered", "expect": {"body": {"request": {"~any": true}}}},
-    {"client": "b", "event": "control", "withinMs": 32000, "note": "an unanswered request is a decline after 30 s", "expect": {"body": {"request": {"outcome": "declined"}}}},
+    {"client": "b", "event": "control", "withinMs": 32000, "notBeforeMs": 29000, "note": "an unanswered request is a decline after 30 s; the floor is 30 s less the 1 s the preceding control step is allowed to take, because that step's clock starts after the request it announces", "expect": {"body": {"request": {"outcome": "declined"}}}},
     {"client": "b", "request": "requestControl", "args": {}, "expect": {"success": true}},
     {"event": "control", "withinMs": 1000, "expect": {"body": {"request": {"~any": true}}}},
     {"request": "answerControlRequest", "args": {"accept": false}, "expect": {"success": true}},

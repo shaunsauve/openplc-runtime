@@ -22,7 +22,7 @@
     {"request": "force", "args": {"path": "PROG0.out_dint", "value": 2222, "reason": "ttl across a halt", "ttl": 10000}, "expect": {"success": true}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@K"]}, "expect": {"success": true}},
     {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@K"}}},
-    {"event": "forces", "withinMs": 12000, "note": "ADR-005 D5.2: the TTL runs on the wall clock, so it ends during the 30 s halt", "expect": {"body": {"list": {"~len": 0}}}},
+    {"event": "forces", "withinMs": 12000, "notBeforeMs": 9000, "note": "ADR-005 D5.2: the TTL runs on the wall clock, so it ends during the 30 s halt. The floor is the 10 s TTL less the 1 s the preceding stopped step is allowed to take: the force cannot expire before 10 s after the force response, and this step's clock starts when that step ended", "expect": {"body": {"list": {"~len": 0}}}},
     {"wait": {"wallMs": 19000}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
     {"request": "continue", "expect": {"success": true}},

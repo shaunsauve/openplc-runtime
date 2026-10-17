@@ -28,7 +28,9 @@
 #                 variable cell, not the I/O image (A109: the plant never sees a forced output);
 #                 `forceowner` seeds a force registered with no owner (ADR-005 D5.1);
 #                 `forcettl` seeds a TTL that is recorded but never expires (A116);
-#                 `forceallowner` seeds a cancel-all that clears only the caller's own (A188)
+#                 `forceallowner` seeds a cancel-all that clears only the caller's own (A188);
+#                 `safestop-early` shrinks the P2 timer to a tenth, so a lost controller safe-stops
+#                 seconds early and only the notBeforeMs floor of A057/A177 can see it
 #        IMAGE    Linux image with g++, cmake and the runtime venv (default the runtime image)
 # Needs: node (host, STruCpp codegen) and docker.
 #

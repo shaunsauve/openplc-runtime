@@ -5,8 +5,8 @@
   "corpus": "nested-fb-loop",
   "kind": "runtime",
   "criteria": ["A083"],
-  "title": "J1 under the tunnel profile (300 ms RTT) matches its oracle, including a 30 s halt, with no heartbeat timeout",
-  "notes": "partial: the self-signed certificate accepted only by explicit option (Negative) is a transport check like A120, not a session step; J3 is ton-timer/tunnel-j3, J4 and J7 plant-io/tunnel-j4-j7. Event bounds are J1's plus 400 ms.",
+  "title": "With the tunnel profile injected (300 ms RTT, 20 ms jitter), J1 matches its oracle including a 30 s halt with no heartbeat timeout; the profile is injected, never measured, and no bound here asserts the 300 ms",
+  "notes": "partial: the self-signed certificate accepted only by explicit option (Negative) is a transport check like A120, not a session step; J3 is ton-timer/tunnel-j3, J4 and J7 plant-io/tunnel-j4-j7. Event bounds are J1's plus 400 ms. What this file does and does not evidence: `delayNetwork` puts the tunnel at 300 ms RTT and every bound below is met under it, which is a claim about the journey surviving that profile. It is not a claim that the RTT *is* 300 ms, and nothing here would change if the fault were deleted -- the profile is a condition the run is made under, not a quantity the run measures. A two-sided 300 ms +/- 20 ms bound is not assertable from here: the RTT belongs to the netem queue, the harness cannot read it back, and a floor taken from an injected value flatters the runtime rather than checking it (README Timing bounds).",
   "setup": {"session": "controller", "startHalted": true, "plant": {"samplePeriodMs": 10, "inputs": {"%IX0.0": false}}},
   "steps": [
     {"inject": "delayNetwork", "args": {"rttMs": 300, "jitterMs": 20}, "note": "the tunnel profile: one TCP port, 300 ms +/- 20 ms RTT (P11)"},
