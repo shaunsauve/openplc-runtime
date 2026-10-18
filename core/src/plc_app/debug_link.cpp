@@ -48,6 +48,7 @@
 #include "debug_force.h"
 #include "debug_write_journal.h"
 #include "image_tables.h"
+#include "plc_output_hold.h"
 #include "plc_state_manager.h"
 
 extern "C" {
@@ -350,6 +351,21 @@ cJSON *run_state_locked(void)
     }
     cJSON_AddStringToObject(b, "state", state);
     cJSON_AddItemToObject(b, "tasks", tasks);
+    /* E45 ruling 1's `reason`, and the only one of the three that was already held. It is the
+     * safe-stop reason plc_state_manager copied out of its g_safe_stop_reason when it entered
+     * SAFE_STOPPED, read back through the getter rather than off that static: g_safe_stop_reason
+     * is file-static behind state_mutex, which is not exported, while output_hold_reason()
+     * snapshots the recorded string under the same PI mutex output_hold_set_reason() writes it
+     * under. So a body carries the whole reason or the previous one, never half of one, and the
+     * link holds no second copy of the fact. SAFE_STOPPED only: no other state has a safe stop to
+     * explain, and the getter is cleared when the hold is released, so a stale reason cannot be
+     * read as this stop's. Absent, not empty, when there is none. */
+    if (s == PLC_STATE_SAFE_STOPPED)
+    {
+        char why[PLC_SAFE_STOP_REASON_LEN];
+        output_hold_reason(why, sizeof why);
+        if (why[0]) cJSON_AddStringToObject(b, "reason", why);
+    }
     if (any_halt)
     {
         cJSON_AddStringToObject(b, "by", by_locked().c_str());
