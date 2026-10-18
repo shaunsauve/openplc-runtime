@@ -243,11 +243,37 @@ floor there and you have bought a false failure to be deleted later. `notBeforeM
 is a defect, not a tighter test.
 
 **How the wall-clock floor is read.** The instant is the harness's own poll clock (`POLL_MS`,
-5 ms), stamped when the event is drained, and every loop that can outlast an event's arrival — a
-`wait`, a scan count, a `noEvent` window — drains in poll-sized slices so the stamp never drifts
-by more than one poll. Both the floor's baseline and the event's stamp come from that one clock,
-so the comparison is a difference of two readings of the same clock, not a comparison against
-another machine's notion of time. A divergence names the measured interval.
+5 ms), stamped when the event is drained, and both the floor's baseline and the event's stamp come
+from that one clock, so the comparison is a difference of two readings of the same clock, not a
+comparison against another machine's notion of time. A divergence names the measured interval.
+
+**What the stamp can be late by, and why it is not one poll any more.** Every loop that can
+outlast an event's arrival — a `wait`, a scan count, a `noEvent` window — drains before it sleeps
+rather than after, because a loop that drained only on the way out would stamp an event with the
+instant the loop *ended*, and a floor would then be read against a number the runtime never
+produced. The cadence those drains run at is the question this section cannot leave vague:
+
+| Loop | Drain cadence | A stamp can be late by |
+|---|---|---|
+| `event` waiting for its own event (`_next_event`) | fixed, one poll | one poll (5 ms) |
+| `wait scans` (`_wait_scans`) | fixed, two polls | two polls (10 ms) |
+| `wait wallMs`, `noEvent forMs` (`_sleep`) | **one poll, doubling while the window stays empty, capped at 1000 ms** | the slice in effect when the event arrived — about `t/2` on the ramp, the 1000 ms cap after that |
+| `wait vtMs` | `_sleep(10)` — below the ramp, so one poll then one | one poll |
+
+Two numbers set the cap, and they pull against each other, so both are recorded here rather than
+only in `runner.py`. **The overrun:** `wait wallMs` is a request to sleep N ms, the per-slice cost
+is charged once per slice, and at one slice per poll a 299 s wait asked the stream 59,800 times and
+returned at 394–433 s on a real endpoint — an overrun of a third, which A210 (`plant-io/
+force-default-ttl`, whose expectation *is* elapsed time) DIVERGEd on. **The floor:** the largest
+stamp error is the cap, and the tightest bound any oracle can put on a floor today is A116's
+`notBeforeMs 9000` (`plant-io/force-ttl` step 14), so a 1000 ms cap can stamp an arrival a whole
+second late and still leave that floor 8000 ms of room to fire.
+
+A `wait` short enough to stay below the ramp is unchanged, so the cap only ever governs the long
+waits, which are the ones that were costing the time. Measured, both ends, on a real endpoint and
+in `harness/test_runner.py`: the overrun falls from +32 % to well inside A210's tolerance, and the
+floor row is red under the fixed slice this replaced, under a single undrained sleep, and under the
+cap widened to 200000.
 
 **`sinceVtMs` is the right instrument for PLC time and never for wall time.** Virtual time is the
 PLC's own clock; the delta between two plant observations is exact however long the wall clock
@@ -307,6 +333,26 @@ this corpus:
 `harness/test_runner.py` is what keeps the number at 0 being meaningful rather than lucky: its
 `stop_at_wrong_line_first` defect makes `plant-io/bp-before-statement` stop one line past the
 breakpoint first, which is the whole population's failure mode in one scenario.
+
+**Where this has been seen against a real runtime, and where it has not.** The fake's defect is a
+seeded one: it writes a `stopped` at the next line that the program did not stop at. Against a real
+endpoint the same *shape* — a `stopped` the step did not mean, arriving before the one it did — has
+been measured once, and it was not seeded: under `allStop` the core reports **one `stopped` per halt
+of each task** (`docs/DEBUG_CORE_LINK.md` § the `stopped` event), so the task that the breakpoint's
+all-stop lock holds stops at its own scan boundary and emits `stopped {reason: "pause",
+heldAtBoundary: true}` — see `core/src/plc_app/debug_link.cpp`, the `st == PLC_TASK_RUN_HELD &&
+g_pausing` branch. `multi-task/non-stop-resume-one` step 5 asks for `stopped {reason: "breakpoint",
+task: "Fast"}` right after a `continue`, and the pause is already in the inbox when it reads
+(stamped at 0 ms). The narrowed matcher DIVERGEs on it; the matcher as it stood before this default
+walked past it and passed the step.
+
+What that does **not** show is a real runtime stopping at the **wrong line** and then at the right
+one: the wrong-*reason* case is measured, the wrong-*line* case still rests on the fake. The two are
+the same failure — a `stopped` that is not the one the step means — and only one of them is a defect.
+The pause is contract-correct behaviour that `multi-task/non-stop-resume-one` step 5 does not account
+for: in all-stop a `continue` resumes *both* tasks and either may halt, so the next `stopped` is not
+necessarily the one the step asked about. That assertion is named rather than edited, because the
+fix is a decision about the protocol, not a harness change.
 
 ### Population
 
