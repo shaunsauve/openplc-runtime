@@ -11,7 +11,7 @@
   "steps": [
     {"request": "initialize", "expect": {"success": true}},
     {"wait": {"wallMs": 1000}},
-    {"observe": "status", "expect": {"fields": {"image": {"buildId": {"~capture": "id0"}}, "tasks": {"Main": {"overruns": {"~gt": 0}}}}}},
+    {"observe": "status", "expect": {"fields": {"image": {"buildId": {"~capture": "id0"}}, "tasks": [{"task": "Main", "overruns": {"~gt": 0}}]}}},
     {"observe": "plant", "expect": {"outputs": {"%QD1": {"~capture": "c0"}}}},
     {"request": "applyChange", "args": {"build": "variant-inplace.st"},
      "expect": {"success": false, "body": {"code": "CHANGE_FAILED", "phase": "window", "detail": {"~any": true}}}},

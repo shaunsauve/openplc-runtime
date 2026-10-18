@@ -2411,6 +2411,24 @@ extern "C" long plc_task_run_state(size_t task_idx, int64_t *since_ns)
     return st;
 }
 
+extern "C" int64_t plc_task_overruns(size_t task_idx)
+{
+    int64_t n = -1;
+    pthread_mutex_lock(&plc_tasks_lock);
+    if (plc_tasks && task_idx < plc_task_count)
+    {
+        /* Through the snapshot, not a bare field read: the task thread is the tracker's sole
+         * writer. `*out` is filled whatever the return says, so a task that has not finished a
+         * cycle yet reports 0 — a counter that exists and reads zero, which is what A117
+         * compares across twenty attaches. -1 means the index names no task at all. */
+        plc_timing_stats_t stats;
+        scan_cycle_tracker_snapshot(&plc_tasks[task_idx].tracker, &stats);
+        n = stats.overruns;
+    }
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return n;
+}
+
 extern "C" size_t plc_task_names(char names[][32], size_t max)
 {
     pthread_mutex_lock(&plc_tasks_lock);

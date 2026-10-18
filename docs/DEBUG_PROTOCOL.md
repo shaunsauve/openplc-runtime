@@ -493,7 +493,7 @@ and the lock off; `admin` requests need an administrator account.
 | `detach` | - | - | Ends the session. A controller's breakpoints are cleared and a halted program resumes. Body `{forces, safeStopped?}` |
 | `terminate` | `control` | control | Stops the PLC and ends the session |
 | `heartbeat` | - | - | Keeps the session alive (P1/P2); body `{}` |
-| `status` | - | - | Body: the `runState` event's body, answered at once |
+| `status` | - | - | Body: the `runState` event's body, answered at once — plus `sessions`, and flat on the body (never nested in a `fields` object): see "Shape rulings" |
 | `version` | - | - | See "Handshake" |
 | `setLock` | - | admin | `{on, reason?}`; body `{on}` |
 | `setBreakpoints` | `control` | control, probe | `{file, lines[]}` replaces the file's breakpoints. A line moves to the next line with code. Body `{breakpoints:[{id, verified, line, col, requestedLine}]}` |
@@ -516,7 +516,7 @@ and the lock off; `admin` requests need an administrator account.
 | `threads` | - | - | planned |
 | `stackTrace` | `probes` | probe | `{task?, startFrame?, levels?}`: the halted task's frames, innermost first. Body `{stackFrames:[{id, name, pou, kind, instance, location:{file, line, col}, line, column, source}], totalFrames, truncated, task, taskId}`; `kind` is `program`, `fb`, `function` or `method`, `instance` the instance path (null for a function); `truncated` when frames from before the attach are missing (ADR-001 D3.4). A task held at its scan boundary has no frames |
 | `scopes` | `probes` | probe | `{frameId}`; body `{scopes:[{name, variablesReference, namedVariables}]}`, `name` one of `inputs`, `outputs`, `inOuts`, `members`, `temps`, `externals` |
-| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout |
+| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout. **`types: true`** on the by-path form adds the structure behind `type`: `dims` (`[[lo, hi], ...]`), `values` (`[[name, value], ...]`, an enum) and `elementType` (`{name, members?[[name, type]], values?}`). `type` stays the display string either way |
 | `evaluate` | - | - | planned |
 | `setVariable` | `modify`, `write` | control | planned |
 | `force` | `modify`, `force` | control | `{path, value, reason, ttl?}`; body `{}`. See "Forces" |
@@ -546,10 +546,78 @@ Pushed, never polled. The controller receives every event; observers receive `st
 |---|---|
 | `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, taskId, since, vt?, scan?, location?:{file, line, col}, depth?, breakpointIds?, hits?, heldAtBoundary?, exception?}`; one per stop. `task` is the task's name (an IEC identifier: compare it case-insensitively), `taskId` its index. `vt` is the task's virtual time in ms. `location` is absent for a task held at its scan boundary (`heldAtBoundary: true`); `depth` is the call depth of the stop and `hits` the breakpoint's hit count |
 | `continued` | `{allThreadsContinued: true}` on `continue` (all-stop), `{task, taskId}` on a step |
-| `runState` | `{state, tasks:[{task, taskId, state, reason?, probe?, heldAtBoundary?, since?, scan?}], attached, by?, location?:{task, taskId, probe?}, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING` |
+| `runState` | `{state, tasks:[{task, taskId, state, overruns, reason?, probe?, heldAtBoundary?, since?, scan?}], attached, pid, image, by?, location?:{task, taskId, probe?}, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING`. `pid` is the runtime process, `image` the same `{md5, buildId, buildTime, sourceHash}` the `hello` body carries, and `tasks[].overruns` the task's scans that overran its interval. `tasks` is a list of task objects, never a map keyed by name. Three keys are specified here and **not yet built**: `staleness_ms` (A047), `reason` on a `SAFE_STOPPED` body (A057, A177), `lastFault` (A060, A214) — see "Shape rulings" |
 | `output` | `{category: logpoint\|print\|runtime\|plugin, task?, taskId?, scan?, text?, kind?, count?}`: `print` carries `task`, `taskId`, `scan` and `text`; `runtime` carries `kind` (`conditionError`, `breakpointSkippedLocked`) and `count` |
 | `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
 | `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `heartbeat_timeout` (no message for P2), `core_lost` (the core link dropped) or a reason from the core |
+
+### Shape rulings (E45, 2026-10-18)
+
+Two shapes the oracles asked for and this document did not specify: `status.fields.*` and
+`variables {types: true}`. Both were settled by reading the closest precedents and by asking,
+per key, whether the runtime already holds the fact. The rulings and the reason for each are
+recorded here because a ruling with no recorded reason is not a ruling.
+
+**Ruling 1 — `status` carries these observations flat on its body. There is no `fields` object.**
+
+`status` is already defined above as the `runState` body. `runState`, DAP's `StoppedEvent.body`
+and gdb's `T` stop reply all name observed facts about the target as flat attributes on the
+body, and all three do it for the same reason: these are the facts a client needs to decide
+what to do next, and carrying them in the reply is what saves the round trip. gdb says so
+outright — its `n:r` pairs "carry values of important registers and other information directly
+in the stop reply packet, reducing round-trip latency" — and its stop reply has no wrapper
+object either. DAP's `StoppedEvent` likewise: `reason`, `threadId`, `text`, `allThreadsStopped`
+are siblings. The precedent for the opposite decision is a *request*, not an event: a client
+that wants the fat per-target snapshot (registers, locals) asks again. So the split is by cost,
+not by nesting — cheap and deciding travels in the body, everything expensive is fetched.
+
+So a harness may group its own expectations under a `fields` key, but that grouping is the
+**harness's**, not the wire's: `runner.py` matches `expect.fields` against the status body
+itself, so a fixture written that way was always asking for flat keys. Two fixtures disagreed
+with the contract about `tasks` as well — one wanted `["Main"]`, another `{Main: {...}}`, and
+the contract says a list of task objects. The contract wins; both fixtures were corrected to
+`[{task: "Main", ...}]`, keeping everything they pinned (exactly one task, named `Main`,
+`overruns > 0`) and changing only the container.
+
+| key | is the fact already held? | ruling |
+|---|---|---|
+| `image` | **Yes, under another name.** `hello` has carried `{md5, buildId, buildTime, sourceHash}` since it was written | Exposed on `status`. Built: one `add_image()` now feeds both bodies, so they cannot disagree |
+| `pid` | The OS holds it; nothing in the body said it | Exposed on `status`. Built |
+| `tasks[].overruns` | **Yes, under another name.** The per-task tracker counts it; only STATS printed it | Exposed per task. Built (`plc_task_overruns`) |
+| `reason` | **Yes, under another name.** `plc_state_manager.c` stores `g_safe_stop_reason`; only the `sessionEnded` event and the handshake read it | **Specified, not built.** A `SAFE_STOPPED` body owes `reason`; the location of the safe stop is the second half and is a feature, not a wrapper |
+| `staleness_ms` | No. Nothing ages a status answer | **Specified, not built.** ADR-003 D9's `NOT_RESPONDING` is a gateway feature: the gateway must time the core, and a core that is SIGSTOPped answers nothing at all |
+| `lastFault` | No. A fault is delivered as a `stopped` event, which no client receives when none is attached | **Specified, not built.** Retaining a fault across a session boundary, with `precision: line` vs `"pou"` for native and Python blocks, is ADR-008's subject and belongs to that decision |
+
+A criterion blocked on an unbuilt feature is reported BLOCKED or DIVERGE, not papered over with
+an invented shape. The five built rows above move criteria; the three unbuilt ones do not, and
+the table says so rather than leaving the next reader to guess whether silence means "absent"
+or "undecided".
+
+**Ruling 2 — `type` stays a display string; `types: true` adds the structure beside it.**
+
+`elementType`, `dims` and `values` are not new facts: the gateway already parses all three
+(`TypeInfo.dims`, `.elem`, `.members`, `.values`) and folds them into the `type` string it
+returns — `ARRAY[1..4] OF INT`, `Mode`, `ARRAY[0..1] OF Seg`. The question is only whether a
+client has to parse that string back apart. DAP's answer is that it does not have the structure
+on `Variable` at all: `Variable.type` is a `string` shown on hover, and a composite is reached
+through `variablesReference`, with `namedVariables`/`indexedVariables` as counts for paging.
+So DAP puts the structure behind a handle rather than inlining it, and keeps `type` a string.
+This contract already does the same — `type` plus `variablesReference` plus `children`, which
+is A089's lazy expansion — and ruling 2 keeps it, adding the structure as optional siblings for
+the client that wants to compute rather than display.
+
+**A rival shape exists in the corpus and is ruled out.** `corpus:rich-types/describe` sends the
+same `types: true` and expects `type` to be an **object** (`{kind: "array", dims: [...]}`,
+`{kind: "string", length}`). That contradicts ruling 2 and contradicts
+`corpus:all-scopes-types/scopes`, which requires `type` to be the string `ARRAY[1..4] OF INT`.
+One request cannot answer both, and `describe` also demands `subrange`/`union`/`ref` keys that
+no criterion's Evidence names. `type` is the string; `describe`'s expectations are the wrong
+ones and that oracle still needs correcting once its separate `STALE_BUILD` blocker clears.
+It backs none of the criteria this ruling unblocks, so it is recorded, not changed here.
+
+Neither ruling changes the debug-info format. `dims`, `elem`, `members` and `values` are already
+in the debug-info document under ADR-002 and are read as they are; there is no version story,
+and no `accept.py` C7/C14 check is implicated.
 
 ### Message shapes
 
@@ -606,7 +674,7 @@ runToCursor             req {file: str, line: int, task?: str} -> {}
 stop                    req {} -> {}
 stackTrace              req {task?: str, startFrame?: int, levels?: int} -> {stackFrames: [StackFrame], totalFrames: int, truncated: bool, task: str|null, taskId: int}
 scopes                  req {frameId: int} -> {scopes: [{name: str, variablesReference: int, namedVariables: int, expensive: bool}]}
-variables               req {variablesReference?: int, path?: str, frameId?: int} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool} | {path: str, type: str, variablesReference: int, children: [Variable]}
+variables               req {variablesReference?: int, path?: str, frameId?: int, types?: bool} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool, dims?: [int,int][], values?: [str,int][], elementType?: {name: str, members?: [str,str][], values?: [str,int][]}} | {path: str, type: str, variablesReference: int, children: [Variable], dims?: [int,int][], elementType?: {name: str}}
 restart                 req {kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {mode: str} -> {mode: str}
 force                   req {path: str, value: any, reason: str, ttl?: num} -> {}

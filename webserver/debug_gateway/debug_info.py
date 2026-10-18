@@ -374,6 +374,34 @@ class DebugInfo:
                         return str(declared)
         return name or t.kind
 
+    def type_detail(self, type_id: Optional[int]) -> JsonObj:
+        """The structural facts `type_name` folds into its string, structured (E45 ruling 2).
+
+        `type` stays a display string, as DAP's `Variable.type` is; a client that has to compute
+        from the structure — an editor laying out an array, an enum picker — asks for these with
+        `types: true` rather than parsing the string back apart. Nothing is added for a type with
+        no structure to describe, so an elementary variable answers exactly as it did before.
+        """
+        t = self.types.get(type_id) if type_id is not None else None
+        if t is None:
+            return {}
+        out: JsonObj = {}
+        if t.dims:
+            out["dims"] = [[lo, hi] for lo, hi in t.dims]
+        if t.kind == "enum" and t.values:
+            out["values"] = [[name, value] for name, value in t.values]
+        elem = self.types.get(t.elem) if t.elem is not None else None
+        if elem is not None and (elem.members or elem.values):
+            detail: JsonObj = {"name": self.type_name(elem.id)}
+            if elem.members:
+                detail["members"] = [
+                    [str(m.get("name")), self.type_name(m.get("typeId"))] for m in elem.members
+                ]
+            if elem.values:
+                detail["values"] = [[name, value] for name, value in elem.values]
+            out["elementType"] = detail
+        return out
+
     def _member_leaf(self, node: Node, name: str) -> Optional[Node]:
         t = self.types.get(node.type_id)
         if t is None or t.kind not in ("struct", "fb"):

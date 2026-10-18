@@ -132,6 +132,7 @@ class FakeCore:
         self.state = "RUNNING"  # RUNNING | HALTED | STOPPED | ERROR | SAFE_STOPPED
         self.pc = 0
         self.scan = 0
+        self.overruns = 0
         self.pending: Optional[str] = None  # reason to halt at the next probe reached
         self.cycle_target: Optional[int] = None
         self.scans_left: Optional[int] = None
@@ -309,12 +310,17 @@ class FakeCore:
 
     def run_state(self) -> JsonObj:
         """The real core's runState shape; the fake's one task, HALTED refined as the core does."""
+        # pid and image are the same facts the real core's debug_link run_state_locked() sends
+        # (E45 ruling 1): the process an attach must not move, and the build's identity.
+        common: JsonObj = {"pid": os.getpid(), "image": dict(self.image_block())}
         if self.state != "HALTED":
             tasks: List[Json] = (
-                [{"task": TASK, "taskId": TASK_ID, "state": "running", "scan": self.scan}]
+                [{"task": TASK, "taskId": TASK_ID, "state": "running", "scan": self.scan,
+                  "overruns": self.overruns}]
                 if self.state == "RUNNING" else []
             )
-            return {"state": self.state, "tasks": tasks, "attached": bool(self.sessions)}
+            return {"state": self.state, "tasks": tasks,
+                    "attached": bool(self.sessions), **common}
         reason = self.halt_reason or "pause"
         task: JsonObj = {"task": TASK, "taskId": TASK_ID, "state": "parked", "reason": reason,
                          "probe": self.pc, "since": self.since, "scan": self.scan}
@@ -326,7 +332,13 @@ class FakeCore:
             "by": self.users.get(controller, "") if controller else "",
             "location": {"task": TASK, "taskId": TASK_ID, "probe": self.pc},
             "since": self.since,
+            **common,
         }
+
+    def image_block(self) -> JsonObj:
+        """The build identity, as the core's add_image() builds it for hello and status alike."""
+        return {"md5": MD5, "buildId": BUILD_ID,
+                "buildTime": "2026-10-14T00:00:00Z", "sourceHash": None, **self.image}
 
     def _resume(self) -> None:
         self.state = "RUNNING"

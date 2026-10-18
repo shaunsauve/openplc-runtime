@@ -361,6 +361,14 @@ void plc_run_control_halted(size_t task_idx);
  */
 long plc_task_run_state(size_t task_idx, int64_t *since_ns);
 
+/**
+ * @brief Scans of one task that overran its interval, or -1 when the index names none.
+ * @details The counter the debug status body reports per task (A117's "the overrun counter
+ * is unchanged", A217's overrun oracle). The same figure STATS prints; read it rather than
+ * the scan-level `overrun_count`, which counts the same events per dispatch group.
+ */
+int64_t plc_task_overruns(size_t task_idx);
+
 /** @brief Number of tasks of the running program (0 with none), and each one's name. */
 size_t plc_task_names(char names[][32], size_t max);
 

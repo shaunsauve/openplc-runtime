@@ -1056,6 +1056,10 @@ class DebugGateway:
             value, pending = self._read(info, session, [node], frame[1:] if frame else None)
             out: JsonObj = {"path": node.path, "type": info.type_name(node.type_id),
                             "value": value[0]}
+            # E45 ruling 2: `types: true` asks for the structure behind that string. Omitted
+            # otherwise, so a client that only displays the type sees the body it always saw.
+            if args.get("types") is True:
+                out.update(info.type_detail(node.type_id))
             # F096/J5.1: every view of a variable says whether it is forced. The core's registry
             # is authoritative and pushes `forces` on every change, so the mark is current.
             if node.frame is None and node.leaf in self._forced:
@@ -1066,7 +1070,7 @@ class DebugGateway:
                 # absent field means "no next copy-in", not "unknown".
                 out["pending"] = info.decode(node.type_id, pending[0], node.leaf)
             return out
-        return {
+        out = {
             "path": node.path,
             "type": info.type_name(node.type_id),
             "variablesReference": self._ref(
@@ -1074,6 +1078,11 @@ class DebugGateway:
                   else ("path", node.path))),
             "children": self._listing(session, info, info.children(node), native=True, frame=frame),
         }
+        # An array's bounds and an enum's members are asked for on this form too: both are
+        # composite, so neither reaches the elementary branch above (E45 ruling 2).
+        if args.get("types") is True:
+            out.update(info.type_detail(node.type_id))
+        return out
 
     # ------------------------------------------------------------------ status API
 

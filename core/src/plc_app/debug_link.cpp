@@ -237,6 +237,20 @@ cJSON *str_or_null(const std::string &s, bool present)
     return present ? cJSON_CreateString(s.c_str()) : cJSON_CreateNull();
 }
 
+/* The build's identity. `hello` and the debug status body both report it (E45 ruling 1), from
+ * one block built here: two copies would be free to disagree about which build is loaded, and
+ * A217 reads this off the status API precisely to trust it. Under g_mu. */
+void add_image(cJSON *b)
+{
+    cJSON *img = cJSON_CreateObject();
+    cJSON_AddItemToObject(img, "md5", str_or_null(g_image_md5, g_image_loaded && !g_image_md5.empty()));
+    cJSON_AddItemToObject(img, "buildId",
+                          str_or_null(g_image_build_id, g_image_loaded && !g_image_build_id.empty()));
+    cJSON_AddItemToObject(img, "buildTime", cJSON_CreateNull());
+    cJSON_AddItemToObject(img, "sourceHash", cJSON_CreateNull());
+    cJSON_AddItemToObject(b, "image", img);
+}
+
 /* The `hello` body (pm ruling 2). Under g_mu. */
 cJSON *hello_locked(void)
 {
@@ -259,13 +273,7 @@ cJSON *hello_locked(void)
     cJSON_AddBoolToObject(caps, "startHalted", true);
     cJSON_AddItemToObject(b, "capabilities", caps);
     cJSON_AddNumberToObject(b, "probes", probes);
-    cJSON *img = cJSON_CreateObject();
-    cJSON_AddItemToObject(img, "md5", str_or_null(g_image_md5, g_image_loaded && !g_image_md5.empty()));
-    cJSON_AddItemToObject(img, "buildId",
-                          str_or_null(g_image_build_id, g_image_loaded && !g_image_build_id.empty()));
-    cJSON_AddItemToObject(img, "buildTime", cJSON_CreateNull());
-    cJSON_AddItemToObject(img, "sourceHash", cJSON_CreateNull());
-    cJSON_AddItemToObject(b, "image", img);
+    add_image(b);
     return b;
 }
 
@@ -315,6 +323,11 @@ cJSON *run_state_locked(void)
             cJSON     *t      = cJSON_CreateObject();
             add_task(t, i, names[i]);
             cJSON_AddStringToObject(t, "state", task_state_name(st));
+            /* A117 counts the overrun counter across twenty attaches and A217 watches it rise;
+             * the figure is already tracked per task, so the status body carries it rather
+             * than leaving the client to scrape STATS (E45 ruling 1). */
+            const int64_t ov = plc_task_overruns(i);
+            if (ov >= 0) cJSON_AddNumberToObject(t, "overruns", (double)ov);
             if (st != PLC_TASK_RUN_RUNNING)
             {
                 any_halt = true;
@@ -348,6 +361,14 @@ cJSON *run_state_locked(void)
         cJSON_AddNumberToObject(b, "since", wall_ms_of(since));
     }
     cJSON_AddBoolToObject(b, "attached", debug_agent_attached());
+    /* A117's "the runtime PID/uptime are unchanged" across twenty attaches: the process id
+     * is the one fact an attach must not move, and nothing else in the body says it (E45
+     * ruling 1). The gateway reads it through the core, so it survives a status poll that
+     * the webserver answers while plc_main is SIGSTOPped. */
+    cJSON_AddNumberToObject(b, "pid", (double)getpid());
+    /* A217 reads the build identity back off the status API to prove a refused apply changed
+     * nothing; hello_locked() reports the same block, and this is that block. */
+    add_image(b);
     /* The sessions the core holds, so a status read can tell a stop from a detach (A033). */
     cJSON *ids = cJSON_CreateArray();
     for (auto &sess : g_sessions) cJSON_AddItemToArray(ids, cJSON_CreateString(sess.first.c_str()));
