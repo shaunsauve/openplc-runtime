@@ -21,7 +21,7 @@
         {"pou": "Scopes", "kind": "program", "instance": "PROG0",
          "scopes": {"members": {"witness": 1, "in_v": 3, "out_v": 0, "shared": 0, "m": "IDLE", "i": 0}, "externals": {"G_COUNT": 0}}}]}},
     {"request": "variables", "args": {"path": "PROG0.segs", "types": true},
-     "expect": {"success": true, "body": {"type": "ARRAY[0..1] OF Seg", "elementType": {"name": "Seg", "members": [["a", "Point"], ["b", "Point"], ["tag", "Mode"]]}}}},
+     "expect": {"success": true, "body": {"type": "ARRAY[0..1] OF Seg", "elementType": {"name": "Seg", "members": [{"name": "a", "type": "Point"}, {"name": "b", "type": "Point"}, {"name": "tag", "type": "Mode"}]}}}},
     {"request": "variables", "args": {"path": "PROG0.m", "types": true},
      "expect": {"success": true, "body": {"type": "Mode", "values": [["IDLE", 0], ["RUN", 1], ["FAULT", 2]]}}},
     {"request": "variables", "args": {"path": "PROG0.arr", "types": true}, "expect": {"success": true, "body": {"type": "ARRAY[1..4] OF INT", "dims": [[1, 4]]}}},

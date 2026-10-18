@@ -395,7 +395,8 @@ class DebugInfo:
             detail: JsonObj = {"name": self.type_name(elem.id)}
             if elem.members:
                 detail["members"] = [
-                    [str(m.get("name")), self.type_name(m.get("typeId"))] for m in elem.members
+                    {"name": str(m.get("name")), "type": self.type_name(m.get("typeId"))}
+                    for m in elem.members
                 ]
             if elem.values:
                 detail["values"] = [[name, value] for name, value in elem.values]

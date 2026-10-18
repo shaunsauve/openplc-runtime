@@ -75,12 +75,27 @@ def _info() -> DebugInfo:
 
 
 class TypeDetail(unittest.TestCase):
+    def test_member_names_are_keys_not_positions(self):
+        """A member is `{name, type}`, not `[name, type]`.
+
+        IEC 61131-3 6.1.2 makes an identifier case-insensitive, and the matcher folds a name
+        by KEY (`IDENTIFIER_KEYS`). A positional pair gives the fold nowhere to act: the oracle
+        asks for `a`, the debug info spells it `A`, and the two can never be compared as the
+        same identifier. Naming the member makes the comparison case-insensitive for free, and
+        it is the form DAP's `Variable` uses.
+        """
+        detail = _info().type_detail(6)["elementType"]
+        for member in detail["members"]:
+            self.assertIsInstance(member, dict, "a member must name its keys")
+            self.assertEqual(sorted(member), ["name", "type"])
+
     def test_an_array_names_its_bounds_and_its_element_types_structure(self):
         self.assertEqual(
             _info().type_detail(6),
             {"dims": [[0, 1]],
              "elementType": {"name": "Seg",
-                             "members": [["a", "Point"], ["tag", "Mode"]]}},
+                             "members": [{"name": "a", "type": "Point"},
+                                         {"name": "tag", "type": "Mode"}]}},
         )
 
     def test_an_enum_names_its_members(self):

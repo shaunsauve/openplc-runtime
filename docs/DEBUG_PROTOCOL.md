@@ -516,7 +516,7 @@ and the lock off; `admin` requests need an administrator account.
 | `threads` | - | - | planned |
 | `stackTrace` | `probes` | probe | `{task?, startFrame?, levels?}`: the halted task's frames, innermost first. Body `{stackFrames:[{id, name, pou, kind, instance, location:{file, line, col}, line, column, source}], totalFrames, truncated, task, taskId}`; `kind` is `program`, `fb`, `function` or `method`, `instance` the instance path (null for a function); `truncated` when frames from before the attach are missing (ADR-001 D3.4). A task held at its scan boundary has no frames |
 | `scopes` | `probes` | probe | `{frameId}`; body `{scopes:[{name, variablesReference, namedVariables}]}`, `name` one of `inputs`, `outputs`, `inOuts`, `members`, `temps`, `externals` |
-| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout. **`types: true`** on the by-path form adds the structure behind `type`: `dims` (`[[lo, hi], ...]`), `values` (`[[name, value], ...]`, an enum) and `elementType` (`{name, members?[[name, type]], values?}`). `type` stays the display string either way |
+| `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout. **`types: true`** on the by-path form adds the structure behind `type`: `dims` (`[[lo, hi], ...]`), `values` (`[[name, value], ...]`, an enum) and `elementType` (`{name, members?: [{name, type}], values?: [[name, value], ...]}`). `type` stays the display string either way. A member is an **object**, not a `[name, type]` pair: an IEC identifier is case-insensitive (61131-3 6.1.2), and a client — or the matcher — can only treat something as an identifier when it is a *named key*, which is also the form DAP's `Variable` uses. (`dims` and `values` are typed `list` and `elementType` `obj` in the grammar block below, because that grammar has no production for a list of pairs; the shapes above are the authority) |
 | `evaluate` | - | - | planned |
 | `setVariable` | `modify`, `write` | control | planned |
 | `force` | `modify`, `force` | control | `{path, value, reason, ttl?}`; body `{}`. See "Forces" |
@@ -613,7 +613,17 @@ same `types: true` and expects `type` to be an **object** (`{kind: "array", dims
 One request cannot answer both, and `describe` also demands `subrange`/`union`/`ref` keys that
 no criterion's Evidence names. `type` is the string; `describe`'s expectations are the wrong
 ones and that oracle still needs correcting once its separate `STALE_BUILD` blocker clears.
-It backs none of the criteria this ruling unblocks, so it is recorded, not changed here.
+
+**What ruling 2 does not carry, stated plainly.** It serves A013's Evidence — "nested struct
+layout, array bounds and enum members" — and all three are built. A016's Evidence is wider:
+"STRING/WSTRING with declared length, every dimension's bounds, **subrange bounds, union
+members, and REF_TO target type**". The first two are covered (`STRING(16)`, `dims`). The
+last three are **not**: no subrange bound, union member list or REF_TO target travels on the
+wire, and `describe`'s `{kind, name, range}` / `{kind, name, members}` / `{kind, target}` keys
+are one possible encoding of what A016 needs, not the only one. A016 is therefore
+specified-but-unbuilt in the same sense as `lastFault`, and the three keys it needs are named
+in TODO rather than invented here. `describe` backs A016 and none of the criteria this ruling
+unblocks, so it is recorded, not changed.
 
 Neither ruling changes the debug-info format. `dims`, `elem`, `members` and `values` are already
 in the debug-info document under ADR-002 and are read as they are; there is no version story,
@@ -674,7 +684,7 @@ runToCursor             req {file: str, line: int, task?: str} -> {}
 stop                    req {} -> {}
 stackTrace              req {task?: str, startFrame?: int, levels?: int} -> {stackFrames: [StackFrame], totalFrames: int, truncated: bool, task: str|null, taskId: int}
 scopes                  req {frameId: int} -> {scopes: [{name: str, variablesReference: int, namedVariables: int, expensive: bool}]}
-variables               req {variablesReference?: int, path?: str, frameId?: int, types?: bool} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool, dims?: [int,int][], values?: [str,int][], elementType?: {name: str, members?: [str,str][], values?: [str,int][]}} | {path: str, type: str, variablesReference: int, children: [Variable], dims?: [int,int][], elementType?: {name: str}}
+variables               req {variablesReference?: int, path?: str, frameId?: int, types?: bool} -> {variables: [Variable]} | {path: str, type: str, value: any, forced?: bool, dims?: list, values?: list, elementType?: obj} | {path: str, type: str, variablesReference: int, children: [Variable], dims?: list, elementType?: obj}
 restart                 req {kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {mode: str} -> {mode: str}
 force                   req {path: str, value: any, reason: str, ttl?: num} -> {}
