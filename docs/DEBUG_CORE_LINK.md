@@ -182,7 +182,7 @@ stack. It has no variable loads, so `capabilities.conditional` is `false`.
 |---|---|
 | `hello` | First frame on every connection; again when the loaded program changes |
 | `beat` | Every 250 ms, from the agent thread (not blocked by `PLUGIN_CMD`); the gateway does not forward it |
-| `stopped` | Once per halt of each task. `vt` is the task's virtual time in ms (ADR-003 D4, ADR-004 D4). `probe` is the halt probe (the gateway turns it into `location` and does not forward it); `breakpointIds` are the ids `setBreakpoints` returned; a task held at its scan boundary has `heldAtBoundary: true` and no probe |
+| `stopped` | Once per halt of each task — and, since pm ruling 14, once per halt **the client caused**: an all-stop hold one task's breakpoint implied is not a `stopped` of its own. `vt` is the task's virtual time in ms (ADR-003 D4, ADR-004 D4). `probe` is the halt probe (the gateway turns it into `location` and does not forward it); `breakpointIds` are the ids `setBreakpoints` returned; a task held at its scan boundary has `heldAtBoundary: true` and no probe |
 | `continued` | On `continue` (`allThreadsContinued`) and on each step (`task`, `taskId`) |
 | `runState` | On every change, and once to a newly connected peer. `state` is one of `RUNNING PAUSED HALTED_AT_BP STOPPED ERROR SAFE_STOPPED EMPTY INIT TRANSITIONING`: `HALTED_AT_BP` when any task is parked at a breakpoint, `PAUSED` when any task is otherwise halted. A task's `state` is `running held parked abandoning` |
 | `output` | `category: "runtime"` with `kind` (`conditionError`, `breakpointSkippedLocked`) and `count`; `category: "print"` with `task`, `taskId`, `scan` and `text` |
@@ -239,6 +239,58 @@ pm: please fold them into ADR-003 D1.3.
     paths case-insensitively, and the harness compares `pou`, `instance`, `name` and `path`
     case-insensitively against the oracle's source spelling. Showing the source spelling needs
     STruCpp to record it in `debug-info.json`.
+14. **An all-stop hold that one task's breakpoint caused is not a `stopped` of its own.**
+    Decided 2026-10-18, by architect + skeptic consensus, on the measured behaviour of
+    `corpus:multi-task/non-stop-resume-one` step 5 against a real `plc_main`
+    (`debug_link.cpp:522` arms `all_stop_locked()`, `:528-539` emits the second stop). **The core
+    does not do this yet** and the sentence above is the contract it owes; until it does, a
+    breakpoint in one task of an all-stop pair emits a second `stopped` for the other task(s),
+    `reason: "pause"`, `heldAtBoundary: true`, and that is the current behaviour, not the intended
+    one. It is a protocol change with a version story, so it is recorded here and **not** made in
+    `core/`.
+
+    *Why.* `continue` is all-stop (ruling 8), so it resumes every halted task and **either may
+    halt**: the event a step reads next is whichever halt happens first, not the one the client
+    asked about. Three things say the implied hold is not a stop of its own:
+
+    * **The comparable tools do not report it.** gdb in all-stop (`set non-stop off`) prints one
+      stop, for the thread that hit; `info threads` shows the rest. lldb likewise — one stop, one
+      thread, the others discovered through the thread list. DAP's `StoppedEvent` carries one
+      `threadId`, and `allThreadsStopped` was *removed* from the spec precisely because stop state
+      is per-thread, so a client does not need an event per stopped thread. A DAP client handles
+      `stopped` by focusing that thread's stack, and a boundary hold has no `probe`, no
+      `location` and — per `stackTrace` (D2.5) — `frames: []`. There is nothing to focus.
+    * **The reason is wrong.** DAP defines `pause` as "execution was paused, typically through a UI
+      request". An all-stop hold is a *side effect* of a breakpoint the client did ask for. The
+      core contradicts itself on this: after the same stop its own `runState` says
+      `HALTED_AT_BP` ("when any task is parked at a breakpoint"), not `PAUSED`.
+    * **Nothing is lost by dropping it.** "Which tasks are halted" is carried by `runState`, on
+      every change and to every session — `docs/DEBUG_PROTOCOL.md` sends `runState` to observers
+      as well as to the controller — with each task's `state: running|held|parked|abandoning` and
+      `heldAtBoundary`. The `stopped` stream becomes a stream of stops *the client caused*.
+
+    *What is still a `stopped`*, and why the ruling is narrow: a boundary hold the client asked
+    for is one. `pause` (with or without a task), `cycleStep`'s boundary landing, a `startHalted`
+    entry and `next`/`stepIn`/`stepOut` all halt a task on the client's own request, so all still
+    emit `stopped` with `heldAtBoundary: true` and their own reason. `corpus:plant-io/
+    pause-at-boundary` (A043), `corpus:plant-io/run-n-scans` (A045) and every `reason: "pause"`
+    expectation in the corpus are explicit-pause scenarios and are untouched by this ruling.
+
+    *What the core must change, and only this.* `all_stop_locked()` sets one flag for two callers:
+    the implied all-stop from a breakpoint (`agent_pass`, `:522`) and an explicit `pause` with no
+    task (`:1351`). They must be distinguishable — the implied hold sets the halt and nothing
+    else — and `agent_pass` must not take the `st == PLC_TASK_RUN_HELD && !v.halted && g_pausing`
+    branch on it. **The `stopped` shape does not change**, so `tests/debug/wire/link_spec.py`
+    needs no edit; the observable change is the *number* of events for one all-stop halt.
+
+    *The cost of not doing it, which is why it is recorded rather than forgotten.* Until the core
+    does it, `corpus:multi-task/non-stop-resume-one` DIVERGEs at step 5 on a real endpoint: the
+    leftover `stopped` from the previous all-stop halt is in the stream, and
+    `firstness.takes_first` (a `stopped` step means the first stop the stream still holds) reads
+    it where the oracle meant the next breakpoint. **No oracle was changed to hide that.** The
+    oracle's step is a correct assertion under this ruling — the runtime diverges from the
+    contract — and the narrowing (`0d419f8`) is *exonerated* by it, not indicted: the step is not
+    reading a spurious stop, it is reading a stop the client did not cause.
 
 ## The status API's debug block
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Protocol, Union
+from typing import Dict, List, Mapping, Optional, Protocol, Set, Union
 
 Json = Union[None, bool, int, float, str, List["Json"], Dict[str, "Json"]]
 JsonObj = Dict[str, Json]
@@ -64,6 +64,15 @@ class Endpoint(Protocol):
 
     def credential(self, kind: str) -> Json:
         """A JWT for `initialize`: `valid`, `none` (null), `forged` (bad signature) or `expired`."""
+
+    def requests(self) -> Optional[Set[str]]:
+        """The requests this endpoint says it serves — the handshake's `requests`
+        (DEBUG_PROTOCOL.md `Handshake`, ADR-003 D3) — or None when it cannot say.
+
+        `None` is neither a yes nor a no, and the runner reads it as "no opinion": a scenario is
+        then left to discover an unserved request the way it always has, by sending it and reading
+        the refusal. Reporting one is optional; pretending to it is not.
+        """
 
 
 @dataclass(frozen=True)

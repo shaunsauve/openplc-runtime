@@ -23,7 +23,7 @@ import json
 import socket
 import threading
 import time
-from typing import List, Mapping, Optional, cast
+from typing import List, Mapping, Optional, Set, cast
 
 from interfaces import Blocked, Json, JsonObj, PlantSample, Session
 
@@ -252,6 +252,12 @@ class CoreSocketEndpoint:
 
     def open_session(self) -> Session:
         raise Blocked("no debugger: this endpoint has no debug session")
+
+    def requests(self) -> Optional[Set[str]]:
+        # The core socket answers no handshake, so this endpoint has no advertisement to give
+        # (`hello` is link↔gateway, and the harness is speaking the legacy socket here). None is
+        # "no opinion", which leaves every scenario to find an unserved request by sending it.
+        return None
 
     def status(self) -> JsonObj:
         return {"state": self._state()}

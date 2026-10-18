@@ -29,7 +29,7 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple, cast
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, cast
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -221,6 +221,27 @@ def _flat(steps: Json) -> Iterator[JsonObj]:
                 yield from _flat(step.get("steps"))
 
 
+def _declared_requests(steps: Json) -> Iterator[Tuple[str, str, bool]]:
+    """`(path, command, expects_unsupported)` for every `request` step, loop bodies included.
+
+    `path` is the dotted index the step has inside the oracle (`6`, `12.0.3`), so a note about one
+    of them names the same step the trace does. The third element is whether the step *asks* for
+    `UNSUPPORTED` — `corpus:plant-io/control-compiled-out` asserts that a compiled-out runtime
+    refuses six requests, so a refusal there is the assertion and never a blocker.
+    """
+    for i, step in enumerate(steps if isinstance(steps, list) else []):
+        if not isinstance(step, dict):
+            continue
+        if "request" in step:
+            expect = step.get("expect")
+            yield "%d" % i, str(step["request"]), isinstance(expect, dict) and (
+                expect.get("error") == "UNSUPPORTED"
+            )
+        if "loop" in step:
+            for sub, command, asked in _declared_requests(step.get("steps")):
+                yield "%d.%s" % (i, sub), command, asked
+
+
 @dataclass
 class _Stream:
     """One client stream and the events it received but no step has consumed yet.
@@ -262,6 +283,9 @@ class _Run:
         self.last_vt: Optional[Dict[str, float]] = None
         # `notBeforeMs` baseline: when the step before this one finished (see _step_event).
         self.step_end_ms = clock.now_ms()
+        # What the endpoint says it serves, once a handshake has said so (Endpoint.requests).
+        # None until then, and None for an endpoint that cannot say.
+        self.advertised: Optional[Set[str]] = None
 
     # -- plumbing
 
@@ -296,6 +320,9 @@ class _Run:
 
     def _request(self, client: str, command: str, args: JsonObj) -> JsonObj:
         resp = self._stream(client).session.request(command, args)
+        if self.advertised is None:
+            served = getattr(self.endpoint, "requests", None)
+            self.advertised = served() if callable(served) else None
         self._drain()
         return resp
 
@@ -899,6 +926,54 @@ class _Run:
             except Exception:  # noqa: BLE001 - closing must not replace the verdict
                 pass
 
+    def unserved_note(self) -> str:
+        """The blocker this scenario would have run into, when the endpoint named one.
+
+        Ruled 2026-10-18 (architect + skeptic consensus) and implemented here rather than in the
+        verdict, because the two facts are of different kinds:
+
+          * **The verdict is the first divergence and stays the first divergence.** Fail-fast is
+            right: a step that did not match leaves the client in a state the oracle did not
+            describe, so every step after it would be judged against a fiction.
+          * **A blocker is not evidence about the product at all.** pytest reports a collection
+            error separately from a failure and CI reporters separate *failed* from *could not
+            run*; neither lets one erase the other. So the scenario's own unserved request —
+            known from the handshake, without running it — is attached to the verdict as a second
+            fact. "Not built yet" then reads as not built yet, next to the divergence, instead of
+            being hidden behind it.
+
+        What it is NOT: a verdict change. A scenario whose steps before the blocker all matched
+        has produced real evidence, and changing its token to BLOCKED would discard it — the same
+        masking defect in the other direction, and a bigger one: 45 of the corpus's 121 oracles
+        declare a capability-gated request, so a collection-time BLOCKED would erase every
+        divergence they had already found.
+
+        Fails open. `None` from `Endpoint.requests()` means the endpoint cannot say, and no
+        opinion is no note; a request the scenario *asks* to be refused
+        (`expect.error == "UNSUPPORTED"`) is its assertion, not a blocker; and an advertisement
+        that is wrong in the other direction — the gateway advertises `restart` and `runToCursor`
+        although the real core answers `UNSUPPORTED` for both (DEBUG_CORE_LINK.md pm ruling 3) —
+        leaves the request to be found the way it always was, by sending it and reading the
+        refusal.
+        """
+        if self.advertised is None:
+            return ""
+        missing = [
+            (path, command)
+            for path, command, asked in _declared_requests(self.doc.get("steps"))
+            if not asked
+            and command not in self.advertised
+            and command != "initialize"  # the handshake that produced the advertisement
+        ]
+        if not missing:
+            return ""
+        where = ", ".join("step %s (%s)" % (p, c) for p, c in missing)
+        return (
+            "not judgeable past here either: this endpoint does not advertise %s — "
+            "so the scenario is unbuilt here as well as divergent (%d request(s) the handshake "
+            "does not list)" % (where, len(missing))
+        )
+
 
 def _max_gap(samples: List[PlantSample], task: str) -> Observed:
     """Longest stretch, in ms, between scan-witness increments over the samples."""
@@ -987,6 +1062,17 @@ def run_scenario(
             f"harness error: {type(exc).__name__}: {exc} ({Path(tb.filename).name}:{tb.lineno})",
         )
     finally:
+        # The blocker goes on the verdict, never into it (see _Run.unserved_note): a divergence
+        # that happens before a request this runtime does not serve must not read as a defect
+        # when the scenario could not have been judged to its end here either.
+        try:
+            note = run.unserved_note()
+        except Exception:  # noqa: BLE001 - a note is not a verdict
+            note = ""
+        if note:
+            result.verdict = Verdict(
+                result.verdict.status, result.verdict.step, "%s; %s" % (result.verdict.reason, note)
+            )
         run.close()
     return result
 

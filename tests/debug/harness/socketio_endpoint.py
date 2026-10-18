@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional, cast
+from typing import Dict, List, Optional, Set, cast
 from urllib.parse import urlparse
 
 from interfaces import Blocked, Json, JsonObj
@@ -327,8 +327,13 @@ class SocketIOEndpoint:
             )
         return None
 
+    def requests(self) -> Optional[Set[str]]:
+        """What the gateway advertised in its handshake, or None before one has been answered."""
+        return self.served
+
     def prepare(self, setup: JsonObj) -> None:
         self._probe()
+        self.served: Optional[Set[str]] = None
         # Nothing deploys a key by ignoring it: a scenario that declares something the run does
         # not carry is refused here, because a silent wrong answer is the only thing worse than
         # no answer. Task intervals (setup.tasks), the heartbeat params (setup.params), the
@@ -749,6 +754,12 @@ class SocketIOSession:
             self._check_params(resp)
         caps = _obj(_obj(resp.get("body")).get("capabilities"))
         self.non_stop = caps.get("nonStop") is True
+        # What the gateway says it serves (DEBUG_PROTOCOL.md `Handshake`, ADR-003 D3). Read here,
+        # once, from the handshake that is the endpoint's own evidence — the runner uses it to
+        # name the request a scenario could not have reached, without running it (Q2's ruling).
+        served = _obj(resp.get("body")).get("requests")
+        if isinstance(served, list) and all(isinstance(s, str) for s in served):
+            self.endpoint.served = set(served)
         if self.endpoint.requires_probes is not None:
             want = self.endpoint.requires_probes
             got = caps.get("probes") is True

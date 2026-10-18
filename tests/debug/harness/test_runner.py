@@ -1224,6 +1224,114 @@ class TimingBoundTest(unittest.TestCase):
         self.assertIn("absent", caught.exception.reason)
 
 
+class UnservedRequestNoteTest(unittest.TestCase):
+    """A divergence that happens BEFORE a request this runtime does not serve, and what the verdict
+    says about it (Q2, ruled 2026-10-18 by architect + skeptic consensus).
+
+    Fail-fast on the first divergence is right and is kept: a step that did not match leaves the
+    client in a state the oracle did not describe, so every step after it would be judged against a
+    fiction. What is NOT right is that the first divergence then reads as the only thing the run
+    found — `multi-task/non-stop-resume-one` reports a `stopped.reason` mismatch and never mentions
+    that step 6 asks for `setHaltMode`, which DEBUG_CORE_LINK.md says the real core does not
+    implement. So "not built yet" reads as "built and wrong".
+
+    pytest and every CI reporter keep those two facts apart (a collection error is not a failure;
+    *could not run* is not *failed*) and never let one erase the other. So the blocker is attached
+    to the verdict as a second fact and the verdict token is left alone. It is emphatically NOT a
+    collection-time BLOCKED: 45 of the corpus's 121 oracles declare a capability-gated request, so
+    that would erase every divergence those scenarios had already found — the same masking defect,
+    pointed the other way.
+    """
+
+    SCENARIO = "plant-io/bp-before-statement"
+    # The fake serves everything the fake serves; these are the ones this test withholds.
+    SERVED = {"initialize", "setBreakpoints", "continue", "pause", "stackTrace", "variables",
+              "scopes", "status", "detach", "terminate", "stop"}
+
+    @staticmethod
+    def _run(scenario: str, defect: Optional[str], advertised: Optional[set]):
+        world = FakeWorld(defects={defect} if defect else set())
+        outputs = world.build()
+        endpoint = world.endpoint()
+        endpoint.advertised = advertised
+        return runner.run_scenario(_oracle(scenario), endpoint, world.plant(), world, outputs)
+
+    def test_the_verdict_stays_the_first_divergence(self) -> None:
+        # The fake stops at the wrong line first, so step 3 diverges. That is the verdict and it
+        # does not move: the blocker is a second fact, not a replacement.
+        result = self._run(self.SCENARIO, "stop_at_wrong_line_first", self.SERVED)
+        self.assertEqual(result.verdict.status, "DIVERGE")
+        self.assertEqual(result.verdict.step, 3)
+
+    def test_a_divergence_before_an_unserved_request_names_that_request(self) -> None:
+        # The whole point. `next` is declared at step 5 and is not advertised, so the run is over
+        # at step 3 anyway — and the reason now says the scenario was not judgeable to its end
+        # here either, instead of letting the divergence stand for the whole run.
+        result = self._run(self.SCENARIO, "stop_at_wrong_line_first", self.SERVED)
+        self.assertIn("not judgeable past here either", result.verdict.reason)
+        self.assertIn("step 5 (next)", result.verdict.reason)
+        self.assertIn("does not advertise", result.verdict.reason)
+        # ... and the divergence is still the first thing the reason says.
+        self.assertTrue(result.verdict.reason.startswith("step 3 (event): stopped.location.line"))
+
+    def test_an_endpoint_that_cannot_say_contributes_no_note(self) -> None:
+        # No opinion is not a yes and not a no. Nothing is invented about a runtime that never
+        # advertised anything.
+        result = self._run(self.SCENARIO, "stop_at_wrong_line_first", None)
+        self.assertEqual(result.verdict.status, "DIVERGE")
+        self.assertNotIn("not judgeable", result.verdict.reason)
+
+    def test_a_run_whose_every_request_is_advertised_gets_no_note(self) -> None:
+        # The advertisement that covers the whole scenario is silence, not a note.
+        result = self._run(self.SCENARIO, None, self.SERVED | {"next"})
+        self.assertEqual(result.verdict.status, "PASS")
+        self.assertNotIn("not judgeable", result.verdict.reason)
+
+    def test_a_request_the_scenario_asks_to_be_refused_is_not_a_blocker(self) -> None:
+        # `corpus:plant-io/control-compiled-out` asserts that a compiled-out runtime refuses six
+        # requests. Naming a refusal there is the assertion, so it can never be the blocker — the
+        # advertisement withholds exactly those six and offers everything else the scenario asks
+        # for, so the ONLY thing that could produce a note is the asks-for-it rule.
+        advertised = {
+            command
+            for _path, command, asked in runner._declared_requests(
+                json.loads(_oracle("plant-io/control-compiled-out").read_text())["steps"]
+            )
+            if not asked
+        }
+        self.assertNotIn("pause", advertised)
+        self.assertIn("subscribe", advertised)
+        result = self._run("plant-io/control-compiled-out", None, advertised)
+        self.assertNotIn("not judgeable", result.verdict.reason)
+
+    def test_initialize_is_never_its_own_blocker(self) -> None:
+        # The advertisement arrives IN the handshake, so a scenario whose only request is
+        # `initialize` is never blocked by an advertisement that does not list it: it would be the
+        # handshake reading itself, and it has already answered.
+        run = object.__new__(runner._Run)
+        run.doc = {"steps": [{"request": "initialize", "expect": {"success": True}}]}
+        run.advertised = {"continue"}
+        self.assertEqual(run.unserved_note(), "")
+
+    def test_a_loop_body_s_request_is_named_by_its_own_path(self) -> None:
+        run = object.__new__(runner._Run)
+        run.doc = _unadvertised_doc()
+        run.advertised = {"initialize", "continue"}
+        note = run.unserved_note()
+        self.assertIn("step 1.2 (stackTrace)", note)
+
+
+def _unadvertised_doc() -> dict:
+    return {"steps": [
+        {"request": "initialize", "expect": {"success": True}},
+        {"loop": 3, "steps": [
+            {"wait": {"scans": 1}},
+            {"event": "continued", "withinMs": 500},
+            {"request": "stackTrace", "expect": {"success": True}},
+        ]},
+    ]}
+
+
 class DiagnosticLedgerTest(unittest.TestCase):
     """A diagnostic scenario's verdict is a bisect, and the ledger has to say so.
 

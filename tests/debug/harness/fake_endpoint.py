@@ -506,6 +506,14 @@ class FakeEndpoint:
     def __init__(self, world: FakeWorld) -> None:
         self.world = world
         self.description = "fake endpoint (plant-io simulation)"
+        # What this fake claims to serve, for `requests()`. None — no opinion — unless a test
+        # sets it: the advertisement rule is the gateway's (`COMMANDS` + capability flags in
+        # webserver/debug_gateway/protocol.py) and the harness must not import the product to
+        # compute it, so a test that wants the runner to see a gap states the gap.
+        self.advertised: Optional[Set[str]] = None
+
+    def requests(self) -> Optional[Set[str]]:
+        return self.advertised
 
     def prepare(self, setup: JsonObj) -> None:
         tasks = setup.get("tasks")
