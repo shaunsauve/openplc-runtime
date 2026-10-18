@@ -45,7 +45,9 @@ def _load(name: str) -> types.ModuleType:
 
 
 _load("webserver.debug_gateway.protocol")
-DebugInfo = _load("webserver.debug_gateway.debug_info").DebugInfo
+_debug_info = _load("webserver.debug_gateway.debug_info")
+DebugInfo = _debug_info.DebugInfo
+protocol = _load("webserver.debug_gateway.protocol")
 
 
 def _info() -> DebugInfo:
@@ -105,6 +107,26 @@ class TypeDetail(unittest.TestCase):
     def test_an_unknown_type_adds_no_keys(self):
         self.assertEqual(_info().type_detail(999), {})
         self.assertEqual(_info().type_detail(None), {})
+
+
+class TypesArgumentSurvivesCheckArgs(unittest.TestCase):
+    """`check_args` keeps the DECLARED arguments and drops everything else.
+
+    A renderer can be correct and still never run: `types: true` undeclared is dropped on the
+    way in, so `type_detail` is never reached and the answer silently lacks every key it would
+    have added. This is the guard for that, and it is why `types` is declared in protocol.py.
+    """
+
+    def test_types_true_reaches_the_handler(self):
+        args = protocol.check_args(protocol.COMMANDS["variables"],
+                                   {"path": "PROG0.segs", "types": True})
+        self.assertEqual(args, {"path": "PROG0.segs", "types": True},
+                         "check_args dropped types: true, so type_detail would never run")
+
+    def test_omitting_types_leaves_it_out(self):
+        self.assertEqual(protocol.check_args(protocol.COMMANDS["variables"],
+                                             {"path": "PROG0.segs"}),
+                         {"path": "PROG0.segs"})
 
 
 if __name__ == "__main__":

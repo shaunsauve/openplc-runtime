@@ -227,7 +227,7 @@ COMMANDS: Mapping[str, Command] = {
             Kind.READ,
             ("probes",),
             {"variablesReference": Arg("int", minimum=1), "path": Arg("str"),
-             "frameId": Arg("int", minimum=0)},
+             "frameId": Arg("int", minimum=0), "types": Arg("bool")},
             probe_dependent=True,
             local=True,
         ),

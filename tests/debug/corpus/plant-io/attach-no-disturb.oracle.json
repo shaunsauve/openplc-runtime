@@ -10,9 +10,9 @@
   "setup": {"session": "none", "plant": {"samplePeriodMs": 10}},
   "steps": [
     {"observe": "plant", "expect": {"witness": {"Main": {"~capture": "w"}}}},
-    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~capture": "pid"}, "overruns": {"~capture": "ov"}}}},
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~capture": "pid"}, "tasks": [{"task": "Main", "overruns": {"~capture": "ov"}}]}}},
     {"loop": 20, "steps": [{"client": "att", "request": "initialize", "args": {"role": "observer"}, "expect": {"success": true}}, {"client": "att", "request": "detach", "expect": {"success": true}}]},
     {"observe": "plant", "throughout": true, "note": "the witness never goes back (a reload) and never pauses longer than one interval + jitter", "expect": {"scanDelta": {"Main": {"~ge": 1}}, "maxGapMs": {"Main": {"~le": 150}}}},
-    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~ref": "pid"}, "overruns": {"~ref": "ov"}}}}
+    {"observe": "status", "expect": {"state": "RUNNING", "fields": {"pid": {"~ref": "pid"}, "tasks": [{"task": "Main", "overruns": {"~ref": "ov"}}]}}}
   ]
 }
