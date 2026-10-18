@@ -81,6 +81,21 @@ sys.path.insert(0, str(CORPUS))
 import firstness  # noqa: E402
 
 POLL_MS = 5.0
+# The longest a wait may go between two asks of the stream, so one cadence number has to carry two
+# bounds that pull against each other:
+#   * the FLOOR. `notBeforeMs` reads the stamp the drain gave an event, not the instant the runtime
+#     emitted it, so a slice bounds how late a stamp can be. The tightest bound the corpus can put
+#     on that is A116's `notBeforeMs 9000` (plant-io/force-ttl step 14): a force may not be
+#     reported expired earlier than 9 s after the step before it. A 1000 ms cap can stamp an
+#     arrival a whole second late and still leave the floor 8000 ms of headroom to fire -- 8x.
+#   * the OVERRUN. `wait wallMs` is a request to sleep N ms, and the per-slice cost (a drain plus
+#     sleep_ms granularity) is charged once per slice, so the overrun is asked/SLICE * that cost.
+#     A210 (plant-io/force-default-ttl) tolerates 1000 ms of overrun on a 299 s wait, and asks a
+#     read to land within +-1 s of it: 299000/1000 slices at the observed ~2 ms is ~600 ms, inside
+#     the tolerance with the headroom left for the steps either side.
+# 1000 ms is where those meet. It is also the resolution at which "did anything arrive?" is still a
+# question about a runtime whose timers run in seconds and whose tasks run in tens of ms.
+MAX_SLEEP_SLICE_MS = 1000.0
 DEFAULT_WITHIN_MS = 5000.0
 MARKER = re.compile(r"^@[A-Za-z0-9_]+$")
 SECONDARY = re.compile(r"^(variant|reject)-.*\.st$")
@@ -705,20 +720,42 @@ class _Run:
         return json.dumps(wait)
 
     def _sleep(self, ms: float) -> None:
-        """Sleep in poll-sized slices, draining between them.
+        """Sleep in slices, draining between them, and lengthen the slice only while a window
+        passes with nothing on the stream.
 
-        A wait that slept in one call would hold every event that arrived during it in the
-        session's queue until it returned, and `notBeforeMs` reads the queue's stamp, not the
-        runtime's clock: a `wait wallMs 16000` before an event step would stamp an event that
-        really arrived at 200 ms as 16000 ms and let a runtime that acted early pass. The slices
-        keep every stamp within one poll of the arrival it stands for.
+        A wait that slept in one call would hold every event that arrived during it in the session's
+        queue until it returned, and `notBeforeMs` reads the queue's stamp, not the runtime's clock:
+        a `wait wallMs 16000` before an event step would stamp an event that really arrived at 200 ms
+        as 16000 ms and let a runtime that acted early pass. So the slices are load-bearing and are
+        not being removed for being expensive.
+
+        What was removed is their fixed length. One `POLL_MS` slice per 5 ms of wall time spends the
+        whole slice on the per-slice cost (a `_drain` and the granularity of `sleep_ms`, measured at
+        1.6-2.3 ms on a real endpoint), so `wait wallMs 299000` took 394-433 s: every one of the 45
+        oracles that wait on wall time overran by a third, and A210 -- whose expectation IS elapsed
+        time -- DIVERGEd on its own tolerance.
+
+        So the slice starts at one poll and doubles on every window the drain found empty, up to
+        MAX_SLEEP_SLICE_MS; any arrival puts it straight back to one poll. That keeps the guarantee
+        the fixed slice was bought for -- the stamp is within the slice in which the event arrived,
+        and that slice is one poll whenever events are actually flowing -- while asking the stream
+        logarithmically instead of 60,000 times over a five-minute wait (59800 slices at 5 ms, about
+        300 at the cap). It never overshoots: `min(left, slice_ms)` bounds the last slice to what is
+        left of the wait, exactly as the fixed slice did.
         """
         left = max(ms, 0.0)
+        slice_ms = POLL_MS
         while left > 0.0:
-            slice_ms = min(left, POLL_MS)
+            take = min(left, slice_ms)
+            had = self.arrivals
             self._drain()
-            self.clock.sleep_ms(slice_ms)
-            left -= slice_ms
+            self.clock.sleep_ms(take)
+            left -= take
+            # An arrival is only visible at the drain, so it is this drain's count that says whether
+            # the window just slept through was quiet.
+            slice_ms = (
+                POLL_MS if self.arrivals > had else min(slice_ms * 2.0, MAX_SLEEP_SLICE_MS)
+            )
 
     def _step_plant(self, step: JsonObj) -> str:
         plant = _obj(step["plant"])

@@ -692,14 +692,30 @@ class _TimedSession:
         pass
 
 
+class _CountingSession(_TimedSession):
+    """A timed session that counts the drains, so a row can measure what a wait COST rather than
+    what it saw."""
+
+    def __init__(self, clock) -> None:
+        super().__init__([], clock)
+        self.drains = 0
+
+    def events(self) -> List[dict]:
+        self.drains += 1
+        return super().events()
+
+
 class _TimedEndpoint:
     description = "timed"
 
-    def __init__(self, events: List[dict], clock) -> None:
+    def __init__(self, events: List[dict], clock, session=None) -> None:
         self.events = list(events)
         self.clock = clock
+        self.session = session
 
     def open_session(self):
+        if self.session is not None:
+            return self.session
         return _TimedSession(self.events, self.clock)
 
 
@@ -1009,14 +1025,14 @@ class TimingBoundTest(unittest.TestCase):
     clock did. Neither is a general two-sided timer and the corpus README says so."""
 
     @staticmethod
-    def _run(events: List[dict], plant=None):
+    def _run(events: List[dict], plant=None, session=None):
         run = object.__new__(runner._Run)
         run.doc = {}
         run.corpus = "plant-io"
         run.table = {}
         run.endpoint = None  # type: ignore[assignment]
         run.clock = _VirtualClock()  # type: ignore[assignment]
-        run.endpoint = _TimedEndpoint(events, run.clock)  # type: ignore[assignment]
+        run.endpoint = _TimedEndpoint(events, run.clock, session)  # type: ignore[assignment]
         run.plant = plant or runner.UnavailablePlant()  # type: ignore[assignment]
         run.build = runner.UnavailableBuild()  # type: ignore[assignment]
         run.setup = {}
@@ -1079,6 +1095,59 @@ class TimingBoundTest(unittest.TestCase):
         detail = run._step_event({"event": "stopped", "withinMs": 1000,
                                   "expect": {"reason": "breakpoint"}})
         self.assertEqual(detail, "stopped")
+
+    # -- wait slicing: the drain (load-bearing) and its cost (not)
+
+    def test_a_long_wait_drains_often_enough_to_stamp_an_early_arrival_low(self) -> None:
+        """The drain AT THE CAP, not on the growth ramp.
+
+        The growth is geometric, so before the cap is reached the slice in effect at t is about t/2
+        and a cap change is invisible to anything that arrives early. The cap is what bounds an
+        arrival in the LONG part of a wait -- past twice the cap -- and that is where this event is
+        put: 250 s into a 299 s wait, at 250x the cap.
+
+        The shape is A189's (plant-io/control-handover step 12): something that may not fire before
+        299 s, observed firing at 250 s. Stamped within one cap of its arrival the floor still
+        fires; stamped at the end of the wait it does not, and a runtime that acted 49 s early is
+        handed a pass.
+
+        Red under a cap of 200000, which is a real measurement and not a strawman: with a cap that
+        wide the slice in effect at 250 s is 81920, the event is stamped at 331920, and the floor
+        passes it. (A cap raised to 200000 while the event sat at 20 s changed nothing, which is why
+        this row is at 250 s and that one was not.) MAX_SLEEP_SLICE_MS is therefore the number that
+        decides this, and the 9000 ms floor in A116 is what buys room for it.
+        """
+        run = self._run([_at(250000.0, "forces", {"list": []})])
+        run._stream("main")
+        run._step_wait({"wait": {"wallMs": 299000}})
+        stamps = [at for _, ev, at in run._stream("main").inbox if ev["event"] == "forces"]
+        self.assertTrue(stamps, "the wait drained nothing, so the event is still in the session")
+        self.assertGreater(stamps[0], 250000.0, "the event was stamped before it arrived")
+        self.assertLessEqual(stamps[0], 250000.0 + runner.MAX_SLEEP_SLICE_MS)
+        run.step_end_ms = 0.0
+        with self.assertRaises(runner.Diverge) as caught:
+            run._step_event({"event": "forces", "withinMs": 299000, "notBeforeMs": 299000,
+                             "expect": {"body": {"list": {"~len": 0}}}})
+        self.assertIn("fired early", caught.exception.reason)
+
+    def test_a_long_wait_costs_logarithmically_many_drains_not_one_per_poll(self) -> None:
+        """Why the slice grows. 45 of the corpus's oracles wait on wall time, and at one slice per
+        POLL_MS a 299 s wait asked the stream 59,800 times and returned at 394-433 s on a real
+        endpoint: `wait wallMs` overran by a third and A210 DIVERGEd on its own +-1 s tolerance.
+
+        The bound is stated against the measured budget rather than as "fewer drains": A210's wait
+        may cost at most 1000 ms of overrun, and the per-slice cost measured on that endpoint is
+        1.6-2.3 ms, so 299000/1000 * 2.3 = 688 ms of drain is the whole allowance. Red under the
+        old fixed slice, which asks 59,800 times.
+        """
+        session = _CountingSession(None)
+        run = self._run([], session=session)
+        run._stream("main")
+        run._step_wait({"wait": {"wallMs": 299000}})
+        allowed = int(299000 / runner.MAX_SLEEP_SLICE_MS * 2.3) + 32  # + the growth ramp
+        self.assertLessEqual(session.drains, allowed)
+        # and the wait is still the wait: it did not end early to save the drains
+        self.assertEqual(run.clock.now_ms(), 299000.0)
 
     # -- sinceVtMs
 
