@@ -729,33 +729,44 @@ class _Run:
         as 16000 ms and let a runtime that acted early pass. So the slices are load-bearing and are
         not being removed for being expensive.
 
-        What was removed is their fixed length. One `POLL_MS` slice per 5 ms of wall time spends the
-        whole slice on the per-slice cost (a `_drain` and the granularity of `sleep_ms`, measured at
-        1.6-2.3 ms on a real endpoint), so `wait wallMs 299000` took 394-433 s: every one of the 45
-        oracles that wait on wall time overran by a third, and A210 -- whose expectation IS elapsed
-        time -- DIVERGEd on its own tolerance.
+        What was removed is their fixed length, and what was wrong with their bookkeeping. One
+        POLL_MS slice per 5 ms of wall time spends the whole slice on the per-slice cost (a `_drain`
+        and the granularity of `sleep_ms`), so `wait wallMs 299000` took 394-433 s: every one of
+        the 45 oracles that wait on wall time overran by a third, and A210 -- whose expectation IS
+        elapsed time -- DIVERGEd on its own tolerance. But the overrun was not only the slice count:
+        the loop subtracted the slice it ASKED for, and `sleep_ms` returns late, so every slice's
+        overshoot was added to the next one's and the wait came back overshot by slices * cost. The
+        cost is therefore charged once per slice however long the slice is, and a wait wants to be
+        N ms long, not N ms plus that.
 
-        So the slice starts at one poll and doubles on every window the drain found empty, up to
+        So the loop is bounded by an ABSOLUTE deadline rather than by a tally of requested slices:
+        it sleeps until the instant the wait asked for and stops there, and the per-slice overshoot
+        is then paid once, at the end, instead of 300 times. The drain is untouched -- still before
+        every sleep, still every slice -- so what a stamp can be late by is unchanged.
+
+        The slice starts at one poll, doubles on every window the drain found empty, and is capped at
         MAX_SLEEP_SLICE_MS; any arrival puts it straight back to one poll. That keeps the guarantee
         the fixed slice was bought for -- the stamp is within the slice in which the event arrived,
         and that slice is one poll whenever events are actually flowing -- while asking the stream
         logarithmically instead of 60,000 times over a five-minute wait (59800 slices at 5 ms, about
-        300 at the cap). It never overshoots: `min(left, slice_ms)` bounds the last slice to what is
-        left of the wait, exactly as the fixed slice did.
+        300 at the cap).
         """
-        left = max(ms, 0.0)
+        end = self.clock.now_ms() + max(ms, 0.0)
         slice_ms = POLL_MS
-        while left > 0.0:
-            take = min(left, slice_ms)
+        while True:
+            now = self.clock.now_ms()
+            if now >= end:
+                return
             had = self.arrivals
             self._drain()
-            self.clock.sleep_ms(take)
-            left -= take
+            self.clock.sleep_ms(min(end - now, slice_ms))
             # An arrival is only visible at the drain, so it is this drain's count that says whether
             # the window just slept through was quiet.
             slice_ms = (
                 POLL_MS if self.arrivals > had else min(slice_ms * 2.0, MAX_SLEEP_SLICE_MS)
             )
+            if self.clock.now_ms() <= now:  # a clock that does not advance would spin for ever
+                raise Diverge(f"a {ms:g} ms wait did not advance the clock")
 
     def _step_plant(self, step: JsonObj) -> str:
         plant = _obj(step["plant"])

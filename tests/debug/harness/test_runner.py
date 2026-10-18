@@ -692,6 +692,28 @@ class _TimedSession:
         pass
 
 
+class _SloppyClock:
+    """A wall clock that returns LATE, as `time.sleep` does -- `slop_ms` on every call.
+
+    `_VirtualClock` is exact, so it cannot tell a wait that subtracts the slice it asked for from
+    one that stops at an absolute deadline: both land on the same reading. This one can, and it is
+    the clock that matters, because the difference between them is exactly the per-slice overshoot
+    that made `wait wallMs 299000` return at 433 s on a real endpoint.
+    """
+
+    def __init__(self, slop_ms: float = 2.0) -> None:
+        self.now = 0.0
+        self.slop = slop_ms
+        self.sleeps = 0
+
+    def now_ms(self) -> float:
+        return self.now
+
+    def sleep_ms(self, ms: float) -> None:
+        self.now += max(ms, 0.0) + self.slop
+        self.sleeps += 1
+
+
 class _CountingSession(_TimedSession):
     """A timed session that counts the drains, so a row can measure what a wait COST rather than
     what it saw."""
@@ -1025,13 +1047,13 @@ class TimingBoundTest(unittest.TestCase):
     clock did. Neither is a general two-sided timer and the corpus README says so."""
 
     @staticmethod
-    def _run(events: List[dict], plant=None, session=None):
+    def _run(events: List[dict], plant=None, session=None, clock=None):
         run = object.__new__(runner._Run)
         run.doc = {}
         run.corpus = "plant-io"
         run.table = {}
         run.endpoint = None  # type: ignore[assignment]
-        run.clock = _VirtualClock()  # type: ignore[assignment]
+        run.clock = clock or _VirtualClock()  # type: ignore[assignment]
         run.endpoint = _TimedEndpoint(events, run.clock, session)  # type: ignore[assignment]
         run.plant = plant or runner.UnavailablePlant()  # type: ignore[assignment]
         run.build = runner.UnavailableBuild()  # type: ignore[assignment]
@@ -1097,6 +1119,29 @@ class TimingBoundTest(unittest.TestCase):
         self.assertEqual(detail, "stopped")
 
     # -- wait slicing: the drain (load-bearing) and its cost (not)
+
+    def test_a_wait_returns_at_its_deadline_on_a_clock_that_sleeps_long(self) -> None:
+        """The overrun, and what it was made of.
+
+        `wait wallMs` is a request to sleep N ms. Two shapes both drain in slices and both are
+        wrong in a different way: a loop that subtracts the slice it ASKED for accumulates every
+        sleep's overshoot into the total, and a loop bounded by an absolute deadline pays it once.
+        On the real endpoint `time.sleep` returns 1.6-2.3 ms late, `wait wallMs 299000` took 394 s
+        and 433 s on two runs -- 59,800 slices times that -- and A210 DIVERGEd on its own tolerance.
+
+        `_SloppyClock` is the clock that separates them: exact, both rows below would agree on it.
+        The bound is one slop, because that is all a deadline-bounded loop can cost however many
+        slices it took. Red under the tally, which lands at slop * slices.
+        """
+        clock = _SloppyClock(2.0)
+        run = self._run([], clock=clock)
+        run._stream("main")
+        run._step_wait({"wait": {"wallMs": 299000}})
+        overshoot = clock.now_ms() - 299000.0
+        self.assertLessEqual(overshoot, clock.slop)
+        # and the number that went with it: the same wait on a tally lands hundreds of ms past
+        self.assertGreater(clock.sleeps, 100)
+        self.assertGreater(clock.sleeps * clock.slop, overshoot * 10)
 
     def test_a_long_wait_drains_often_enough_to_stamp_an_early_arrival_low(self) -> None:
         """The drain AT THE CAP, not on the growth ramp.
