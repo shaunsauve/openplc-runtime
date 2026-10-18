@@ -257,23 +257,32 @@ produced. The cadence those drains run at is the question this section cannot le
 |---|---|---|
 | `event` waiting for its own event (`_next_event`) | fixed, one poll | one poll (5 ms) |
 | `wait scans` (`_wait_scans`) | fixed, two polls | two polls (10 ms) |
-| `wait wallMs`, `noEvent forMs` (`_sleep`) | **one poll, doubling while the window stays empty, capped at 1000 ms** | the slice in effect when the event arrived — about `t/2` on the ramp, the 1000 ms cap after that |
+| `wait wallMs`, `noEvent forMs` (`_sleep`) | **one poll, doubling while the window stays empty, capped at 1000 ms**; the loop stops at an absolute deadline | the slice in effect when the event arrived — about `t/2` on the ramp, the 1000 ms cap after that |
 | `wait vtMs` | `_sleep(10)` — below the ramp, so one poll then one | one poll |
 
 Two numbers set the cap, and they pull against each other, so both are recorded here rather than
-only in `runner.py`. **The overrun:** `wait wallMs` is a request to sleep N ms, the per-slice cost
-is charged once per slice, and at one slice per poll a 299 s wait asked the stream 59,800 times and
-returned at 394–433 s on a real endpoint — an overrun of a third, which A210 (`plant-io/
-force-default-ttl`, whose expectation *is* elapsed time) DIVERGEd on. **The floor:** the largest
-stamp error is the cap, and the tightest bound any oracle can put on a floor today is A116's
-`notBeforeMs 9000` (`plant-io/force-ttl` step 14), so a 1000 ms cap can stamp an arrival a whole
-second late and still leave that floor 8000 ms of room to fire.
+only in `runner.py`. **The overrun:** `wait wallMs` is a request to sleep N ms, and `time.sleep`
+returns late — 1.6–2.3 ms on the endpoint measured — so a loop that subtracts the slice it asked for
+carries every slice's overshoot into the next and comes back overshot by *slices × cost* however
+short the slice. At one slice per poll, `wait wallMs 299000` asked the stream 59,800 times and
+returned at 394–433 s; A210 (`plant-io/force-default-ttl`, whose expectation *is* elapsed time)
+DIVERGEd on its own ±1 s tolerance. **The floor:** the largest stamp error is the cap, and the
+tightest bound any oracle can put on a floor today is A116's `notBeforeMs 9000`
+(`plant-io/force-ttl` step 14), so a 1000 ms cap can stamp an arrival a whole second late and still
+leave that floor 8000 ms of room to fire.
 
-A `wait` short enough to stay below the ramp is unchanged, so the cap only ever governs the long
-waits, which are the ones that were costing the time. Measured, both ends, on a real endpoint and
-in `harness/test_runner.py`: the overrun falls from +32 % to well inside A210's tolerance, and the
-floor row is red under the fixed slice this replaced, under a single undrained sleep, and under the
-cap widened to 200000.
+Those two are not the same knob, and separating them is what makes both cheap: the wait is bounded
+by an **absolute deadline**, so the overshoot is paid once at the end rather than once per slice and
+costs the same at any cadence; the cap is then only ever bounding how late a stamp can be, which is
+the one thing it has to do. A `wait` short enough to stay below the ramp behaves exactly as before,
+so the cap governs the long waits, which are the ones that were costing the time.
+
+Measured on a real endpoint, both ends. `plant-io/force-default-ttl`'s `wait wallMs 299000`:
+**393,997 ms and 433,318 ms** at the fixed slice, **299,640 ms** with the growing slice alone, and
+the deadline makes the remainder independent of the cadence. In `harness/test_runner.py` the
+matching rows are red under the fixed slice, under a single undrained sleep, under the cap widened
+to 200000, and under the tally — and the tally row runs on `_SloppyClock`, because a `_VirtualClock`
+is exact and lands on the same reading either way.
 
 **`sinceVtMs` is the right instrument for PLC time and never for wall time.** Virtual time is the
 PLC's own clock; the delta between two plant observations is exact however long the wall clock
