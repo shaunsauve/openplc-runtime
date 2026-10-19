@@ -261,9 +261,15 @@ class Dap:
 
     def _write_frame(self, payload: Dict[str, Any]) -> None:
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.writer.write(b"Content-Length: %d\r\n\r\n" % len(raw))
-        self.writer.write(raw)
-        self.writer.flush()
+        try:
+            self.writer.write(b"Content-Length: %d\r\n\r\n" % len(raw))
+            self.writer.write(raw)
+            self.writer.flush()
+        except (BrokenPipeError, ValueError, OSError) as exc:
+            # An adapter that has gone is a fact about the run, not an exception in the middle of
+            # one: BrokenPipeError out of a write says nothing about which step failed.
+            raise Blocked("the adapter's stream is closed (%s) while sending %r"
+                          % (exc, payload.get("command"))) from exc
 
     # -- protocol
 
@@ -828,7 +834,8 @@ def inspect(rig: Rig, chk: Checks) -> None:
         # Resuming with it still armed parks the task on the very probe it is standing on (A038's
         # step-onto-breakpoint), which is a second stop in the same scan and no reading a second
         # time can tell apart from a cached one.
-        scans_before = rig.plant.settle(3)
+        scans_at_stop = rig.plant.witness()
+        rig.plant.settle(3)
         rig.call(chk, client, "setBreakpoints",
                  {"source": {"path": "program.st"},
                   "breakpoints": [{"line": rig.line("@PID_CALL")}]})
@@ -837,10 +844,14 @@ def inspect(rig: Rig, chk: Checks) -> None:
         chk.eq("the second stop is in the same statement",
                [pou_name(f.get("name")) for f in again], ["pidctl", "fb_motor", "cell"])
         second = rig.scope_values(chk, client, again[0]["id"])
+        # The plant holds the LAST COMPLETE scan, one behind the program (ADR-004 D1.1), so what it
+        # can say is that the count went UP between the two stops - that the program really ran -
+        # and not that it moved again by the second stop, which lands inside the scan the plant
+        # has not published yet.
         chk.ok("the program ran between the two stops, on the plant's own count",
-               rig.plant.witness() > scans_before,
-               "the plant counted %d scans before the resume and %d at the second stop"
-               % (scans_before, rig.plant.witness()))
+               rig.plant.witness() > scans_at_stop,
+               "the plant counted %d scans at the first stop and %d after the resume"
+               % (scans_at_stop, rig.plant.witness()))
         chk.ok("the second read is of a program that has run since the first",
                float(second["pv"]["value"]) > float(first["pv"]["value"]),
                "pv was %r at the first stop and %r at the second — a value that did not move is a "
