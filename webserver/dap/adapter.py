@@ -64,6 +64,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 NAMESPACE = "/api/debug-session"
 PROTOCOL_VERSION = "1.0"
+# Where the fallback Socket.IO client lives: THIS directory. Named rather than written
+# inline because it is the one path a move can silently break — point it anywhere that
+# does not hold `wss_client.py` and the adapter still starts, still answers
+# `initialize`, and then fails every `attach`. The guard is in
+# tests/debug/dap/test_dap.py::Placement and asserts this constant, not a copy of it.
+FALLBACK_CLIENT_DIR = Path(__file__).resolve().parent
 # The wire's own deadline is 5 s for a request and 30 s for `restart`; the adapter adds a little so
 # a refusal is never mistaken for a hang, and a hang is never mistaken for a refusal.
 RESPONSE_TIMEOUT_S = 10.0
@@ -225,7 +231,7 @@ def _socketio_client(ssl_verify: bool):
         pass
     # This directory, not a package: the adapter runs as a script, so its own directory is the only
     # one on sys.path for free, and the fallback client is a sibling rather than an installed module.
-    fallback_dir = str(Path(__file__).resolve().parent)
+    fallback_dir = str(FALLBACK_CLIENT_DIR)
     if fallback_dir not in sys.path:
         sys.path.insert(0, fallback_dir)
     try:

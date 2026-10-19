@@ -238,15 +238,38 @@ class Placement(unittest.TestCase):
                          "the adapter must import only the stdlib at module scope to be "
                          "launchable on its own; it also imports %s" % outside)
 
-    def test_the_adapter_can_reach_its_own_socketio_fallback(self):
-        """The move's real hazard, and the reason `wss_client.py` travelled with the adapter.
+    def test_the_socketio_fallback_resolves_to_a_client_that_is_there(self):
+        """The move's real hazard, and the reason `wss_client.py` travelled with it.
 
-        The runtime image ships no `websocket-client`, so `socketio.Client` always raises and
-        `_socketio_client` always falls back to the sibling `wss_client`. A move that left that
-        file under `tests/debug/wire/` would resolve a directory that does not exist and the
-        adapter would start, answer `initialize`, and then fail every `attach` — with the file
-        tree looking perfect. Asserted by resolution, not by connecting.
+        The runtime image ships no `websocket-client` (measured: `websocket` ABSENT,
+        `socketio` PRESENT), so `socketio.Client` always raises and `_socketio_client`
+        always falls back to the sibling `wss_client`. A move that left that file under
+        `tests/debug/wire/` resolves a directory that does not exist: the adapter starts,
+        answers `initialize`, and fails every `attach`, with the file tree looking perfect.
+
+        Asserted on the adapter's OWN constant, not on a copy of the path written here —
+        a guard that re-derives what it is guarding checks its own arithmetic.
         """
+        resolved = adapter.FALLBACK_CLIENT_DIR
+        self.assertEqual(resolved.resolve(), dap_harness.ADAPTER.parent.resolve(),
+                         "the adapter resolves its fallback client to %s, which is not its "
+                         "own directory" % resolved)
+        self.assertTrue((resolved / "wss_client.py").is_file(),
+                        "the Socket.IO client the adapter falls back to is not at %s, so an "
+                        "attach against a real runtime has no client to use" % resolved)
+
+    def test_the_fallback_client_offers_what_the_adapter_imports(self):
+        """The import itself, where `simple_websocket` is installed.
+
+        Splits from the check above because it needs a dependency plain `python3` does not
+        have, and a guard that silently skips everywhere is not a guard. Skipped loudly
+        rather than quietly: the skip reason names what would run it.
+        """
+        try:
+            import simple_websocket  # noqa: F401,PLC0415
+        except ImportError:  # pragma: no cover - depends on the interpreter's environment
+            self.skipTest("simple_websocket is not installed; run this where the runtime "
+                          "dependencies are (the runtime image, or the repo venv)")
         adapter_dir = dap_harness.ADAPTER.parent
         sys.path.insert(0, str(adapter_dir))
         try:
