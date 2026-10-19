@@ -3,7 +3,7 @@
 # (STruCpp's codegen, probes on, built by the runtime's own compile.sh), the reference plant, and
 # the real gateway (webserver/debug_gateway over TLS on 127.0.0.1:8443, linked to plc_main's
 # /run/runtime/plc_debug.socket), driven by the headless harness over WSS with the
-# simple-websocket client (tests/debug/wire/wss_client.py).
+# simple-websocket client (webserver/dap/wss_client.py).
 #
 # Usage: tests/debug/plant/session_e2e.sh [--results PATH] [ORACLE...]   (default: the J1 run-control set)
 #        Every ORACLE must be of one corpus program (the first one's directory), which is built and run

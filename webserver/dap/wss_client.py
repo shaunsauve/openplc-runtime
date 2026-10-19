@@ -6,7 +6,14 @@ transport, which is not installed (a pending user decision). It offers the slice
 `socketio.Client` that tests/debug/harness/socketio_endpoint.py uses (`on`, `connect`, `emit`,
 `disconnect`, `eio.disconnect(abort=True)`), so the harness's own SocketIOSession runs over it.
 
+It lives beside `webserver/dap/adapter.py` rather than under `tests/debug/wire/`, because the
+adapter falls back to it and that fallback is not optional: the runtime image ships no
+`websocket-client`, so on a real runtime this file is the only Socket.IO client there is. A file the
+shipped product cannot start without is product. The harness imports this same copy rather than
+keeping a second one — two Socket.IO clients could only ever drift.
+
 See also:
+  webserver/dap/adapter.py        - the shipped consumer; reads this by sibling path.
   tests/debug/harness/socketio_endpoint.py - the harness session this stands under.
   tests/debug/wire/run_harness.py - runs harness oracles through this client.
   webserver/debug_gateway/gateway.py - the server side of /api/debug-session.

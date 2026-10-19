@@ -39,6 +39,9 @@ pytest.importorskip("simple_websocket", reason="simple_websocket not installed (
 ROOT = Path(__file__).resolve().parents[3]
 WIRE = ROOT / "tests" / "debug" / "wire"
 sys.path.insert(0, str(WIRE))
+# WssSio is PRODUCT (E48.1 moved it beside the shipped adapter, which falls back to it on any
+# runtime without `websocket-client`), so the rig imports it from where it ships.
+sys.path.insert(0, str(ROOT / "webserver" / "dap"))
 
 from conftest import create_user, token_for  # noqa: E402
 import link_spec  # noqa: E402
@@ -796,7 +799,7 @@ def test_a_scope_handle_lists_the_variables_it_counts(serve, admin_token):
 
     DAP has no by-path form: `scopes` hands out `variablesReference`s and `variables` is then
     asked for one of them. Every corpus oracle reaches variables by path, so this branch had no
-    coverage at all until the DAP adapter (tests/debug/dap/adapter.py) needed it — and a branch
+    coverage at all until the DAP adapter (webserver/dap/adapter.py) needed it — and a branch
     with no coverage is a branch no oracle can DIVERGE."""
     c = Client(serve().url, admin_token)
     assert c.initialize()["success"] is True

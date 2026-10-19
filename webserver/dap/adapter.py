@@ -8,8 +8,13 @@ ids, frame handles, event names) and the mapping between that vocabulary and the
 `docs/DEBUG_PROTOCOL.md` for the wire it speaks, and nothing in `tests/debug/harness/` — the
 adapter is not a second view of the protocol, it is a view of the same one.
 
-  python3 tests/debug/dap/adapter.py --endpoint https://127.0.0.1:8443 --token JWT [--insecure]
-  python3 tests/debug/dap/adapter.py --listen 127.0.0.1:5678 [--insecure]   # TCP, token per attach
+  python3 webserver/dap/adapter.py --endpoint https://127.0.0.1:8443 --token JWT [--insecure]
+  python3 webserver/dap/adapter.py --listen 127.0.0.1:5678 [--insecure]   # TCP, token per attach
+
+It lives here, under `webserver/`, because it is PRODUCT: an application launches it, and an
+application cannot launch a test rig. It was at `tests/debug/dap/adapter.py` until E48.1, where the
+defect was not the code but the path — nothing a run is measured with, and nothing shippable.
+`webserver/dap/wss_client.py` travels with it for the reason `_socketio_client` gives.
 
 WHAT IT REFUSES, AND WHY (docs/DEBUG_PROTOCOL.md "Requests" marks each of these `planned`, so the
 runtime answers them UNSUPPORTED and the adapter does not pretend otherwise):
@@ -38,6 +43,8 @@ criterion DIVERGE against a real plc_main:
               refused and a session is established anyway.
 
 See also:
+  webserver/dap/wss_client.py    - the Socket.IO client this falls back to when the runtime image
+                                   has no `websocket-client`.
   tests/debug/dap/dap_harness.py - the driver that launches this process and speaks DAP to it.
   docs/DEBUG_PROTOCOL.md         - the session protocol v1 this translates.
 """
@@ -201,8 +208,10 @@ def _socketio_client(ssl_verify: bool):
     `socketio.Client` is used when `websocket-client` is installed. It is not, in the runtime image
     (python-socketio's sync client needs it for the websocket transport, and the image ships only
     `simple_websocket`), and the gateway serves `/api/debug-session` on the websocket transport
-    only — so the fallback is `tests/debug/wire/wss_client.py`'s `WssSio`, which is the same
-    minimal client the corpus harness already uses for exactly this reason.
+    only — so the fallback is the `WssSio` BESIDE THIS FILE, `webserver/dap/wss_client.py`, which is
+    the same minimal client the corpus harness already uses for exactly this reason. It sits here
+    rather than under `tests/` because this fallback is not optional: on the runtime image it is the
+    only client there is, so an adapter without it starts and then cannot attach to anything.
 
     Reusing it is deliberate. It is generic Socket.IO/Engine.IO framing and nothing about the debug
     protocol: the envelope, the sequence numbers, the request/response correlation and every event
@@ -214,15 +223,17 @@ def _socketio_client(ssl_verify: bool):
         return socketio.Client(ssl_verify=ssl_verify, reconnection=False)
     except ImportError:
         pass
-    wire_dir = str(Path(__file__).resolve().parents[1] / "wire")
-    if wire_dir not in sys.path:
-        sys.path.insert(0, wire_dir)
+    # This directory, not a package: the adapter runs as a script, so its own directory is the only
+    # one on sys.path for free, and the fallback client is a sibling rather than an installed module.
+    fallback_dir = str(Path(__file__).resolve().parent)
+    if fallback_dir not in sys.path:
+        sys.path.insert(0, fallback_dir)
     try:
         from wss_client import WssSio  # noqa: PLC0415 - the fallback, only when it is needed
     except ImportError as exc:
         raise DapError(
             "no Socket.IO client: neither websocket-client nor %s is importable (%s)"
-            % (wire_dir, exc)) from exc
+            % (fallback_dir, exc)) from exc
     return WssSio(ssl_verify=ssl_verify, reconnection=False)
 
 

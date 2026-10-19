@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run the DAP harness (tests/debug/dap/dap_harness.py) against a real plc_main: the adapter is
 # launched as a subprocess INSIDE the container and driven over DAP, so every fact the run reports
-# came through the adapter's own protocol.
+# came through the adapter's own protocol. The adapter itself is PRODUCT (webserver/dap/adapter.py,
+# moved there by E48.1); only this rig stayed under tests/.
 #
 # Usage: tests/debug/plant/dap_e2e.sh [--results PATH] [--seed NAME] [CORPUS...]
 #          Each CORPUS is one of tests/debug/corpus/<name> (default: the two E47.1 criteria run on),

@@ -11,7 +11,7 @@ Exit 0 when every check passes; each line is PASS or FAIL with its criterion.
 
 See also:
   tests/debug/plant/sec_e2e.sh - builds the runtime and the corpus program, runs this.
-  tests/debug/wire/wss_client.py - the WSS client.
+  webserver/dap/wss_client.py - the WSS client (product; E48.1 moved it beside the adapter).
   tests/debug/wire/link_spec.py - checks every gateway frame against docs/DEBUG_PROTOCOL.md.
 """
 
@@ -31,6 +31,9 @@ from typing import Dict, List, Optional, Tuple, Union
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "harness"))
 sys.path.insert(0, str(HERE.parent / "wire"))
+# WssSio is PRODUCT (E48.1 moved it beside the shipped adapter, which falls back to it on any
+# runtime without `websocket-client`), so the rig imports it from where it ships.
+sys.path.insert(0, str(HERE.parents[2] / "webserver" / "dap"))
 import link_spec  # noqa: E402
 from reference_plant import ReferencePlant  # noqa: E402
 from wss_client import WssSio  # noqa: E402

@@ -1,5 +1,5 @@
 """Runs harness oracles against a live /api/debug-session over WSS, using the harness's own
-runner and SocketIOSession with tests/debug/wire/wss_client.py as the Socket.IO client.
+runner and SocketIOSession with webserver/dap/wss_client.py as the Socket.IO client.
 
   python3 tests/debug/wire/run_harness.py --endpoint https://HOST:PORT --token JWT --insecure \
       [--plant SOCKET] [--build-dir DIR] [--results PATH] ORACLE...
@@ -26,6 +26,9 @@ from urllib.parse import urlparse
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "harness"))
+# WssSio is PRODUCT (E48.1 moved it beside the shipped adapter, which falls back to it on any
+# runtime without `websocket-client`), so the rig imports it from where it ships.
+sys.path.insert(0, str(HERE.parents[2] / "webserver" / "dap"))
 
 import build_views  # noqa: E402
 import runner  # noqa: E402

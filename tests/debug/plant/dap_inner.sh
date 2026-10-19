@@ -112,7 +112,7 @@ echo "### plant inputs: $INPUTS"
   --plant /tmp/plant.sock --program "$CORPUS/program.st" \
   ${SEED:+--seed "$SEED"} \
   ${RESULTS:+--results "$RESULTS"} \
-  --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443, driven through tests/debug/dap/adapter.py${SEED:+ (DAP_SEED=$SEED)}" \
+  --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443, driven through webserver/dap/adapter.py${SEED:+ (DAP_SEED=$SEED)}" \
   ${TRACE_DIR:+--trace-dir "$TRACE_DIR"} \
   ${ONLY:+--only $ONLY} "$@" 2>&1 | tee "/out/dap-harness-$NAME.txt"
 RC=${PIPESTATUS[0]}

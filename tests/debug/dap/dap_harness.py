@@ -32,8 +32,9 @@ names, injected into the ADAPTER rather than into the runtime, so the criterion 
 DIVERGE against a real plc_main.
 
 See also:
-  tests/debug/dap/adapter.py       - the adapter this launches.
-  tests/debug/plant/dap_e2e.sh     - the driver that boots the runtime and runs this in it.
+  webserver/dap/adapter.py     - the adapter this launches. It is PRODUCT (E48.1 moved it out of
+                                 this tree); only the rig stayed, and a rig does not ship.
+  tests/debug/plant/dap_e2e.sh - the driver that boots the runtime and runs this in it.
 """
 
 from __future__ import annotations
@@ -54,9 +55,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
-ADAPTER = HERE / "adapter.py"
-DRIVER = "tests/debug/dap/dap_harness.py"
 REPO = HERE.parents[2]
+# The adapter is product (E48.1), so it is named by a path from the checkout root and not from
+# this file's own directory: `tests/debug/dap/` is the rig and ships nothing.
+ADAPTER = REPO / "webserver" / "dap" / "adapter.py"
+DRIVER = "tests/debug/dap/dap_harness.py"
 
 # Every capability the adapter may advertise `true`, and the request that discharges it. The
 # harness reads this from the OUTSIDE: it takes the adapter's own `initialize` response, looks up

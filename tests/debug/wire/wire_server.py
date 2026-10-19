@@ -4,7 +4,7 @@ Socket.IO instance, as in webserver/app.py.
 
 See also:
   tests/debug/wire/fake_core.py - the core agent stand-in on the internal link.
-  tests/debug/wire/wss_client.py - the WSS client the tests and the harness use.
+  webserver/dap/wss_client.py - the WSS client the tests and the harness use.
   tests/debug/wire/serve.py - runs this as a process (another network namespace, A068).
   webserver/app.py - the production wiring this mirrors (run_https).
 """

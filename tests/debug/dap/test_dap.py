@@ -18,10 +18,17 @@ import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
+# The adapter is product: this rig imports it from where it ships, so the two cannot drift.
+sys.path.insert(0, os.path.join(REPO, "webserver", "dap"))
 
 import adapter  # noqa: E402
 import dap_harness  # noqa: E402
+
+# One name for "the adapter the harness launches", so a test that spawns it and the harness that
+# spawns it cannot be two processes by accident.
+ADAPTER = str(dap_harness.ADAPTER)
 
 
 def frames(*messages):
@@ -79,7 +86,7 @@ class Capabilities(unittest.TestCase):
     """The promise `initialize` makes, read from the outside."""
 
     def _initialize(self):
-        out = subprocess.run([sys.executable, os.path.join(HERE, "adapter.py")],
+        out = subprocess.run([sys.executable, ADAPTER],
                              input=frames({"seq": 1, "type": "request", "command": "initialize",
                                            "arguments": {}}),
                              capture_output=True, timeout=60)
@@ -117,7 +124,7 @@ class Capabilities(unittest.TestCase):
         # A073's Red-proof, at the level that needs no runtime: `--seed steplie` advertises
         # supportsStepBack, and the harness's discharge table does not know it. That is the
         # divergence the real run then shows against a plc_main.
-        out = subprocess.run([sys.executable, os.path.join(HERE, "adapter.py"), "--seed", "steplie"],
+        out = subprocess.run([sys.executable, ADAPTER, "--seed", "steplie"],
                              input=frames({"seq": 1, "type": "request", "command": "initialize",
                                            "arguments": {}}),
                              capture_output=True, timeout=60)
@@ -132,7 +139,7 @@ class Refusals(unittest.TestCase):
 
     def _round_trip(self, request, arguments=None):
         out = subprocess.run(
-            [sys.executable, os.path.join(HERE, "adapter.py")],
+            [sys.executable, ADAPTER],
             input=frames({"seq": 1, "type": "request", "command": request,
                           "arguments": arguments or {}}),
             capture_output=True, timeout=60)
@@ -172,7 +179,7 @@ class Refusals(unittest.TestCase):
 
     def test_a_malformed_message_is_refused_without_killing_the_stream(self):
         out = subprocess.run(
-            [sys.executable, os.path.join(HERE, "adapter.py")],
+            [sys.executable, ADAPTER],
             input=(b"Content-Length: 5\r\n\r\n{bad}" +
                    frames({"seq": 1, "type": "request", "command": "initialize", "arguments": {}})),
             capture_output=True, timeout=60)
@@ -181,6 +188,73 @@ class Refusals(unittest.TestCase):
         self.assertFalse(got[0]["success"])
         self.assertIsNone(got[0]["request_seq"])
         self.assertTrue(got[1]["success"])
+
+
+class Placement(unittest.TestCase):
+    """Where the adapter lives, and what it is allowed to depend on.
+
+    The adapter is what an application launches: it ships with the runtime, so it is
+    PRODUCT and lives under `webserver/`. It used to sit beside this harness under
+    `tests/debug/dap/`, which is neither a product path nor shippable - the placement
+    was the defect, and these three hold it in place.
+
+    The third is the one that made the move free. A stdlib-only translator can be
+    started by anything; the moment it imports `webserver.debug_gateway` or
+    `tests.debug.harness` it cannot, and the move stops being a relocation.
+    """
+
+    def test_the_adapter_this_harness_launches_is_the_one_that_exists(self):
+        self.assertTrue(dap_harness.ADAPTER.is_file(),
+                        "the harness would spawn a path that is not there: %s" % dap_harness.ADAPTER)
+
+    def test_the_adapter_is_product_not_rig(self):
+        try:
+            rel = dap_harness.ADAPTER.relative_to(dap_harness.REPO)
+        except ValueError:
+            self.fail("the adapter is outside the runtime checkout: %s" % dap_harness.ADAPTER)
+        self.assertEqual(rel.parts[:2], ("webserver", "dap"),
+                         "the adapter must sit under webserver/dap/ so PRODUCT_PATHS covers "
+                         "it; it is at %s" % rel)
+        self.assertNotIn("tests", rel.parts,
+                         "the adapter is application-launched, not a rig; it is at %s" % rel)
+
+    def test_the_adapter_imports_only_the_stdlib(self):
+        """Import-time only. `socketio`/`wss_client` are reached inside `_socketio_client`,
+        lazily, and both are already runtime dependencies — a third-party import at import time
+        would mean `--help`, and every unit guard here, needed an install the product does not
+        promise."""
+        import ast
+        import sys
+        tree = ast.parse(dap_harness.ADAPTER.read_text(encoding="utf-8"))
+        imported = set()
+        for node in tree.body:                      # module scope only, never a function's body
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+        outside = sorted(m for m in imported
+                         if m not in sys.stdlib_module_names and m != "__future__")
+        self.assertEqual(outside, [],
+                         "the adapter must import only the stdlib at module scope to be "
+                         "launchable on its own; it also imports %s" % outside)
+
+    def test_the_adapter_can_reach_its_own_socketio_fallback(self):
+        """The move's real hazard, and the reason `wss_client.py` travelled with the adapter.
+
+        The runtime image ships no `websocket-client`, so `socketio.Client` always raises and
+        `_socketio_client` always falls back to the sibling `wss_client`. A move that left that
+        file under `tests/debug/wire/` would resolve a directory that does not exist and the
+        adapter would start, answer `initialize`, and then fail every `attach` — with the file
+        tree looking perfect. Asserted by resolution, not by connecting.
+        """
+        adapter_dir = dap_harness.ADAPTER.parent
+        sys.path.insert(0, str(adapter_dir))
+        try:
+            import wss_client  # noqa: PLC0415
+        finally:
+            sys.path.remove(str(adapter_dir))
+        self.assertTrue(hasattr(wss_client, "WssSio"),
+                        "the fallback client beside the adapter no longer offers WssSio")
 
 
 class Markers(unittest.TestCase):
