@@ -795,9 +795,13 @@ def run_control(rig: Rig, chk: Checks) -> None:
             chk.ok("the plant's scan count is frozen at a TCP stop", rig.plant.frozen(1.0))
             chk.eq("the TCP stack is the program's frame",
                    [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["cell"])
+            rig.call(chk, tcp, "setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
             rig.call(chk, tcp, "continue", {"threadId": tcp_thread})
             tcp.wait_event("continued", 5.0)
-            # Wait until the plant can SEE it running again before asking it to stop. `terminate`
+            # The breakpoint is cleared first: resuming with it still armed parks the task on the
+            # very probe it is standing on (A038's step-onto-breakpoint), and the scan never
+            # completes, so the plant never sees the program run again.
+            # Then wait until the plant can SEE it running before asking it to stop. `terminate`
             # stops the PLC only when plc_get_state() == RUNNING (debug_link.cpp:1234), so a
             # terminate that lands while the core is still transitioning out of the halt ends the
             # session and leaves the program scanning. That is the core's behaviour and it is
