@@ -504,6 +504,7 @@ class Rig:
         self.plant = Plant(opts.plant)
         self.mark = markers(Path(opts.program))
         self.sent: Dict[str, bool] = {}
+        self._frames_checked = False
 
     def adapter_argv(self, extra: Optional[List[str]] = None) -> List[str]:
         argv = [sys.executable, str(ADAPTER), "--endpoint", self.opts.endpoint]
@@ -538,6 +539,19 @@ class Rig:
         return client, caps.get("body") or {}
 
     # -- assertions shared by the scenarios
+
+    def call(self, chk: Checks, client: Dap, command: str,
+             arguments: Optional[Dict[str, Any]] = None,
+             expect_success: bool = True) -> Dict[str, Any]:
+        """Send one request and record it. A request whose response the scenario never looks at
+        is a request that can fail silently — and `pause` failing silently is how a scenario ends
+        up waiting eight seconds for a stop the runtime was never asked for."""
+        chk.record(command)
+        resp = client.request(command, arguments)
+        if expect_success:
+            chk.ok("%s is accepted" % command, resp.get("success") is True,
+                   "refused: %s" % (resp.get("message"),))
+        return resp
 
     def check_capabilities(self, chk: Checks, caps: Dict[str, Any]) -> None:
         """Every capability the adapter advertised `true` is one this harness knows how to
@@ -579,14 +593,17 @@ class Rig:
         return body
 
     def frames(self, chk: Checks, client: Dap, thread: int) -> List[Dict[str, Any]]:
-        body = client.request("stackTrace", {"threadId": thread})["body"]
+        body = self.call(chk, client, "stackTrace", {"threadId": thread})["body"]
         frames = body.get("stackFrames") or []
         chk.ok("the stack has at least one frame", bool(frames))
         chk.eq("totalFrames matches the frames listed", body.get("totalFrames"), len(frames))
-        for f in frames:
-            chk.ok("every frame carries a handle `scopes` can take", isinstance(f.get("id"), int))
-            chk.ok("every frame names its source", (f.get("source") or {}).get("name") == "program.st",
-                   "observed %r" % (f.get("source"),))
+        # The two per-frame checks are about how the adapter maps ONE frame, so they run once:
+        # repeated on every frame of every stop they bury the step that actually failed.
+        if not self._frames_checked and frames:
+            self._frames_checked = True
+            chk.ok("a frame carries a handle `scopes` can take", isinstance(frames[0].get("id"), int))
+            chk.eq("a frame names its source", (frames[0].get("source") or {}).get("name"),
+                   "program.st")
         return frames
 
     def scope_values(self, chk: Checks, client: Dap, frame_id: int) -> Dict[str, Any]:
@@ -647,10 +664,9 @@ def run_control(rig: Rig, chk: Checks) -> None:
         chk.record("initialize, attach, threads")
 
         # -- breakpoints over stdio
-        body = client.request("setBreakpoints",
-                              {"source": {"path": "program.st"},
-                               "breakpoints": [{"line": rig.line("@CALL_M1")}]})["body"]
-        chk.record("setBreakpoints")
+        body = rig.call(chk, client, "setBreakpoints",
+                        {"source": {"path": "program.st"},
+                         "breakpoints": [{"line": rig.line("@CALL_M1")}]})["body"]
         bps = body.get("breakpoints") or []
         chk.eq("one breakpoint came back", len(bps), 1)
         chk.eq("it is verified", bps[0].get("verified"), True)
@@ -662,10 +678,10 @@ def run_control(rig: Rig, chk: Checks) -> None:
         chk.eq("one frame at a call in the program", len(frames), 1)
         chk.eq("the frame is the program's", pou_name(frames[0].get("name")), "cell")
         values = rig.scope_values(chk, client, frames[0]["id"])
-        chk.near("`total` is the FOR loop's 1+2+3 of the scan before", float(values["total"]["value"]), 6.0, 1e-6)
-        chk.record("stackTrace, scopes, variables")
+        chk.near("`total` is the FOR loop's 1+2+3 of the scan before",
+                 float(values["total"]["value"]), 6.0, 1e-6)
 
-        client.request("setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
+        rig.call(chk, client, "setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
         for request, mark, names in (
                 ("stepIn", "@MOTOR_FIRST", ["fb_motor", "cell"]),
                 ("next", "@MOTOR_IF", ["fb_motor", "cell"]),
@@ -677,49 +693,38 @@ def run_control(rig: Rig, chk: Checks) -> None:
                 ("stepOut", "@PID_AFTER", ["pidctl", "fb_motor", "cell"]),
                 ("stepOut", "@MOTOR_AFTER", ["fb_motor", "cell"]),
                 ("next", "@CALL_M2", ["cell"])):
-            chk.record(request)
-            client.request(request, {"threadId": thread})
+            rig.call(chk, client, request, {"threadId": thread})
             rig.stop_here(chk, client, thread, "step", line=rig.line(mark))
             got = [pou_name(f.get("name")) for f in rig.frames(chk, client, thread)]
             chk.eq("the stack at %s is innermost-first" % mark, got, names)
         chk.ok("the plant's scan count is frozen while stepped", rig.plant.frozen(1.2))
 
         # -- resume, then pause
-        chk.record("continue")
-        resumed = client.request("continue", {"threadId": thread})
+        resumed = rig.call(chk, client, "continue", {"threadId": thread})
         chk.eq("continue says every thread resumed", resumed["body"].get("allThreadsContinued"), True)
         client.wait_event("continued", 5.0)
         client.expect_no_event("stopped", 1.5)
 
-        chk.record("pause")
-        client.request("pause", {"threadId": thread})
+        rig.call(chk, client, "pause", {"threadId": thread})
         rig.stop_here(chk, client, thread, "pause")
         chk.ok("the plant's scan count is frozen while paused", rig.plant.frozen(1.2))
-        chk.record("continue")
-        client.request("continue", {"threadId": thread})
+        rig.call(chk, client, "continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
 
         # -- breakpointLocations, and the two requests the wire does not serve
-        chk.record("breakpointLocations")
-        body = client.request("breakpointLocations",
-                              {"source": {"path": "program.st"},
-                               "line": rig.line("@MOTOR_PID")})["body"]
+        body = rig.call(chk, client, "breakpointLocations",
+                        {"source": {"path": "program.st"},
+                         "line": rig.line("@MOTOR_PID")})["body"]
         chk.eq("breakpointLocations finds the line that has code",
                [b.get("line") for b in body.get("breakpoints") or []], [rig.line("@MOTOR_PID")])
         rig.unserved(chk, client, "setFunctionBreakpoints", {"breakpoints": [{"name": "PidCtl"}]})
         rig.unserved(chk, client, "setExceptionBreakpoints", {"filters": []})
 
         # -- restart and configurationDone: the rest of what initialize advertised
-        chk.record("restart")
-        client.request("restart")
+        rig.call(chk, client, "restart")
         rig.plant.settle(2)
         chk.note("the program is running again after restart")
-        chk.record("configurationDone")
-        chk.ok("configurationDone is accepted", client.request("configurationDone")["success"])
-
-        # -- disconnect leaves the PLC running
-        chk.record("disconnect")
-        client.request("disconnect")
+        rig.call(chk, client, "configurationDone")
         client.close()
         rig.plant.settle(2)
         chk.note("the program is still scanning after disconnect")
@@ -738,17 +743,16 @@ def run_control(rig: Rig, chk: Checks) -> None:
             chk.ok("attach over TCP establishes a session", attached["success"],
                    attached.get("message"))
             tcp_thread = rig.one_thread(chk, tcp)
-            tcp.request("setBreakpoints", {"source": {"path": "program.st"},
-                                           "breakpoints": [{"line": rig.line("@CALL_M1")}]})
+            rig.call(chk, tcp, "setBreakpoints",
+                     {"source": {"path": "program.st"},
+                      "breakpoints": [{"line": rig.line("@CALL_M1")}]})
             rig.stop_here(chk, tcp, tcp_thread, "breakpoint", line=rig.line("@CALL_M1"))
             chk.ok("the plant's scan count is frozen at a TCP stop", rig.plant.frozen(1.0))
             chk.eq("the TCP stack is the program's frame",
                    [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["cell"])
-            tcp.request("continue", {"threadId": tcp_thread})
+            rig.call(chk, tcp, "continue", {"threadId": tcp_thread})
             tcp.wait_event("continued", 5.0)
-            chk.record("terminate")
-            chk.ok("terminate is accepted over TCP",
-                   tcp.request("terminate")["success"])
+            rig.call(chk, tcp, "terminate")
             tcp.wait_event("terminated", 5.0)
             chk.ok("the PLC stops on terminate", rig.plant.frozen(1.5))
             tcp.close()
@@ -778,9 +782,9 @@ def inspect(rig: Rig, chk: Checks) -> None:
         rig.plant.settle(2)
         chk.record("initialize, attach, threads")
 
-        client.request("setBreakpoints", {"source": {"path": "program.st"},
-                                           "breakpoints": [{"line": rig.line("@PID_CALL")}]})
-        chk.record("setBreakpoints")
+        rig.call(chk, client, "setBreakpoints",
+                {"source": {"path": "program.st"},
+                 "breakpoints": [{"line": rig.line("@PID_CALL")}]})
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         frames = rig.frames(chk, client, thread)
         chk.eq("halted inside the nested FB, innermost-first",
@@ -803,7 +807,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
 
         # Run on, and stop in the same statement again: the program's own integrator has moved, so
         # a fresh read and a cached one are no longer the same numbers.
-        client.request("continue", {"threadId": thread})
+        rig.call(chk, client, "continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
         # No settle here: the @PID_CALL breakpoint is still armed, so the program stops again
         # within one scan and would never reach a third. The wait for the second stop IS the
@@ -831,8 +835,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
         after = float(rig.scope_values(chk, client, again[0]["id"])["err"]["value"])
         chk.eq("the refused write left the value unchanged", after, before)
 
-        chk.record("disconnect")
-        client.request("disconnect")
+        rig.call(chk, client, "disconnect")
         client.close()
         rig.plant.settle(2)
         chk.note("the program is still scanning after disconnect")
@@ -872,13 +875,14 @@ def attach_credentials(rig: Rig, chk: Checks) -> None:
             threads = other.request("threads")
             chk.ok("the refused attach established no session", threads.get("success") is False,
                    "threads answered %r" % (threads.get("body"),))
+            chk.ok("the refused adapter answers an unknown threadId with a refusal too",
+                   other.request("stackTrace", {"threadId": 1}).get("success") is False)
         finally:
             other.close()
         chk.ok("the program was not disturbed by the refused attach",
                rig.plant.settle(3) > 0)
 
-        chk.record("disconnect")
-        client.request("disconnect")
+        rig.call(chk, client, "disconnect")
         client.close()
         chk.ok("the program is still scanning after disconnect", rig.plant.settle(2) > 0)
     finally:
