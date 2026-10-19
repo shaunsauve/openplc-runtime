@@ -414,7 +414,13 @@ class Plant:
             self.samples.extend(fresh)
 
     def witness(self) -> int:
-        """The plant's scan count for the one task the corpus programs declare."""
+        """The plant's scan count for the one task the corpus programs declare.
+
+        Polled first, always. Reading the last sample without asking for a new one compares the
+        plant as of whenever it last happened to be asked, and a count that is one scan behind is
+        indistinguishable from one that stopped — which is the opposite of what this method is for.
+        """
+        self.poll()
         with self.lock:
             if not self.samples:
                 return 0
@@ -425,6 +431,7 @@ class Plant:
         return int(next(iter(w.values()), 0))
 
     def output(self, addr: str) -> Any:
+        self.poll()
         with self.lock:
             outs = (self.samples[-1].get("outputs") or {}) if self.samples else {}
         return outs.get(addr)
@@ -446,7 +453,6 @@ class Plant:
         halted. Read twice, once either side of the wait, from the plant's own samples."""
         before = self.witness()
         time.sleep(for_s)
-        self.poll()
         return self.witness() == before
 
 
