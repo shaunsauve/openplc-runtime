@@ -815,19 +815,26 @@ def inspect(rig: Rig, chk: Checks) -> None:
 
         # Run on, and stop in the same statement again: the program's own integrator has moved, so
         # a fresh read and a cached one are no longer the same numbers.
+        rig.call(chk, client, "setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
         rig.call(chk, client, "continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
-        # `pv` is a member of the running integrator, so it can only grow if the program really ran
-        # between the two stops. Waiting N scans instead would prove nothing here: the guard below
-        # exists to catch a `variables` answered from a cache, and a cache is not a stopwatch.
+        # The breakpoint is cleared before the resume, and re-armed after the program has run.
+        # Resuming with it still armed parks the task on the very probe it is standing on (A038's
+        # step-onto-breakpoint), which is a second stop in the same scan and no reading a second
+        # time can tell apart from a cached one.
+        scans_before = rig.plant.settle(3)
+        rig.call(chk, client, "setBreakpoints",
+                 {"source": {"path": "program.st"},
+                  "breakpoints": [{"line": rig.line("@PID_CALL")}]})
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"), within_s=15.0)
         again = rig.frames(chk, client, thread)
         chk.eq("the second stop is in the same statement",
                [pou_name(f.get("name")) for f in again], ["pidctl", "fb_motor", "cell"])
         second = rig.scope_values(chk, client, again[0]["id"])
-        chk.note("pv %r then %r, plant scan count %d then %d"
-                 % (first["pv"]["value"], second["pv"]["value"],
-                    rig.plant.witness(), rig.plant.witness()))
+        chk.ok("the program ran between the two stops, on the plant's own count",
+               rig.plant.witness() > scans_before,
+               "the plant counted %d scans before the resume and %d at the second stop"
+               % (scans_before, rig.plant.witness()))
         chk.ok("the second read is of a program that has run since the first",
                float(second["pv"]["value"]) > float(first["pv"]["value"]),
                "pv was %r at the first stop and %r at the second — a value that did not move is a "
