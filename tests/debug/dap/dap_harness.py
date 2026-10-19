@@ -951,9 +951,14 @@ def attach_credentials(rig: Rig, chk: Checks) -> None:
 
 
 SCENARIOS: Dict[str, Any] = {
-    "run-control": (run_control, ["A073"]),
-    "inspect": (inspect, ["A074"]),
-    "attach-credentials": (attach_credentials, ["A075"]),
+    "run-control": (run_control, ["A073"],
+                    ("@CALL_M1", "@MOTOR_FIRST", "@MOTOR_IF", "@MOTOR_PID", "@PID_FIRST",
+                     "@PID_INTEG", "@PID_CALL", "@CLAMP_FIRST", "@PID_AFTER", "@MOTOR_AFTER",
+                     "@CALL_M2")),
+    "inspect": (inspect, ["A074"], ("@PID_CALL",)),
+    # Needs no marker: it reads the scan count and nothing else, so it is meaningful on every
+    # corpus program.
+    "attach-credentials": (attach_credentials, ["A075"], ()),
 }
 
 
@@ -976,11 +981,16 @@ def commit() -> str:
         return "unknown"
 
 
-def rows_for(name: str, chk: Checks, ran_on: str, test_suffix: str) -> List[Dict[str, Any]]:
+def rows_for(name: str, chk: Checks, ran_on: str, suffix: str) -> List[Dict[str, Any]]:
+    """One row per criterion the scenario discharges.
+
+    The `test` half names the CORPUS and the scenario, the way every harness row does
+    (`runner.py::plant-io/j1-run-control`): a run covers two corpora, and a key that did not
+    would make one program's rows overwrite the other's on the latest-wins rule."""
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
-    _, criteria = SCENARIOS[name]
+    _, criteria, _needs = SCENARIOS[name]
     return [{"criterion": c, "verdict": chk.verdict,
-             "test": "%s::%s" % (DRIVER, test_suffix),
+             "test": "%s::%s/%s" % (DRIVER, suffix, name),
              "ran_on": ran_on, "commit": commit(), "repo": "openplc-runtime",
              "timestamp": stamp, "evidence": chk.evidence()[:300]}
             for c in criteria]
@@ -1006,12 +1016,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     opts = ap.parse_args(argv)
 
     rig = Rig(opts)
+    corpus = Path(opts.program).resolve().parent.name
     names = opts.only or sorted(SCENARIOS)
-    suffix = ("redproof/%s/%s" % (opts.seed, ",".join(names))) if opts.seed else ",".join(names)
+    # A red-proof run's rows carry the seed in their key, so a DIVERGE row is evidence beside the
+    # measured one and does not overwrite it. That is the corpus harness's `redproof/...` shape.
+    suffix = ("redproof/%s/%s" % (opts.seed, corpus)) if opts.seed else corpus
     rows: List[Dict[str, Any]] = []
     rc = 0
     for name in names:
-        fn = SCENARIOS[name][0]
+        fn, _criteria, needs = SCENARIOS[name]
+        missing = [m for m in needs if m not in rig.mark]
+        if missing:
+            # Skipped, not blocked: a scenario whose statements this corpus program does not have
+            # is not a measurement that failed to reach a verdict, and recording it as BLOCKED
+            # would say the harness tried and could not.
+            print("== %s SKIPPED: corpus:%s has no %s" % (name, corpus, ", ".join(missing)),
+                  flush=True)
+            continue
         chk = Checks(name)
         print("== %s" % name, flush=True)
         try:
@@ -1024,7 +1045,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             chk.diverge.append("the scenario raised %s: %s\n%s"
                                % (type(exc).__name__, exc, traceback.format_exc()))
         print("   %s %s: %s" % (chk.verdict, name, chk.evidence()), flush=True)
-        rows.extend(rows_for(name, chk, opts.ran_on or "dart %s" % opts.endpoint, suffix))
+        rows.extend(rows_for(name, chk, opts.ran_on or "dap %s" % opts.endpoint, suffix))
         if chk.verdict != "PASS":
             rc = 1
     if opts.results is not None:
