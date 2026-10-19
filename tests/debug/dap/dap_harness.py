@@ -595,7 +595,7 @@ class Rig:
         chk.eq("the stop's reason", body.get("reason"), reason)
         if line is not None:
             chk.eq("the stop is at the line the program has there", body.get("line"), line)
-        chk.eq("the stop's source is the corpus program", body.get("description"), "program.st")
+            chk.eq("the stop's source is the corpus program", body.get("description"), "program.st")
         chk.ok("every task is stopped at an all-stop", body.get("allThreadsStopped") is True,
                "observed %r" % (body.get("allThreadsStopped"),))
         return body
@@ -825,6 +825,9 @@ def inspect(rig: Rig, chk: Checks) -> None:
         chk.eq("the second stop is in the same statement",
                [pou_name(f.get("name")) for f in again], ["pidctl", "fb_motor", "cell"])
         second = rig.scope_values(chk, client, again[0]["id"])
+        chk.note("pv %r then %r, plant scan count %d then %d"
+                 % (first["pv"]["value"], second["pv"]["value"],
+                    rig.plant.witness(), rig.plant.witness()))
         chk.ok("the second read is of a program that has run since the first",
                float(second["pv"]["value"]) > float(first["pv"]["value"]),
                "pv was %r at the first stop and %r at the second — a value that did not move is a "

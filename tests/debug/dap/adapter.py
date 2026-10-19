@@ -613,10 +613,15 @@ class Adapter:
     # -- wire events -> DAP events
 
     def _pump_events(self) -> None:
-        assert self.wire is not None
+        # The wire is captured once: `disconnect` sets `self.wire = None` from the request thread,
+        # and a pump that read the attribute every pass died with an AttributeError at that moment
+        # — on the one teardown path that most needs the event pump still alive.
+        wire = self.wire
+        if wire is None:
+            return
         while not self.stop.is_set():
             try:
-                msg = self.wire.events.get(timeout=0.2)
+                msg = wire.events.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
@@ -638,6 +643,9 @@ class Adapter:
                 event["line"] = int(body["location"].get("line") or 1)
                 if body["location"].get("col") is not None:
                     event["column"] = int(body["location"]["col"])
+            # A task held at its scan boundary stops with no location, and so does a pause that
+            # took the scan between two statements. DAP's StoppedEvent makes line and column
+            # optional for exactly this, so nothing is invented to fill them in.
             self.event("stopped", event)
         elif name == "continued":
             tid = self._thread_id(body.get("task")) if body.get("task") else None
