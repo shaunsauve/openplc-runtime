@@ -62,6 +62,7 @@ for name in "${CORPORA[@]}"; do
   docker run --rm --cap-add SYS_NICE --ulimit rtprio=99 --entrypoint bash \
     -v "$REPO":/src:ro -v "$PAY":/payload:ro -v "$OUT":/out ${RUNS_MOUNT[@]+"${RUNS_MOUNT[@]}"} \
     -e SEED="$SEED" -e RESULTS="$RESULTS_IN" -e HARNESS_COMMIT="$COMMIT" -e CORPUS="$C" \
+    -e ONLY="${ONLY:-}" \
     "$IMAGE" /src/tests/debug/plant/dap_inner.sh || RC=1
 done
 exit $RC

@@ -1031,7 +1031,11 @@ class DebugGateway:
                 return {"variables": self._listing(
                     session, info, info.children(node),
                     frame=(frame_id, frame_id // _FRAMES_PER_TASK, index))}
-            frame_id, task = int(key[1]), _int(key[2])
+            # `_ref()` builds its key out of STRINGS (it is a dict key and it is echoed in a
+            # refusal), so both halves are parsed here rather than through `_int`, which is for
+            # arguments check_args has already typed. Reading a scope's variables by handle —
+            # which is how DAP reads anything — used to be refused BAD_REQUEST on this line.
+            frame_id, task = int(key[1]), int(key[2])
             f, index = self._frame(session, info, frame_id)
             instance, pou = f["instance"], f["pou"]
             named: List[Tuple[str, Optional[Node]]] = []

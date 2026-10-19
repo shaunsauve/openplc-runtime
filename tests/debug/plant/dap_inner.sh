@@ -103,7 +103,7 @@ echo "### plant inputs: $INPUTS"
   ${SEED:+--seed "$SEED"} \
   ${RESULTS:+--results "$RESULTS"} \
   --ran-on "linux-$ARCH docker: plc_main + probed corpus:$NAME (STruCpp) + reference plant + gateway over WSS 127.0.0.1:8443, driven through tests/debug/dap/adapter.py${SEED:+ (DAP_SEED=$SEED)}" \
-  "$@" 2>&1 | tee "/out/dap-harness-$NAME.txt"
+  ${ONLY:+--only $ONLY} "$@" 2>&1 | tee "/out/dap-harness-$NAME.txt"
 RC=${PIPESTATUS[0]}
 kill "$GW" 2>/dev/null
 kill -INT "$PLC" 2>/dev/null

@@ -597,6 +597,8 @@ class Rig:
                 continue
             variables = client.request("variables", {"variablesReference": ref})["body"]
             listed = variables.get("variables") or []
+            chk.ok("scope %r lists what it counts" % scope.get("name"), bool(listed),
+                   "variables(%s) answered %r" % (ref, variables))
             chk.eq("scope %r counts its namedVariables" % scope.get("name"),
                    scope.get("namedVariables"), len(listed))
             for var in listed:

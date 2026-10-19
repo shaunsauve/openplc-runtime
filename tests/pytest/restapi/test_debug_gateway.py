@@ -788,6 +788,32 @@ def test_the_handshake_advertises_exactly_what_works(caps, serve, admin_token):
         assert c.initialize()["success"] is True
 
 
+# --------------------------------------------------------------------------- A074 by handle
+
+
+def test_a_scope_handle_lists_the_variables_it_counts(serve, admin_token):
+    """A frame's variables reached by HANDLE, which is how DAP reads them.
+
+    DAP has no by-path form: `scopes` hands out `variablesReference`s and `variables` is then
+    asked for one of them. Every corpus oracle reaches variables by path, so this branch had no
+    coverage at all until the DAP adapter (tests/debug/dap/adapter.py) needed it — and a branch
+    with no coverage is a branch no oracle can DIVERGE."""
+    c = Client(serve().url, admin_token)
+    assert c.initialize()["success"] is True
+    assert c.request("pause", {"task": "Main"})["success"] is True
+    c.event("stopped")
+    listed = 0
+    for frame in as_obj(c.request("stackTrace", {"task": "Main"})["body"])["stackFrames"]:
+        for scope in as_obj(c.request("scopes", {"frameId": frame["id"]})["body"])["scopes"]:
+            ref = scope["variablesReference"]
+            resp = c.request("variables", {"variablesReference": ref})
+            assert resp["success"] is True, (scope["name"], ref, resp)
+            variables = as_obj(resp["body"])["variables"]
+            assert len(variables) == scope["namedVariables"], (scope["name"], ref, resp)
+            listed += len(variables)
+    assert listed > 0, "no frame of a halted task offered a variable at all"
+
+
 # --------------------------------------------------------------------------- A070 versions
 
 
