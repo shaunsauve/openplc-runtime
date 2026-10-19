@@ -25,7 +25,17 @@ gcc -shared -fPIC -O1 -Wall -Wextra -o build/plugins/libreference_plant.so \
   || { echo "PLANT BUILD FAIL"; exit 1; }
 
 echo "### compile the probed corpus:$NAME through scripts/compile.sh"
-cp -r /payload/. core/generated/
+# tar, not `cp -r`: a bind-mounted payload has been seen to report "skipping file ... as it was
+# replaced while being copied" once, which left core/generated/ short of defines.h and turned
+# into a confusing make error ten lines later. Copied again, and verified, so a short copy is
+# caught here and named.
+for attempt in 1 2 3; do
+  (cd /payload && tar cf - .) | (cd /work/core/generated && tar xf -)
+  [ -f core/generated/defines.h ] && [ -f core/generated/debug-info.json ] && break
+  echo "### payload copy incomplete (attempt $attempt); retrying"
+  sleep 1
+done
+[ -f core/generated/defines.h ] || { echo "PAYLOAD FAIL: core/generated/defines.h never arrived"; exit 1; }
 bash scripts/compile.sh >/out/compile.log 2>&1 || { echo "COMPILE FAIL"; tail -15 /out/compile.log; exit 1; }
 [ -f build/new_libplc.so ] && mv build/new_libplc.so "build/libplc_$(date +%s%N).so"
 ls build/libplc_*.so >/dev/null || { echo "COMPILE FAIL: no libplc"; exit 1; }
