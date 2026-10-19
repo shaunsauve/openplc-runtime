@@ -919,10 +919,30 @@ def attach_credentials(rig: Rig, chk: Checks) -> None:
     """A075 — attach by URL and credential, without disturbing the program.
 
     Two adapter processes, both configured with the runtime's own login, so the only thing that
-    differs between the two attaches is the credential the client sends. The right one establishes
-    a session and the scan count never pauses; a wrong one is refused and the second adapter holds
-    no session at all. `--seed nocred` is the red-proof: the adapter then uses its own credential
-    whatever the client sent, and the wrong one is accepted."""
+    differs between the two attaches is the credential the client sends. The wrong one comes
+    FIRST, on an adapter that holds nothing: with nothing else claiming the controller slot, the
+    only thing that can refuse a wrong credential is the credential check itself, which is what
+    the criterion is about. The right one then establishes a session and the scan count never
+    pauses. `--seed nocred` is the red-proof: the adapter then uses its own credential whatever
+    the client sent, and the wrong one is accepted."""
+    wrong = forged(rig.opts.token)
+    other = Dap.over_stdio(rig.adapter_argv() + ["--token", rig.opts.token])
+    try:
+        other.request("initialize", {"adapterID": "openplc"})
+        resp = other.request("attach", {"token": wrong})
+        chk.ok("attach with a wrong credential is refused", resp.get("success") is False,
+               "the adapter accepted it: %r" % (resp.get("body"),))
+        err = (resp.get("body") or {}).get("error") or {}
+        chk.eq("the refusal is the runtime's own UNAUTHORISED", err.get("code"), "UNAUTHORISED")
+        threads = other.request("threads")
+        chk.ok("the refused attach established no session", threads.get("success") is False,
+               "threads answered %r" % (threads.get("body"),))
+        chk.ok("the refused adapter refuses an inspection with no session",
+               other.request("stackTrace", {"threadId": 1}).get("success") is False)
+        chk.ok("the program was not disturbed by the refused attach", rig.plant.settle(3) > 0)
+    finally:
+        other.close()
+
     client, caps = rig.open(token=rig.opts.token)
     try:
         rig.check_capabilities(chk, caps)
@@ -933,26 +953,6 @@ def attach_credentials(rig: Rig, chk: Checks) -> None:
                % (before, rig.plant.witness()), rig.plant.witness() > before)
         chk.note("attach did not restart the program")
         chk.record("initialize, attach, threads")
-
-        # A second adapter, a wrong credential.
-        wrong = forged(rig.opts.token)
-        other = Dap.over_stdio(rig.adapter_argv() + ["--token", rig.opts.token])
-        try:
-            other.request("initialize", {"adapterID": "openplc"})
-            resp = other.request("attach", {"token": wrong})
-            chk.ok("attach with a wrong credential is refused", resp.get("success") is False,
-                   "the adapter answered %r" % (resp.get("body"),))
-            err = (resp.get("body") or {}).get("error") or {}
-            chk.eq("the refusal is the runtime's own UNAUTHORISED", err.get("code"), "UNAUTHORISED")
-            threads = other.request("threads")
-            chk.ok("the refused attach established no session", threads.get("success") is False,
-                   "threads answered %r" % (threads.get("body"),))
-            chk.ok("the refused adapter answers an unknown threadId with a refusal too",
-                   other.request("stackTrace", {"threadId": 1}).get("success") is False)
-        finally:
-            other.close()
-        chk.ok("the program was not disturbed by the refused attach",
-               rig.plant.settle(3) > 0)
 
         rig.call(chk, client, "disconnect")
         client.close()
