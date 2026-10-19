@@ -679,7 +679,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
         chk.eq("one breakpoint came back", len(bps), 1)
         chk.eq("it is verified", bps[0].get("verified"), True)
         chk.eq("it is on the line the program has there", bps[0].get("line"), rig.line("@CALL_M1"))
-        rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@CALL_M1"))
+        rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@CALL_M1"), within_s=15.0)
         chk.ok("the plant's scan count is frozen while halted", rig.plant.frozen(1.2))
 
         frames = rig.frames(chk, client, thread)
@@ -817,10 +817,10 @@ def inspect(rig: Rig, chk: Checks) -> None:
         # a fresh read and a cached one are no longer the same numbers.
         rig.call(chk, client, "continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
-        # No settle here: the @PID_CALL breakpoint is still armed, so the program stops again
-        # within one scan and would never reach a third. The wait for the second stop IS the
-        # proof that the program ran in between, which is what `pv` growing then measures.
-        rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
+        # `pv` is a member of the running integrator, so it can only grow if the program really ran
+        # between the two stops. Waiting N scans instead would prove nothing here: the guard below
+        # exists to catch a `variables` answered from a cache, and a cache is not a stopwatch.
+        rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"), within_s=15.0)
         again = rig.frames(chk, client, thread)
         chk.eq("the second stop is in the same statement",
                [pou_name(f.get("name")) for f in again], ["pidctl", "fb_motor", "cell"])

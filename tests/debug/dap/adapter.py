@@ -505,11 +505,20 @@ class Adapter:
         return {"variables": out}
 
     def _h_continue(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        body = self._call("continue", {"task": self._task_name(args.get("threadId"))})
+        # All-stop, with no task. The wire's `continue` is all-stop by definition ("all-stop,
+        # every halted task resumes"), and so is DAP's, since this adapter does not advertise
+        # supportsSingleThreadExecutionRequests. The threadId is still resolved, so a client that
+        # names a thread the adapter never issued is told so rather than silently resumed.
+        self._task_name(args.get("threadId"))
+        body = self._call("continue", {})
         return {"allThreadsContinued": bool(body.get("allThreadsContinued", True))}
 
     def _h_pause(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        self._call("pause", {"task": self._task_name(args.get("threadId"))})
+        # All-stop, for the same reason as `continue`. Naming a task here asks the core for
+        # DBG_TRAP_PAUSE — a trap at the next probe, not a pause — which is a different request
+        # with a different answer, and it is not what DAP's `pause` means.
+        self._task_name(args.get("threadId"))
+        self._call("pause", {})
         return {}
 
     def _step(self, command: str, args: Dict[str, Any]) -> Dict[str, Any]:
