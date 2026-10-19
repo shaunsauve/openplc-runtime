@@ -118,8 +118,8 @@ class Checks:
 
     def ok(self, label: str, condition: bool, detail: str = "") -> None:
         if not condition:
-            raise Diverged("step %d (%s): %s%s" % (self.step(), label, label,
-                                                   (" — " + detail) if detail else ""))
+            raise Diverged("step %d: %s%s" % (self.step(), label,
+                                               (" — " + detail) if detail else ""))
 
     def eq(self, label: str, got: Any, want: Any) -> None:
         self.ok(label, got == want, "expected %r, observed %r" % (want, got))
@@ -654,22 +654,22 @@ def run_control(rig: Rig, chk: Checks) -> None:
 
         frames = rig.frames(chk, client, thread)
         chk.eq("one frame at a call in the program", len(frames), 1)
-        chk.eq("the frame is the program's", pou_name(frames[0].get("name")), "Cell")
+        chk.eq("the frame is the program's", pou_name(frames[0].get("name")), "cell")
         values = rig.scope_values(chk, client, frames[0]["id"])
         chk.near("`total` is the FOR loop's 1+2+3 of the scan before", float(values["total"]["value"]), 6.0, 1e-6)
         chk.record("stackTrace, scopes, variables")
 
         client.request("setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
         for request, mark, names in (
-                ("stepIn", "@MOTOR_FIRST", ["FB_Motor", "Cell"]),
-                ("next", "@MOTOR_IF", ["FB_Motor", "Cell"]),
-                ("next", "@MOTOR_PID", ["FB_Motor", "Cell"]),
-                ("stepIn", "@PID_FIRST", ["PidCtl", "FB_Motor", "Cell"]),
-                ("next", "@PID_INTEG", ["PidCtl", "FB_Motor", "Cell"]),
-                ("next", "@PID_CALL", ["PidCtl", "FB_Motor", "Cell"]),
-                ("stepIn", "@CLAMP_FIRST", ["Clamp", "PidCtl", "FB_Motor", "Cell"]),
-                ("stepOut", "@PID_AFTER", ["PidCtl", "FB_Motor", "Cell"]),
-                ("stepOut", "@MOTOR_AFTER", ["FB_Motor", "Cell"]),
+                ("stepIn", "@MOTOR_FIRST", ["fb_motor", "cell"]),
+                ("next", "@MOTOR_IF", ["fb_motor", "cell"]),
+                ("next", "@MOTOR_PID", ["fb_motor", "cell"]),
+                ("stepIn", "@PID_FIRST", ["pidctl", "fb_motor", "cell"]),
+                ("next", "@PID_INTEG", ["pidctl", "fb_motor", "cell"]),
+                ("next", "@PID_CALL", ["pidctl", "fb_motor", "cell"]),
+                ("stepIn", "@CLAMP_FIRST", ["clamp", "pidctl", "fb_motor", "cell"]),
+                ("stepOut", "@PID_AFTER", ["pidctl", "fb_motor", "cell"]),
+                ("stepOut", "@MOTOR_AFTER", ["fb_motor", "cell"]),
                 ("next", "@CALL_M2", ["Cell"])):
             chk.record(request)
             client.request(request, {"threadId": thread})
@@ -778,7 +778,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         frames = rig.frames(chk, client, thread)
         chk.eq("halted inside the nested FB, innermost-first",
-               [pou_name(f.get("name")) for f in frames], ["PidCtl", "FB_Motor", "Cell"])
+               [pou_name(f.get("name")) for f in frames], ["pidctl", "fb_motor", "cell"])
         first = rig.scope_values(chk, client, frames[0]["id"])
         for name in ("sp", "pv", "kp", "ki", "integ", "err"):
             chk.ok("the innermost frame exposes %s" % name, name in first,
@@ -800,7 +800,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         again = rig.frames(chk, client, thread)
         chk.eq("the second stop is in the same statement",
-               [pou_name(f.get("name")) for f in again], ["PidCtl", "FB_Motor", "Cell"])
+               [pou_name(f.get("name")) for f in again], ["pidctl", "fb_motor", "cell"])
         second = rig.scope_values(chk, client, again[0]["id"])
         chk.ok("the second read is of a program that has run since the first",
                float(second["pv"]["value"]) > float(first["pv"]["value"]),
