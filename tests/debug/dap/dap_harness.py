@@ -411,9 +411,33 @@ class Plant:
             lines.append(self._line() or "")
         return lines[:-1]
 
+    def close(self) -> None:
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        self.sock, self.buf, self.seq = None, b"", 0
+
     def poll(self) -> None:
+        """Ask for every sample since the last cursor.
+
+        A `restart` stops the program and starts it again, and a start re-initialises the
+        plugins: the plant is a NEW instance whose socket is a new file and whose samples are
+        numbered from 1 again. Reconnecting and asking from the start is not tidiness — without
+        it the old cursor waits out every sample the new instance will ever take, and a run that
+        restarted reads as a run whose program stopped."""
+        for _ in range(60):
+            try:
+                rows = self.ask("SAMPLES %d" % self.seq)
+                break
+            except OSError:
+                self.close()
+                time.sleep(0.25)
+        else:
+            raise Blocked("the reference plant is not answering after a restart")
         fresh = []
-        for row in self.ask("SAMPLES %d" % self.seq):
+        for row in rows:
             doc = json.loads(row)
             self.seq = max(self.seq, int(doc["seq"]))
             fresh.append(doc)
