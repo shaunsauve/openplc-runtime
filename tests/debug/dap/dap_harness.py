@@ -505,6 +505,7 @@ class Rig:
         self.mark = markers(Path(opts.program))
         self.sent: Dict[str, bool] = {}
         self._frames_checked = False
+        self._adapters = 0
 
     def adapter_argv(self, extra: Optional[List[str]] = None) -> List[str]:
         argv = [sys.executable, str(ADAPTER), "--endpoint", self.opts.endpoint]
@@ -512,6 +513,13 @@ class Rig:
             argv.append("--insecure")
         if self.opts.seed:
             argv += ["--seed", self.opts.seed]
+        if self.opts.trace_dir:
+            # The adapter's own record of everything it wrote to the client, so a run that ends
+            # "no stop within 8 s" can be read rather than re-run.
+            self._adapters += 1
+            trace_dir = Path(self.opts.trace_dir)
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            argv += ["--trace", str(trace_dir / ("adapter-%d.jsonl" % self._adapters))]
         argv += extra or []
         return argv
 
@@ -940,6 +948,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ran-on", default="", help="where the run happened, for the rows")
     ap.add_argument("--only", action="append", default=[], metavar="SCENARIO",
                     help="run only these scenarios (default: all)")
+    ap.add_argument("--trace-dir", metavar="DIR",
+                    help="have every adapter write everything it sent to its client here")
     opts = ap.parse_args(argv)
 
     rig = Rig(opts)

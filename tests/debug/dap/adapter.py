@@ -330,8 +330,13 @@ class Adapter:
 
     def send(self, payload: Dict[str, Any]) -> None:
         if self.trace_path:
-            with open(self.trace_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            # A trace that cannot be written must not take the session down with it: the file is a
+            # diagnostic, and a diagnostic that is a new way to crash is not one.
+            try:
+                with open(self.trace_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            except OSError:
+                pass
         write_message(self.out, json.dumps(payload, separators=(",", ":")).encode("utf-8"))
 
     def event(self, name: str, body: Optional[Dict[str, Any]] = None) -> None:
