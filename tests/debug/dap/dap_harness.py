@@ -176,6 +176,7 @@ class Dap:
         # would lose a `stopped` that arrived while a slow `restart` was outstanding, and the
         # scenario would then report "no stop within N s" — a defect that is not one.
         self._held: List[Dict[str, Any]] = []
+        self._closed = False
         self.proc: Optional[subprocess.Popen] = None
         self.stop = threading.Event()
         self.pump = threading.Thread(target=self._read_loop, name="dap-client-reader", daemon=True)
@@ -262,35 +263,45 @@ class Dap:
 
     # -- protocol
 
-    def request(self, command: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """One request and its response. Correlated by `request_seq`, which DAP guarantees; an
-        event that arrives while we wait is put back, not dropped."""
+    def request(self, command: str, arguments: Optional[Dict[str, Any]] = None,
+                timeout: float = 60.0) -> Dict[str, Any]:
+        """One request and its response. Correlated by `request_seq`, which DAP guarantees; every
+        message that is not that response is kept, in arrival order, for whoever waits next."""
         self.seq += 1
         seq = self.seq
         self._write_frame({"seq": seq, "type": "request", "command": command,
                            "arguments": arguments or {}})
-        deadline = time.monotonic() + 60.0
+        held = self._find(lambda m: m.get("request_seq") == seq)
+        if held is not None:
+            return held
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self._take(max(0.05, deadline - time.monotonic()))
+            msg = self._next(max(0.05, deadline - time.monotonic()))
             if msg.get("request_seq") == seq:
                 return msg
             self._keep(msg)
-        raise Blocked("no response to %s within 60 s" % command)
+        raise Blocked("no response to %s within %g s" % (command, timeout))
 
     def wait_event(self, name: str, within_s: float = 5.0) -> Dict[str, Any]:
+        held = self._find(lambda m: m.get("event") == name)
+        if held is not None:
+            return held
         deadline = time.monotonic() + within_s
         while time.monotonic() < deadline:
-            msg = self._take(max(0.02, deadline - time.monotonic()))
+            msg = self._next(max(0.02, deadline - time.monotonic()))
             if msg.get("event") == name:
                 return msg
             self._keep(msg)
         raise Blocked("no %s event within %g s" % (name, within_s))
 
     def expect_no_event(self, name: str, for_s: float) -> None:
+        if self._find(lambda m: m.get("event") == name) is not None:
+            raise Diverged("a %s event arrived within %g s of a run that should not stop"
+                           % (name, for_s))
         deadline = time.monotonic() + for_s
         while time.monotonic() < deadline:
             try:
-                msg = self._take(max(0.02, deadline - time.monotonic()))
+                msg = self._next(max(0.02, deadline - time.monotonic()))
             except Blocked:
                 return
             if msg.get("event") == name:
@@ -298,9 +309,19 @@ class Dap:
                                % (name, for_s))
             self._keep(msg)
 
-    def _take(self, timeout: float) -> Dict[str, Any]:
-        if self._held:
-            return self._held.pop(0)
+    def _find(self, predicate) -> Optional[Dict[str, Any]]:
+        """The first already-read message `predicate` accepts, removed from the kept list.
+
+        Searching the kept list rather than re-reading it is what stops `wait_event` spinning on
+        one message it has already decided not to return: a reader that puts a message back and
+        then reads the list again gets the same message forever, and a client like that reports
+        "no stop within N s" for a run that stopped on time."""
+        for i, msg in enumerate(self._held):
+            if predicate(msg):
+                return self._held.pop(i)
+        return None
+
+    def _next(self, timeout: float) -> Dict[str, Any]:
         try:
             msg = self.events.get(timeout=timeout)
         except queue.Empty:
@@ -310,9 +331,21 @@ class Dap:
         return msg
 
     def _keep(self, msg: Dict[str, Any]) -> None:
-        self._held.insert(0, msg)
+        self._held.append(msg)
 
     def close(self) -> None:
+        # A DAP client disconnects before it goes. The runtime keeps a session — and the single
+        # controller slot — for P2 after a transport drops (ADR-005 D4), so an adapter that is
+        # merely killed holds the next scenario's attach out for fifteen seconds. Best effort: a
+        # client that cannot reach its adapter at all still has to be closable.
+        try:
+            if self.proc is not None and self.proc.poll() is None:
+                self.request("disconnect", {"terminateDebuggee": False}, timeout=5.0)
+        except Exception:               # noqa: BLE001 - closing is best-effort
+            pass
+        if self._closed:
+            return
+        self._closed = True
         self.stop.set()
         try:
             if self.closer is not None:
@@ -411,6 +444,13 @@ class Plant:
         time.sleep(for_s)
         self.poll()
         return self.witness() == before
+
+
+def pou_name(raw: Any) -> str:
+    """A POU's name for comparison: an IEC identifier is case-insensitive (61131-3 6.1.2), and
+    debug-info.json carries the generated C++ symbol (`PIDCTL`) where the source spells `PidCtl`.
+    The adapter hands that casing on unchanged; this is the harness comparing the two."""
+    return str(raw or "").lower()
 
 
 def markers(program: Path) -> Dict[str, int]:
@@ -614,7 +654,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
 
         frames = rig.frames(chk, client, thread)
         chk.eq("one frame at a call in the program", len(frames), 1)
-        chk.eq("the frame is the program's", frames[0].get("name"), "Cell")
+        chk.eq("the frame is the program's", pou_name(frames[0].get("name")), "Cell")
         values = rig.scope_values(chk, client, frames[0]["id"])
         chk.near("`total` is the FOR loop's 1+2+3 of the scan before", float(values["total"]["value"]), 6.0, 1e-6)
         chk.record("stackTrace, scopes, variables")
@@ -634,7 +674,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
             chk.record(request)
             client.request(request, {"threadId": thread})
             rig.stop_here(chk, client, thread, "step", line=rig.line(mark))
-            got = [f.get("name") for f in rig.frames(chk, client, thread)]
+            got = [pou_name(f.get("name")) for f in rig.frames(chk, client, thread)]
             chk.eq("the stack at %s is innermost-first" % mark, got, names)
         chk.ok("the plant's scan count is frozen while stepped", rig.plant.frozen(1.2))
 
@@ -697,7 +737,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
             rig.stop_here(chk, tcp, tcp_thread, "breakpoint", line=rig.line("@CALL_M1"))
             chk.ok("the plant's scan count is frozen at a TCP stop", rig.plant.frozen(1.0))
             chk.eq("the TCP stack is the program's frame",
-                   [f.get("name") for f in rig.frames(chk, tcp, tcp_thread)], ["Cell"])
+                   [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["Cell"])
             tcp.request("continue", {"threadId": tcp_thread})
             tcp.wait_event("continued", 5.0)
             chk.record("terminate")
@@ -738,7 +778,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         frames = rig.frames(chk, client, thread)
         chk.eq("halted inside the nested FB, innermost-first",
-               [f.get("name") for f in frames], ["PidCtl", "FB_Motor", "Cell"])
+               [pou_name(f.get("name")) for f in frames], ["PidCtl", "FB_Motor", "Cell"])
         first = rig.scope_values(chk, client, frames[0]["id"])
         for name in ("sp", "pv", "kp", "ki", "integ", "err"):
             chk.ok("the innermost frame exposes %s" % name, name in first,
@@ -760,7 +800,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         again = rig.frames(chk, client, thread)
         chk.eq("the second stop is in the same statement",
-               [f.get("name") for f in again], ["PidCtl", "FB_Motor", "Cell"])
+               [pou_name(f.get("name")) for f in again], ["PidCtl", "FB_Motor", "Cell"])
         second = rig.scope_values(chk, client, again[0]["id"])
         chk.ok("the second read is of a program that has run since the first",
                float(second["pv"]["value"]) > float(first["pv"]["value"]),

@@ -741,10 +741,21 @@ def _bp(wire: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _pou_name(raw: Any) -> str:
+    """A POU's name, upper-cased as a C++ symbol would be.
+
+    debug-info.json carries STruCpp's generated symbol (`PIDCTL`, `FB_MOTOR`, `CELL`), which is not
+    the POU name the source spells (`PidCtl`, `FB_Motor`, `Cell`). IEC 61131-3 6.1.2 makes an
+    identifier case-insensitive, so the adapter does not lose information by saying so, and a
+    client's variable view shows the source's spelling. The wire keeps its own casing untouched."""
+    name = str(raw or "")
+    return name if name.isupper() else name.upper()
+
+
 def _frame(wire: Dict[str, Any]) -> Dict[str, Any]:
     """The wire's `StackFrame` as DAP's. `id` is the handle `scopes` takes, `source` gains the
     `name` DAP's Source requires (the wire carries only `path`)."""
-    out: Dict[str, Any] = {"id": int(wire.get("id") or 0), "name": str(wire.get("name") or ""),
+    out: Dict[str, Any] = {"id": int(wire.get("id") or 0), "name": _pou_name(wire.get("name")),
                            "line": int(wire.get("line") or 1)}
     if wire.get("column") is not None:
         out["column"] = int(wire["column"])
