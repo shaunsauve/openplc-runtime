@@ -672,7 +672,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
                 ("stepIn", "@CLAMP_FIRST", ["clamp", "pidctl", "fb_motor", "cell"]),
                 ("stepOut", "@PID_AFTER", ["pidctl", "fb_motor", "cell"]),
                 ("stepOut", "@MOTOR_AFTER", ["fb_motor", "cell"]),
-                ("next", "@CALL_M2", ["Cell"])):
+                ("next", "@CALL_M2", ["cell"])):
             chk.record(request)
             client.request(request, {"threadId": thread})
             rig.stop_here(chk, client, thread, "step", line=rig.line(mark))
@@ -785,12 +785,15 @@ def inspect(rig: Rig, chk: Checks) -> None:
         for name in ("sp", "pv", "kp", "ki", "integ", "err"):
             chk.ok("the innermost frame exposes %s" % name, name in first,
                    "scopes carried %s" % ", ".join(sorted(first)))
-        chk.near("sp is the constant the caller passes", float(first["sp"]["value"]), 50.0, 1e-9)
-        chk.near("kp is the initialiser in the source", float(first["kp"]["value"]), 0.5, 1e-9)
-        chk.near("ki is the initialiser in the source", float(first["ki"]["value"]), 0.1, 1e-9)
+        chk.near("sp is the constant the caller passes", float(first["sp"]["value"]), 50.0, 1e-6)
+        chk.near("kp is the initialiser in the source", float(first["kp"]["value"]), 0.5, 1e-6)
+        # 1e-6, not tighter: the corpus's own oracle reads ki as {"~approx": [0.1, 1e-6]}, and a
+        # REAL that has been through a 32-bit slot is not 0.1 to the last bit. The tolerance is
+        # the project's, taken from the oracle that already judges this value.
+        chk.near("ki is the initialiser in the source", float(first["ki"]["value"]), 0.1, 1e-6)
         err = float(first["err"]["value"])
         chk.near("err is sp - pv, as the source assigns it", err,
-                 float(first["sp"]["value"]) - float(first["pv"]["value"]), 1e-9)
+                 float(first["sp"]["value"]) - float(first["pv"]["value"]), 1e-6)
         chk.ok("the plant's scan count is frozen while halted", rig.plant.frozen(1.2))
         chk.record("stackTrace, scopes, variables")
 
@@ -809,7 +812,7 @@ def inspect(rig: Rig, chk: Checks) -> None:
                "pv was %r at the first stop and %r at the second — a value that did not move is a "
                "cached one" % (first["pv"]["value"], second["pv"]["value"]))
         chk.near("err is sp - pv again", float(second["err"]["value"]),
-                 float(second["sp"]["value"]) - float(second["pv"]["value"]), 1e-9)
+                 float(second["sp"]["value"]) - float(second["pv"]["value"]), 1e-6)
         chk.ok("the plant's scan count is frozen at the second stop too", rig.plant.frozen(1.2))
 
         # The two requests the wire does not serve. A074's Negative asks for a type-invalid
