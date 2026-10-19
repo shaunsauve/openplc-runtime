@@ -49,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -993,7 +994,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (Diverged, Blocked) as exc:
             chk.diverge.append(str(exc)) if isinstance(exc, Diverged) else chk.hold(str(exc))
         except Exception as exc:                       # noqa: BLE001 - a crash is a failed run
-            chk.diverge.append("the scenario raised %s: %s" % (type(exc).__name__, exc))
+            # The traceback, not just the class: "raised BrokenPipeError: [Errno 32]" sent the
+            # next reader back to the container for a fact one `traceback.format_exc()` carries.
+            chk.diverge.append("the scenario raised %s: %s\n%s"
+                               % (type(exc).__name__, exc, traceback.format_exc()))
         print("   %s %s: %s" % (chk.verdict, name, chk.evidence()), flush=True)
         rows.extend(rows_for(name, chk, opts.ran_on or "dart %s" % opts.endpoint, suffix))
         if chk.verdict != "PASS":
