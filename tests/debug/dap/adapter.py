@@ -319,7 +319,9 @@ class Adapter:
         # every request that carries a threadId is resolved through this table, so a threadId the
         # adapter never issued is a refusal rather than a guess.
         self.threads: Dict[int, str] = {}
-        self.variables_cache: Optional[List[Dict[str, Any]]] = None
+        # `variablesReference` -> the children last read under it. Only the `varcache` seed reads
+        # or writes it; an adapter with no defect has no cache, which is the point.
+        self.variables_cache: Dict[int, List[Dict[str, Any]]] = {}
         self.stop = threading.Event()
         self.exit_code = 0
         self.out: Any = None
@@ -492,16 +494,17 @@ class Adapter:
                            for s in (body.get("scopes") or [])]}
 
     def _h_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        ref = args.get("variablesReference")
-        if ref is None:
-            raise DapError("variables needs a variablesReference")
-        if self.seed == "varcache" and self.variables_cache is not None:
+        ref = int(args.get("variablesReference") or 0)
+        if self.seed == "varcache" and ref in self.variables_cache:
             # A074's seeded defect: the second stop's children are answered from the first stop's.
-            return {"variables": self.variables_cache}
-        body = self._call("variables", {"variablesReference": int(ref)})
+            # Keyed by the reference, which is what "the previous stop's cache" means — one
+            # container's cache answering another container's request would be a different bug,
+            # and one a client could not tell from a missing scope.
+            return {"variables": self.variables_cache[ref]}
+        body = self._call("variables", {"variablesReference": ref})
         out = [_variable(v) for v in (body.get("variables") or [])]
         if self.seed == "varcache":
-            self.variables_cache = out
+            self.variables_cache[ref] = out
         return {"variables": out}
 
     def _h_continue(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -533,7 +536,7 @@ class Adapter:
                 raise DapError("restartKind %r is not 'warm', 'cold' or 'reset'" % (kind,))
             wire_args["kind"] = kind
         self._call("restart", wire_args)
-        self.variables_cache = None
+        self.variables_cache.clear()
         return {}
 
     def _h_terminate(self, _args: Dict[str, Any]) -> Dict[str, Any]:
