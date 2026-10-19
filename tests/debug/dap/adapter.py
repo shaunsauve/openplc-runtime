@@ -52,6 +52,7 @@ import socketserver
 import sys
 import threading
 import traceback
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 NAMESPACE = "/api/debug-session"
@@ -194,13 +195,42 @@ def read_message(stream: Any) -> Optional[bytes]:
 # --------------------------------------------------------------------------
 
 
+def _socketio_client(ssl_verify: bool):
+    """The Socket.IO client this process speaks over.
+
+    `socketio.Client` is used when `websocket-client` is installed. It is not, in the runtime image
+    (python-socketio's sync client needs it for the websocket transport, and the image ships only
+    `simple_websocket`), and the gateway serves `/api/debug-session` on the websocket transport
+    only — so the fallback is `tests/debug/wire/wss_client.py`'s `WssSio`, which is the same
+    minimal client the corpus harness already uses for exactly this reason.
+
+    Reusing it is deliberate. It is generic Socket.IO/Engine.IO framing and nothing about the debug
+    protocol: the envelope, the sequence numbers, the request/response correlation and every event
+    below are this file's own. Writing a second Socket.IO client here would be a second transport to
+    keep in step with the first, for no capability the first does not have."""
+    try:
+        import socketio  # noqa: PLC0415 - optional at import time, so --help works without it
+        import websocket  # noqa: F401,PLC0415 - socketio's websocket transport needs this one
+        return socketio.Client(ssl_verify=ssl_verify, reconnection=False)
+    except ImportError:
+        pass
+    wire_dir = str(Path(__file__).resolve().parents[1] / "wire")
+    if wire_dir not in sys.path:
+        sys.path.insert(0, wire_dir)
+    try:
+        from wss_client import WssSio  # noqa: PLC0415 - the fallback, only when it is needed
+    except ImportError as exc:
+        raise DapError(
+            "no Socket.IO client: neither websocket-client nor %s is importable (%s)"
+            % (wire_dir, exc)) from exc
+    return WssSio(ssl_verify=ssl_verify, reconnection=False)
+
+
 class Wire:
     """One session on `/api/debug-session`. Requests are correlated by `seq`, never by arrival
     order (DEBUG_PROTOCOL.md "Envelope"), and every event lands on `events`."""
 
     def __init__(self, url: str, insecure: bool) -> None:
-        import socketio  # noqa: PLC0415 - optional at import time, so --help works without it
-
         self.url = url
         self.seq = 0
         self.lock = threading.Lock()
@@ -209,10 +239,9 @@ class Wire:
         self.closed = threading.Event()
         self.beat: Optional[threading.Thread] = None
         self.p1 = 2.0
-        self.sio = socketio.Client(ssl_verify=not insecure, reconnection=False)
+        self.sio = _socketio_client(not insecure)
         self.sio.on("msg", self._on_msg, namespace=NAMESPACE)
-        self.sio.connect(url, namespaces=[NAMESPACE], transports=["websocket"],
-                         wait_timeout=5)
+        self.sio.connect(url, namespaces=[NAMESPACE], transports=["websocket"], wait_timeout=5)
 
     def _on_msg(self, data: Any) -> None:
         msg = json.loads(data) if isinstance(data, str) else data

@@ -64,13 +64,14 @@ ARCH=$(uname -m)
 INPUTS=$(python3 - "$NAME" <<'PY'
 import sys
 # nested-fb-loop: motor2 runs only while %IX0.0 is set, and J1 reads motor1 alone.
-# plant-io: the values j1-run-control's oracle drives.
-print({"nested-fb-loop": "%IX0.0 0", "plant-io": "%IX0.0 1 %IW0 7 %ID0 70000"}
-      .get(sys.argv[1], "%IX0.0 0"))
+# plant-io: the values j1-run-control's oracle drives. `addr=value` tokens, one per pair, because
+# a bare "addr value" string cannot be split into pairs without knowing how many words each has.
+print({"nested-fb-loop": "%IX0.0=0", "plant-io": "%IX0.0=1 %IW0=7 %ID0=70000"}
+      .get(sys.argv[1], "%IX0.0=0"))
 PY
 )
 for pair in $INPUTS; do
-  ADDR=${pair% *}; VAL=${pair#* }
+  ADDR=${pair%%=*}; VAL=${pair#*=}
   # The plant's SET is a line on its socket; the debug session does not exist yet and must not be
   # what puts these there, or the run would be measuring its own setup. Retried, because the
   # plugin takes its first exchange a moment after its socket appears.
