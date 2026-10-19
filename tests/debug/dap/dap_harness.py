@@ -737,7 +737,7 @@ def run_control(rig: Rig, chk: Checks) -> None:
             rig.stop_here(chk, tcp, tcp_thread, "breakpoint", line=rig.line("@CALL_M1"))
             chk.ok("the plant's scan count is frozen at a TCP stop", rig.plant.frozen(1.0))
             chk.eq("the TCP stack is the program's frame",
-                   [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["Cell"])
+                   [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["cell"])
             tcp.request("continue", {"threadId": tcp_thread})
             tcp.wait_event("continued", 5.0)
             chk.record("terminate")
