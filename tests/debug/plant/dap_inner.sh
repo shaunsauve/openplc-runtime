@@ -72,19 +72,26 @@ PY
 for pair in $INPUTS; do
   ADDR=${pair% *}; VAL=${pair#* }
   # The plant's SET is a line on its socket; the debug session does not exist yet and must not be
-  # what puts these there, or the run would be measuring its own setup.
+  # what puts these there, or the run would be measuring its own setup. Retried, because the
+  # plugin takes its first exchange a moment after its socket appears.
   python3 - "$ADDR" "$VAL" <<'PY'
 import socket, sys, time
-for _ in range(100):
+addr, val = sys.argv[1], sys.argv[2]
+last = "no reply"
+for _ in range(200):
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(5); s.connect("/tmp/plant.sock")
-        break
-    except OSError:
-        time.sleep(0.1)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.settimeout(5)
+        s.connect("/tmp/plant.sock")
+        s.sendall(("SET %s %s\n" % (addr, val)).encode())
+        last = s.recv(64).decode().strip()
+        s.close()
+        if last.startswith("OK"):
+            break
+    except OSError as exc:
+        last = str(exc)
+    time.sleep(0.1)
 else:
-    raise SystemExit("no plant socket")
-s.sendall(("SET %s %s\n" % (sys.argv[1], sys.argv[2])).encode())
-assert s.recv(64).startswith(b"OK"), "the plant refused the input"
+    raise SystemExit("the plant refused %s = %s (%s)" % (addr, val, last))
 PY
 done
 echo "### plant inputs: $INPUTS"

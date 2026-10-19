@@ -211,8 +211,14 @@ class Dap:
                    closer=sock)
 
     def _drain_stderr(self) -> None:
+        # readline() in a loop, not `for line in stderr`: with bufsize=0 the pipe is a raw FileIO,
+        # which is not iterable, and a drain that dies on its first line leaves the adapter
+        # blocked on a full stderr pipe and looking like an adapter that says nothing.
         assert self.proc is not None and self.proc.stderr is not None
-        for line in self.proc.stderr:
+        while True:
+            line = self.proc.stderr.readline()
+            if not line:
+                return
             print("    adapter: %s" % line.decode("utf-8", "replace").rstrip(), flush=True)
 
     def _read_loop(self) -> None:
@@ -222,9 +228,10 @@ class Dap:
                 if raw is None:
                     self.events.put({"event": "__closed__", "body": {}})
                     return
-                msg = json.loads(raw.decode("utf-8"))
-                if msg.get("type") == "event":
-                    self.events.put(msg)
+                # EVERY message is queued, responses included. A reader that kept only events
+                # would be a client that can watch a debugger and never ask it anything — and
+                # every request in this file would time out against an adapter that answered.
+                self.events.put(json.loads(raw.decode("utf-8")))
         except Exception:               # a closed pipe is how a terminated adapter says goodbye
             self.events.put({"event": "__closed__", "body": {}})
 
@@ -274,7 +281,7 @@ class Dap:
         deadline = time.monotonic() + within_s
         while time.monotonic() < deadline:
             msg = self._take(max(0.02, deadline - time.monotonic()))
-            if msg["event"] == name:
+            if msg.get("event") == name:
                 return msg
             self._keep(msg)
         raise Blocked("no %s event within %g s" % (name, within_s))
@@ -286,7 +293,7 @@ class Dap:
                 msg = self._take(max(0.02, deadline - time.monotonic()))
             except Blocked:
                 return
-            if msg["event"] == name:
+            if msg.get("event") == name:
                 raise Diverged("a %s event arrived within %g s of a run that should not stop"
                                % (name, for_s))
             self._keep(msg)
@@ -298,7 +305,7 @@ class Dap:
             msg = self.events.get(timeout=timeout)
         except queue.Empty:
             raise Blocked("nothing arrived within %g s" % timeout)
-        if msg["event"] == "__closed__":
+        if msg.get("event") == "__closed__":
             raise Blocked("the adapter closed its stream")
         return msg
 
