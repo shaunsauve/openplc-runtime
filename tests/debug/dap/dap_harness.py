@@ -799,7 +799,8 @@ def run_control(rig: Rig, chk: Checks) -> None:
             tcp.wait_event("continued", 5.0)
             rig.call(chk, tcp, "terminate")
             tcp.wait_event("terminated", 5.0)
-            chk.ok("the PLC stops on terminate", rig.plant.frozen(1.5))
+            chk.ok("the PLC stops on terminate", rig.plant.frozen(3.0),
+                   "the plant's scan count kept moving for 3 s after terminate")
             tcp.close()
         finally:
             server.terminate()
@@ -814,9 +815,11 @@ def inspect(rig: Rig, chk: Checks) -> None:
 
     The oracle is the program itself. At the first stop in `PidCtl` the source says `kp` starts at
     0.5, `ki` at 0.1, the caller passes `sp := 50.0` and `pv := motor1.speed`, and `err := sp - pv`
-    — so `err` must equal `sp - pv` at every stop, and `pv` must grow between two stops because the
-    program ran in between. A `variables` answered from a cache is caught by the second of those,
-    which is what the `--seed varcache` red-proof does.
+    — so `err` must equal `sp - pv` at every stop. The witness that a second read is FRESH is
+    `integ`, not `pv`: `integ := integ + err * ki` moves every scan the error is non-zero, while
+    `pv` reaches a fixed point (the PID output clamps at 0 and stops moving `speed`), so a `pv`
+    that does not change says nothing about whether the program ran. A `variables` answered from
+    the previous stop's cache is caught by `integ` not moving, which is what `--seed varcache` does.
 
     `evaluate` and `setVariable` are driven last, so everything above is measured even though they
     block the criterion."""
@@ -848,17 +851,14 @@ def inspect(rig: Rig, chk: Checks) -> None:
         chk.near("err is sp - pv, as the source assigns it", err,
                  float(first["sp"]["value"]) - float(first["pv"]["value"]), 1e-6)
         chk.ok("the plant's scan count is frozen while halted", rig.plant.frozen(1.2))
-        chk.record("stackTrace, scopes, variables")
-
         # Run on, and stop in the same statement again: the program's own integrator has moved, so
-        # a fresh read and a cached one are no longer the same numbers.
+        # a fresh read and a cached one are no longer the same numbers. The breakpoint is cleared
+        # before the resume and re-armed after the program has run: resuming with it still armed
+        # parks the task on the very probe it is standing on (A038's step-onto-breakpoint), which
+        # is a second stop in the same scan and no reading a second time can tell from a cached one.
         rig.call(chk, client, "setBreakpoints", {"source": {"path": "program.st"}, "breakpoints": []})
         rig.call(chk, client, "continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
-        # The breakpoint is cleared before the resume, and re-armed after the program has run.
-        # Resuming with it still armed parks the task on the very probe it is standing on (A038's
-        # step-onto-breakpoint), which is a second stop in the same scan and no reading a second
-        # time can tell apart from a cached one.
         scans_at_stop = rig.plant.witness()
         rig.plant.settle(3)
         rig.call(chk, client, "setBreakpoints",
@@ -878,9 +878,10 @@ def inspect(rig: Rig, chk: Checks) -> None:
                "the plant counted %d scans at the first stop and %d after the resume"
                % (scans_at_stop, rig.plant.witness()))
         chk.ok("the second read is of a program that has run since the first",
-               float(second["pv"]["value"]) > float(first["pv"]["value"]),
-               "pv was %r at the first stop and %r at the second — a value that did not move is a "
-               "cached one" % (first["pv"]["value"], second["pv"]["value"]))
+               float(second["integ"]["value"]) != float(first["integ"]["value"]),
+               "integ was %r at the first stop and %r at the second — the integrator moves every "
+               "scan, so a value that did not move is a cached one"
+               % (first["integ"]["value"], second["integ"]["value"]))
         chk.near("err is sp - pv again", float(second["err"]["value"]),
                  float(second["sp"]["value"]) - float(second["pv"]["value"]), 1e-6)
         chk.ok("the plant's scan count is frozen at the second stop too", rig.plant.frozen(1.2))
