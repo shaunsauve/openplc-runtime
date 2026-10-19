@@ -117,9 +117,13 @@ class Checks:
         return self._index
 
     def ok(self, label: str, condition: bool, detail: str = "") -> None:
+        """One assertion. It stops the scenario when it fails, so the last line printed before a
+        verdict IS the step that failed — a harness that reports "no stop within 8 s" without
+        saying which of six stops it was is a harness that has to be re-run to be understood."""
+        n = self.step()
         if not condition:
-            raise Diverged("step %d: %s%s" % (self.step(), label,
-                                               (" — " + detail) if detail else ""))
+            raise Diverged("step %d: %s%s" % (n, label, (" — " + detail) if detail else ""))
+        print("      %2d. %s" % (n, label), flush=True)
 
     def eq(self, label: str, got: Any, want: Any) -> None:
         self.ok(label, got == want, "expected %r, observed %r" % (want, got))
@@ -801,7 +805,9 @@ def inspect(rig: Rig, chk: Checks) -> None:
         # a fresh read and a cached one are no longer the same numbers.
         client.request("continue", {"threadId": thread})
         client.wait_event("continued", 5.0)
-        rig.plant.settle(3)
+        # No settle here: the @PID_CALL breakpoint is still armed, so the program stops again
+        # within one scan and would never reach a third. The wait for the second stop IS the
+        # proof that the program ran in between, which is what `pv` growing then measures.
         rig.stop_here(chk, client, thread, "breakpoint", line=rig.line("@PID_CALL"))
         again = rig.frames(chk, client, thread)
         chk.eq("the second stop is in the same statement",
