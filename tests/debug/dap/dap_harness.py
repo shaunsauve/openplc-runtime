@@ -797,6 +797,13 @@ def run_control(rig: Rig, chk: Checks) -> None:
                    [pou_name(f.get("name")) for f in rig.frames(chk, tcp, tcp_thread)], ["cell"])
             rig.call(chk, tcp, "continue", {"threadId": tcp_thread})
             tcp.wait_event("continued", 5.0)
+            # Wait until the plant can SEE it running again before asking it to stop. `terminate`
+            # stops the PLC only when plc_get_state() == RUNNING (debug_link.cpp:1234), so a
+            # terminate that lands while the core is still transitioning out of the halt ends the
+            # session and leaves the program scanning. That is the core's behaviour and it is
+            # reported; waiting here is what a client does anyway - you do not stop a debuggee
+            # you have not seen resume.
+            rig.plant.settle(2)
             rig.call(chk, tcp, "terminate")
             tcp.wait_event("terminated", 5.0)
             chk.ok("the PLC stops on terminate", rig.plant.frozen(3.0),
