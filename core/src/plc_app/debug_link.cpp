@@ -108,6 +108,7 @@ struct Bp
 {
     int id     = 0;
     int fileId = 0;
+    int kind   = DBG_KIND_LINE;
 };
 std::mutex                     g_mu;
 std::map<std::string, Session> g_sessions;
@@ -763,11 +764,14 @@ dbg_status_t set_one(cJSON *item, uint32_t *probe, dbg_bp_spec_t *spec, std::str
     cJSON *h = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "hitCount") : nullptr;
     cJSON *o = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "oneShot") : nullptr;
     cJSON *e = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "enabled") : nullptr;
+    cJSON *i = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "instance") : nullptr;
     spec->cond       = cond.data();
     spec->cond_len   = cond.size();
     spec->hit_target = is_int(h) && h->valuedouble > 0 ? (uint32_t)h->valuedouble : 0;
     spec->one_shot   = cJSON_IsTrue(o);
     spec->enabled    = !cJSON_IsFalse(e);
+    /* The instance an instance breakpoint names: the flat leaf index of its first leaf. */
+    spec->instance   = is_int(i) && i->valuedouble >= 0 ? (uint32_t)i->valuedouble : DBG_NO_INSTANCE;
     return DBG_OK;
 }
 
@@ -1324,6 +1328,19 @@ Reply handle(const char *command, cJSON *args)
         if (!is_int(file) || !cJSON_IsArray(list))
             return fail("BAD_REQUEST", "setBreakpoints needs an integer fileId and a probes list");
         const int fid = (int)file->valuedouble;
+        /* The kind of breakpoint this request sets: a line, a function's entry or one instance.
+         * Each kind has its own set, so setting one never disturbs another. */
+        uint8_t kind = DBG_KIND_LINE;
+        cJSON  *k    = arg(args, "kind");
+        if (k)
+        {
+            if (!cJSON_IsString(k)) return fail("BAD_REQUEST", "the breakpoint kind must be a string");
+            const std::string ks = k->valuestring;
+            if (ks == "line") kind = DBG_KIND_LINE;
+            else if (ks == "function") kind = DBG_KIND_FUNCTION;
+            else if (ks == "instance") kind = DBG_KIND_INSTANCE;
+            else return fail("BAD_REQUEST", "the breakpoint kind must be line, function or instance");
+        }
         /* The per-breakpoint request: one item is one breakpoint, and several items may name the
          * same probe (a conditional breakpoint and a logpoint on one line). The items are grouped
          * by probe, keeping their order, and the probe's list is published as one record. */
@@ -1345,6 +1362,7 @@ Reply handle(const char *command, cJSON *args)
             std::string   why;
             const dbg_status_t s = set_one(item, &it.probe, &spec, &why);
             it.spec   = spec;
+            it.spec.kind = kind;
             it.parsed = s == DBG_OK;
             it.status = s;
             it.why    = why;
@@ -1356,16 +1374,27 @@ Reply handle(const char *command, cJSON *args)
             }
             items.push_back(it);
         }
-        /* Replace the file's set: disarm what the new list no longer names (pm ruling 6). */
+        /* Replace this kind's set for the file: disarm what the new list no longer names
+         * (pm ruling 6). The other kinds at the same probe are untouched. */
         for (auto it = g_bps.begin(); it != g_bps.end();)
         {
             bool wanted = false;
             for (uint32_t p : order) if (p == it->first) { wanted = true; break; }
-            const bool mine = !it->second.empty() && it->second.front().fileId == fid;
+            std::vector<Bp> keep;
+            bool             mine = false;
+            for (const Bp &b : it->second)
+            {
+                if (b.kind == kind && b.fileId == fid) { mine = true; continue; }
+                keep.push_back(b);
+            }
             if (mine && !wanted)
             {
-                debug_agent_clear_breakpoint(it->first);
-                it = g_bps.erase(it);
+                /* The whole probe goes only when nothing of another kind is left on it. */
+                if (keep.empty()) debug_agent_clear_breakpoint(it->first);
+                else debug_agent_clear_kind(it->first, kind);
+                it->second = keep;
+                if (it->second.empty()) it = g_bps.erase(it);
+                else ++it;
             }
             else
                 ++it;
@@ -1379,7 +1408,7 @@ Reply handle(const char *command, cJSON *args)
             size_t        n = 0;
             for (const Item &it : items)
                 if (it.parsed && it.probe == p && n < DBG_MAX_PER_PROBE) specs[n++] = it.spec;
-            const dbg_status_t s = debug_agent_set_breakpoint(p, specs, n);
+            const dbg_status_t s = debug_agent_set_breakpoint(p, kind, specs, n);
             if (s != DBG_OK)
             {
                 for (Item &it : items)
@@ -1395,17 +1424,29 @@ Reply handle(const char *command, cJSON *args)
                     }
                 continue;
             }
+            /* The probe's list: the kinds this request does not touch keep their place, and the
+             * id of a breakpoint travels with its position among the breakpoints of this kind. */
             std::vector<Bp> list;
+            std::vector<Bp> old_same;
             auto             old = g_bps.find(p);
-            size_t           i   = 0;
+            if (old != g_bps.end())
+            {
+                for (const Bp &b : old->second)
+                {
+                    if (b.kind == kind) old_same.push_back(b);
+                    else list.push_back(b);
+                }
+            }
+            size_t i = 0;
             for (size_t k = 0; k < items.size(); ++k)
             {
                 const Item &it = items[k];
                 if (!it.parsed || it.probe != p) continue;
                 Bp b;
                 b.fileId = fid;
+                b.kind   = kind;
                 /* The id travels with the position, so a replace keeps the client's id. */
-                b.id = (old != g_bps.end() && i < old->second.size()) ? old->second[i].id : g_next_bp++;
+                b.id = i < old_same.size() ? old_same[i].id : g_next_bp++;
                 list.push_back(b);
                 item_ids[k] = b.id;
                 i++;

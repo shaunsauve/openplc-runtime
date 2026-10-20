@@ -43,6 +43,16 @@ extern "C" {
  * (a conditional one and a logpoint, say), so a probe holds a list, not a single record. */
 #define DBG_MAX_PER_PROBE 4
 
+/* What kind of breakpoint a spec is. A probe holds one list per kind: setting a line
+ * breakpoint never disturbs a function breakpoint on the same line, and the runtime's own
+ * temporary (the run-to-cursor) is a kind of its own, so it can be taken back without
+ * touching the client's breakpoints. */
+#define DBG_KIND_LINE     0
+#define DBG_KIND_FUNCTION 1
+#define DBG_KIND_INSTANCE 2
+#define DBG_KIND_CURSOR   3
+#define DBG_KIND_ANY      0xFF
+
 /* Flag byte bits, as debug_probe.hpp defines them. */
 #define DBG_FLAG_ARMED 1u
 #define DBG_FLAG_TRAP  2u
@@ -151,13 +161,22 @@ typedef struct
     const uint8_t *cond;       /* condition bytecode, or NULL */
     size_t         cond_len;   /* 0: unconditional */
     uint32_t       hit_target; /* 0 or 1 stops on every hit; n stops from the n-th hit on */
+    uint32_t       instance;   /* the instance's leaf index, or DBG_NO_INSTANCE for any */
+    uint8_t        kind;       /* DBG_KIND_* */
     bool           one_shot;   /* clears itself on its first hit */
     bool           enabled;    /* false: listed, but not armed */
 } dbg_bp_spec_t;
 
-/* Arms or replaces the breakpoints at a probe. A replace keeps the hit counts of the
- * breakpoints it keeps, matched by their position in the list. count 0 clears the probe. */
-dbg_status_t debug_agent_set_breakpoint(uint32_t probe, const dbg_bp_spec_t *specs, size_t count);
+/* The instance filter's "any instance". */
+#define DBG_NO_INSTANCE 0xFFFFFFFFu
+
+/* Arms or replaces the breakpoints of one kind at a probe. A replace keeps the hit counts of
+ * the breakpoints it keeps, matched by their position in the list. count 0 clears that kind
+ * at the probe. */
+dbg_status_t debug_agent_set_breakpoint(uint32_t probe, uint8_t kind, const dbg_bp_spec_t *specs,
+                                        size_t count);
+/* Removes the breakpoints of one kind at a probe (DBG_KIND_ANY: all of them). */
+dbg_status_t debug_agent_clear_kind(uint32_t probe, uint8_t kind);
 dbg_status_t debug_agent_clear_breakpoint(uint32_t probe);
 /* Returns the number removed. */
 uint32_t debug_agent_clear_all_breakpoints(void);
@@ -168,6 +187,7 @@ typedef struct
 {
     uint32_t hit_target;
     uint32_t hits;
+    uint8_t  kind;
     bool     one_shot;
     bool     enabled;
 } dbg_bp_info_t;

@@ -131,17 +131,17 @@ class Pou:
     kind: str
     entry_probe: int
     type_id: Optional[int]
-    # The POU's source span, (first line, first column, last line, last column), and the file it
-    # is in. A breakpoint never moves across a POU boundary (F026), so the span is what says
-    # which statements a line may fall forward to.
-    span: Tuple[int, int, int, int] = (0, 0, 0, 0)
-    file_id: Optional[int] = None
     # (name, typeId, section, localsSlot): a frame variable, and the slot its first leaf takes in
     # the frame's `__dbg_locals` table (None when the variable has no readable leaf).
     locals: Tuple[Tuple[str, Optional[int], str, Optional[int]], ...]
     # The frame's `__dbg_locals` table, index = slot: (leaf path, IEC type name, byte size).
     # Empty when the POU's body declares no frame variable.
     frame_leaves: Tuple[Tuple[str, str, int], ...]
+    # The POU's source span, (first line, first column, last line, last column), and the file it
+    # is in. A breakpoint never moves across a POU boundary (F026), so the span is what says
+    # which statements a line may fall forward to.
+    span: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    file_id: Optional[int] = None
 
 
 @dataclass(frozen=True)

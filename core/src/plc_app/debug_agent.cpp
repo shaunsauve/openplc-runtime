@@ -36,11 +36,13 @@ namespace {
 struct BpSpec
 {
     uint32_t hit_target; /* 0 or 1: every hit; n: from the n-th hit on */
+    uint32_t instance;   /* the instance's leaf index, or DBG_NO_INSTANCE for any */
     uint16_t slot;       /* the breakpoint's side slot: its hit count and its one-shot flag */
     uint16_t cond_off;   /* offset into the record's condition buffer */
     uint16_t cond_len;   /* 0: unconditional */
     uint8_t  one_shot;   /* clears itself on its first hit */
     uint8_t  enabled;    /* 0: listed, not armed */
+    uint8_t  kind;       /* DBG_KIND_* */
 };
 
 struct BpRecord
@@ -79,6 +81,8 @@ struct DesiredSpec
 {
     std::vector<uint8_t> cond;
     uint32_t             hit_target;
+    uint32_t             instance;
+    uint8_t              kind;
     bool                 one_shot;
     bool                 enabled;
 };
@@ -329,10 +333,12 @@ dbg_status_t publish_locked(uint32_t probe, const dbg_bp_spec_t *specs, size_t c
     {
         BpSpec &s    = r.spec[i];
         s.hit_target = specs[i].hit_target;
+        s.instance   = specs[i].instance;
         s.cond_off   = (uint16_t)coff;
         s.cond_len   = (uint16_t)specs[i].cond_len;
         s.one_shot   = specs[i].one_shot ? 1 : 0;
         s.enabled    = specs[i].enabled ? 1 : 0;
+        s.kind       = specs[i].kind;
         if (slots[i] != 0xFFFF)
         {
             s.slot = slots[i];
@@ -373,21 +379,69 @@ dbg_status_t publish_locked(uint32_t probe, const dbg_bp_spec_t *specs, size_t c
     return DBG_OK;
 }
 
-/* Arms or replaces the breakpoints at a probe. A replace keeps the hit count of every breakpoint
- * it keeps, matched by its position in the list: the side slot travels with the position.
- * The slots the old record held and the new list does not take over are freed with it. */
-dbg_status_t set_locked(uint32_t probe, const dbg_bp_spec_t *specs, size_t count)
+/* The old specs of one kind (or of every other kind), in order, with their slots. */
+size_t old_of_kind(const BpRecord *old, uint8_t kind, bool same, dbg_bp_spec_t *out,
+                   uint16_t *slots, size_t max)
+{
+    size_t n = 0;
+    if (!old) return 0;
+    for (uint8_t i = 0; i < old->nspec && n < max; ++i)
+    {
+        const BpSpec &s = old->spec[i];
+        if (same ? s.kind != kind : s.kind == kind) continue;
+        out[n].cond       = old->cond + s.cond_off;
+        out[n].cond_len   = s.cond_len;
+        out[n].hit_target = s.hit_target;
+        out[n].instance   = s.instance;
+        out[n].kind       = s.kind;
+        out[n].one_shot   = s.one_shot != 0;
+        out[n].enabled    = s.enabled != 0;
+        slots[n]          = s.slot;
+        n++;
+    }
+    return n;
+}
+
+/* Arms or replaces the breakpoints of one kind at a probe. A replace keeps the hit count of
+ * every breakpoint it keeps, matched by its position among the breakpoints of that kind: the
+ * side slot travels with the position. The slots the old record held and the new list does
+ * not take over are freed with it. */
+dbg_status_t set_locked(uint32_t probe, uint8_t kind, const dbg_bp_spec_t *specs, size_t count)
 {
     if (!g_bp) return DBG_E_NO_PROBES;
     if (probe >= g_count) return DBG_E_INVALID_LOCATION;
     if (count > DBG_MAX_PER_PROBE) return DBG_E_LIMIT;
     const int32_t   cur = g_cur[probe];
     const BpRecord *old = cur >= 0 ? &g_pool[cur] : nullptr;
-    const size_t    old_n = old ? old->nspec : 0;
-    uint16_t slots[DBG_MAX_PER_PROBE];
+
+    dbg_bp_spec_t merged[DBG_MAX_PER_PROBE];
+    uint16_t      slots[DBG_MAX_PER_PROBE];
+    size_t        n = 0;
+    /* The kinds this call does not touch keep their place. */
+    if (kind != DBG_KIND_ANY)
+    {
+        dbg_bp_spec_t other[DBG_MAX_PER_PROBE];
+        uint16_t      other_slots[DBG_MAX_PER_PROBE];
+        const size_t  n_other = old_of_kind(old, kind, false, other, other_slots, DBG_MAX_PER_PROBE);
+        for (size_t i = 0; i < n_other && n < DBG_MAX_PER_PROBE; ++i)
+        {
+            merged[n] = other[i];
+            slots[n]  = other_slots[i];
+            n++;
+        }
+    }
+    /* The breakpoints of this kind that the old record held: their slots are the hit counts. */
+    dbg_bp_spec_t same[DBG_MAX_PER_PROBE];
+    uint16_t      same_slots[DBG_MAX_PER_PROBE];
+    const size_t  n_same = old_of_kind(old, kind, true, same, same_slots, DBG_MAX_PER_PROBE);
     for (size_t i = 0; i < count; ++i)
-        slots[i] = (old && i < old_n) ? old->spec[i].slot : 0xFFFF;
-    return publish_locked(probe, specs, count, slots);
+    {
+        if (n >= DBG_MAX_PER_PROBE) return DBG_E_LIMIT;
+        merged[n] = specs[i];
+        slots[n]  = i < n_same ? same_slots[i] : 0xFFFF;
+        n++;
+    }
+    return publish_locked(probe, merged, n, slots);
 }
 
 /* A one-shot that has fired leaves the breakpoint list (ADR-003, the per-breakpoint request):
@@ -489,6 +543,13 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
             const BpSpec &s = r->spec[i];
             if (!s.enabled) continue;
             if (s.one_shot && g_slots[s.slot].oneshot_taken.load(std::memory_order_relaxed)) continue;
+            /* An instance breakpoint stops only in the instance it names: the innermost frame's
+             * `this` is mapped to its first leaf, and the leaf is what the gateway resolved. */
+            if (s.instance != DBG_NO_INSTANCE)
+            {
+                const void *self = tl_head ? tl_head->self : nullptr;
+                if (!self || (uint32_t)debug_agent_leaf_of(self) != s.instance) continue;
+            }
             const int c = s.cond_len ? cond_eval(r->cond + s.cond_off, s.cond_len) : 1;
             if (c < 0)
             {
@@ -615,10 +676,12 @@ extern "C" void debug_agent_bind(volatile uint8_t *flags, uint32_t probe_count, 
             specs[i].cond       = ds.cond.data();
             specs[i].cond_len   = ds.cond.size();
             specs[i].hit_target = ds.hit_target;
+            specs[i].instance   = ds.instance;
+            specs[i].kind       = ds.kind;
             specs[i].one_shot   = ds.one_shot;
             specs[i].enabled    = ds.enabled;
         }
-        set_locked(d.first, specs, d.second.specs.size());
+        set_locked(d.first, DBG_KIND_ANY, specs, d.second.specs.size());
     }
     if (g_active) __atomic_store_n(g_active, (uint8_t)(g_attached ? 1 : 0), __ATOMIC_RELAXED);
 }
@@ -661,25 +724,49 @@ extern "C" bool debug_agent_attached(void)
     return g_attached;
 }
 
-extern "C" dbg_status_t debug_agent_set_breakpoint(uint32_t probe, const dbg_bp_spec_t *specs,
-                                                   size_t count)
+/* Remembers what a probe holds, so a program that is loaded again re-arms the same
+ * breakpoints (the hit counts travel with the side slots). */
+void remember_desired_locked(uint32_t probe)
+{
+    const int32_t cur = g_cur[probe];
+    if (cur < 0)
+    {
+        g_desired.erase(probe);
+        return;
+    }
+    const BpRecord &r = g_pool[cur];
+    Desired        d;
+    for (uint8_t i = 0; i < r.nspec; ++i)
+    {
+        DesiredSpec ds;
+        ds.cond       = std::vector<uint8_t>(r.cond + r.spec[i].cond_off,
+                                              r.cond + r.spec[i].cond_off + r.spec[i].cond_len);
+        ds.hit_target = r.spec[i].hit_target;
+        ds.instance   = r.spec[i].instance;
+        ds.kind       = r.spec[i].kind;
+        ds.one_shot   = r.spec[i].one_shot != 0;
+        ds.enabled    = r.spec[i].enabled != 0;
+        d.specs.push_back(ds);
+    }
+    g_desired[probe] = d;
+}
+
+extern "C" dbg_status_t debug_agent_set_breakpoint(uint32_t probe, uint8_t kind,
+                                                   const dbg_bp_spec_t *specs, size_t count)
 {
     std::lock_guard<std::mutex> g(g_mu);
-    const dbg_status_t s = set_locked(probe, specs, count);
-    if (s == DBG_OK)
-    {
-        Desired d;
-        for (size_t i = 0; i < count; ++i)
-        {
-            DesiredSpec ds;
-            ds.cond       = std::vector<uint8_t>(specs[i].cond, specs[i].cond + specs[i].cond_len);
-            ds.hit_target = specs[i].hit_target;
-            ds.one_shot   = specs[i].one_shot;
-            ds.enabled    = specs[i].enabled;
-            d.specs.push_back(ds);
-        }
-        g_desired[probe] = d;
-    }
+    const dbg_status_t s = set_locked(probe, kind, specs, count);
+    if (s == DBG_OK) remember_desired_locked(probe);
+    return s;
+}
+
+extern "C" dbg_status_t debug_agent_clear_kind(uint32_t probe, uint8_t kind)
+{
+    std::lock_guard<std::mutex> g(g_mu);
+    if (!g_bp) return DBG_E_NO_PROBES;
+    if (probe >= g_count) return DBG_E_INVALID_LOCATION;
+    const dbg_status_t s = set_locked(probe, kind, nullptr, 0);
+    if (s == DBG_OK) remember_desired_locked(probe);
     return s;
 }
 
@@ -718,6 +805,7 @@ extern "C" size_t debug_agent_breakpoint_at(uint32_t probe, dbg_bp_info_t *out, 
     {
         out[i].hit_target = r.spec[i].hit_target;
         out[i].hits       = g_slots[r.spec[i].slot].hits.load(std::memory_order_relaxed);
+        out[i].kind       = r.spec[i].kind;
         out[i].one_shot   = r.spec[i].one_shot != 0;
         out[i].enabled    = r.spec[i].enabled != 0;
     }
