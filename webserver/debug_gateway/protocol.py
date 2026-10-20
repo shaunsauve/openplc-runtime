@@ -160,7 +160,13 @@ COMMANDS: Mapping[str, Command] = {
             "setBreakpoints",
             Kind.CONTROL,
             ("control",),
-            {"file": Arg("str", True), "lines": Arg("list[int]", True)},
+            {
+                "file": Arg("str", True),
+                # The shorthand: one breakpoint per line, all of them the same kind. The
+                # per-breakpoint form names each breakpoint's own properties instead.
+                "lines": Arg("list[int]"),
+                "breakpoints": Arg("list[obj]"),
+            },
             probe_dependent=True,
             local=True,
         ),
@@ -272,7 +278,7 @@ CAPABILITY_FLAGS: Tuple[str, ...] = (
 )
 SERVED_FLAGS: FrozenSet[str] = frozenset(
     {"probes", "maxBreakpoints", "exceptionBreakpoints", "nonStop", "cycleStep", "runScans",
-     "startHalted", "control", "force", "modify"}
+     "startHalted", "control", "force", "modify", "hitCount"}
 )
 
 
@@ -347,6 +353,8 @@ def _has_kind(value: Json, kind: str) -> bool:
         return isinstance(value, list) and all(_is_int(v) for v in value)
     if kind == "list[str]":
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if kind == "list[obj]":
+        return isinstance(value, list) and all(isinstance(v, dict) for v in value)
     if kind == "num":
         return not isinstance(value, bool) and isinstance(value, (int, float))
     if kind == "any":

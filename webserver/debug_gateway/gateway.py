@@ -76,6 +76,8 @@ _CODES = {c.value: c for c in ErrorCode}
 # program is RUNNING. The link's default 2 s is shorter than a program's own stop budget
 # (plc_stop_budget_ms), which would turn a slow-but-fine restart into a lost link.
 _CORE_TIMEOUT_S: Mapping[str, float] = {"restart": 120.0}
+# ADR-003 D9: a core whose last word is older than this is reported as NOT_RESPONDING.
+STALE_MS = 1000
 # frameId = taskId * _FRAMES_PER_TASK + the frame's index, innermost 0. Valid while the task stays
 # halted on the stop it was listed for, as DAP's frame ids are.
 _FRAMES_PER_TASK = 4096
@@ -148,6 +150,12 @@ class DebugGateway:
         # The core owns the registry and pushes a `forces` event on every change, so this is
         # kept in step by _on_core_event and by every listForces reply.
         self._forced: Dict[int, JsonObj] = {}
+        # ADR-003 D9: how stale the core's last word is. The core beats every 250 ms and every
+        # request it answers is evidence too, so the staleness is the age of the freshest of the
+        # two. A core that is frozen stops both, and the status says NOT_RESPONDING.
+        self._last_beat = 0.0
+        self._last_core_ok = 0.0
+        self._last_status: JsonObj = {}
         link.set_event_sink(self._on_core_event)
 
     # ------------------------------------------------------------------ transport
@@ -365,7 +373,7 @@ class DebugGateway:
             "terminate": lambda s, a, i: self._end_by_request(s, "terminate"),
             "heartbeat": lambda s, a, i: self._core("beatClient", {"session": s.core_session}),
             "status": lambda s, a, i: {
-                k: v for k, v in self._core("status", {}).items() if k != "sessions"
+                k: v for k, v in self._status_body().items() if k != "sessions"
             },
             "version": lambda s, a, i: self._versions(self.link.hello()),
             "setLock": self._set_lock,
@@ -389,6 +397,9 @@ class DebugGateway:
             else self.link.request(command, args, timeout)
         )
         if reply.success:
+            # Evidence that the core is alive: the staleness a status reports is the age of
+            # the freshest of this and the core's own beat (ADR-003 D9).
+            self._last_core_ok = time.monotonic()
             return reply.body
         code = _CODES.get(reply.code or "")
         if code is None:
@@ -619,31 +630,149 @@ class DebugGateway:
     ) -> JsonObj:
         assert info is not None
         path = str(args["file"])
-        lines = [ln for ln in _list(args["lines"]) if isinstance(ln, int)]
+        items = args.get("breakpoints")
+        lines = args.get("lines")
+        if items is not None and lines is not None:
+            raise Refusal(
+                ErrorCode.BAD_REQUEST,
+                "A setBreakpoints request carries either 'lines' or 'breakpoints', not both.",
+            )
+        if items is None:
+            if lines is None:
+                raise Refusal(
+                    ErrorCode.BAD_REQUEST,
+                    "A setBreakpoints request needs 'lines' or 'breakpoints'.",
+                )
+            items = [{"line": ln} for ln in lines]
         fid = info.file_id(path)
-        resolved = [info.resolve_line(path, ln) for ln in lines]
-        body = self._core(
-            "setBreakpoints",
-            {"session": session.core_session, "fileId": fid, "probes": [p for p, _ in resolved]},
-        )
-        core_bps = body.get("breakpoints")
-        core_list = core_bps if isinstance(core_bps, list) else []
-        out: List[Json] = []
-        for requested, (probe, actual), bp in zip(lines, resolved, core_list):
+        answers: List[Optional[JsonObj]] = [None] * len(items)
+        prepared: List[Tuple[int, int, int, Optional[int]]] = []
+        for index, item in enumerate(items):
+            line = item.get("line")
+            if not isinstance(line, int) or isinstance(line, bool):
+                answers[index] = self._refused_item(
+                    0, ErrorCode.BAD_REQUEST.value, "a breakpoint needs a line number"
+                )
+                continue
+            # A condition or a logpoint is an expression, and this build evaluates none:
+            # the item is refused on its own, and the request still succeeds.
+            refusal = self._unserved_property(item)
+            if refusal is not None:
+                answers[index] = self._refused_item(line, refusal[0], refusal[1])
+                continue
+            bad = self._bad_property(item)
+            if bad is not None:
+                answers[index] = self._refused_item(line, ErrorCode.BAD_REQUEST.value, bad)
+                continue
+            try:
+                probe, actual = info.resolve_line(path, line)
+            except Refusal as r:
+                # One breakpoint that cannot be placed does not refuse the request: the core
+                # refuses per item (pm ruling 6), and so does the gateway.
+                answers[index] = self._refused_item(line, r.code.value, r.message)
+                continue
             loc = info.location(probe)
-            item: JsonObj = {
-                "id": _obj(bp).get("id"),
-                "verified": _obj(bp).get("verified") is True,
-                "line": actual,
-                "col": loc.col if loc is not None else None,
-                "requestedLine": requested,
-            }
-            # The core refuses per item (pm ruling 6); DAP carries the reason as `message`.
-            error = _obj(_obj(bp).get("error"))
-            if error:
-                item["message"] = str(error.get("message") or error.get("code"))
-            out.append(item)
-        return {"breakpoints": out}
+            prepared.append((index, probe, actual, loc.col if loc is not None else None))
+        if prepared:
+            body = self._core(
+                "setBreakpoints",
+                {
+                    "session": session.core_session,
+                    "fileId": fid,
+                    "probes": [self._core_item(items[index], probe) for index, probe, _l, _c in prepared],
+                },
+            )
+            core_bps = body.get("breakpoints")
+            core_list = core_bps if isinstance(core_bps, list) else []
+            for (index, _probe, actual, col), core in zip(prepared, core_list):
+                answers[index] = self._breakpoint_answer(items[index], core, actual, col)
+        else:
+            # Nothing could be placed: the file's breakpoints are still cleared, which is what
+            # an empty list means.
+            self._core(
+                "setBreakpoints",
+                {"session": session.core_session, "fileId": fid, "probes": []},
+            )
+        return {"breakpoints": [a for a in answers if a is not None]}
+
+    @staticmethod
+    def _refused_item(line: int, reason: str, message: str) -> JsonObj:
+        return {
+            "id": None,
+            "verified": False,
+            "line": line,
+            "col": None,
+            "requestedLine": line,
+            "reason": reason,
+            "message": message,
+        }
+
+    @staticmethod
+    def _unserved_property(item: JsonObj) -> Optional[Tuple[str, str]]:
+        """The reason a breakpoint's property is refused on its own, or None.
+
+        A condition and a log message are expressions (ADR-007), and this build evaluates none:
+        the item is refused and the request still succeeds. The capability flags `conditional`
+        and `logpoints` say so before a client asks.
+        """
+        if item.get("condition") is not None:
+            return (
+                ErrorCode.UNSUPPORTED.value,
+                "this runtime does not evaluate breakpoint conditions",
+            )
+        if item.get("logMessage") is not None:
+            return (
+                ErrorCode.UNSUPPORTED.value,
+                "this runtime does not interpolate log messages",
+            )
+        return None
+
+    @staticmethod
+    def _bad_property(item: JsonObj) -> Optional[str]:
+        """Why an item's own properties are malformed, or None."""
+        count = item.get("hitCount")
+        if count is not None and (not isinstance(count, int) or isinstance(count, bool) or count < 1):
+            return "a hit count must be an integer of at least 1"
+        for flag in ("oneShot", "enabled"):
+            value = item.get(flag)
+            if value is not None and not isinstance(value, bool):
+                return f"'{flag}' must be true or false"
+        return None
+
+    @staticmethod
+    def _core_item(item: JsonObj, probe: int) -> JsonObj:
+        """One item of the request, as the core link takes it."""
+        out: JsonObj = {"probe": probe}
+        if item.get("hitCount") is not None:
+            out["hitCount"] = int(item["hitCount"])
+        if item.get("oneShot") is not None:
+            out["oneShot"] = bool(item["oneShot"])
+        if item.get("enabled") is not None:
+            out["enabled"] = bool(item["enabled"])
+        return out
+
+    @staticmethod
+    def _breakpoint_answer(item: JsonObj, core: Json, actual: int, col: Optional[int]) -> JsonObj:
+        """One answer of the request's order: the core's verdict, in the wire's shape."""
+        core = _obj(core)
+        error = _obj(core.get("error"))
+        requested = int(item["line"])
+        answer: JsonObj = {
+            "id": core.get("id"),
+            "verified": core.get("verified") is True,
+            "line": actual,
+            "col": col,
+            "requestedLine": requested,
+            "enabled": bool(item.get("enabled", True)),
+        }
+        if item.get("oneShot"):
+            answer["oneShot"] = True
+        if item.get("hitCount") is not None:
+            answer["hitCount"] = int(item["hitCount"])
+        if error:
+            answer["reason"] = str(error.get("code") or ErrorCode.INTERNAL.value)
+            answer["message"] = str(error.get("message") or "")
+        return answer
 
     def _breakpoint_locations(
         self, _session: ClientSession, args: JsonObj, info: Optional[DebugInfo]
@@ -1090,13 +1219,72 @@ class DebugGateway:
 
     # ------------------------------------------------------------------ status API
 
+    def _staleness_ms(self) -> int:
+        """How old the freshest evidence that the core is alive is, in ms (ADR-003 D9)."""
+        freshest = max(self._last_beat, self._last_core_ok)
+        if not freshest:
+            return int(STALE_MS * 4)
+        return max(0, int((time.monotonic() - freshest) * 1000))
+
+    def _not_responding(self, stale_ms: int) -> JsonObj:
+        """The state of a core that is not answering: never its last state as current."""
+        with self.lock:
+            last = dict(self._last_status)
+        out: JsonObj = {"state": "NOT_RESPONDING", "staleness_ms": stale_ms}
+        if isinstance(last.get("state"), str):
+            out["lastState"] = last["state"]
+        return out
+
+    @staticmethod
+    def _enrich_locations(body: JsonObj, info: Optional[DebugInfo]) -> None:
+        """The source location of a stop and of every breakpoint: the core holds the probe,
+        the gateway holds the names (ADR-003 D1)."""
+        loc = body.get("location")
+        if isinstance(loc, dict) and isinstance(loc.get("probe"), int) and info is not None:
+            resolved = info.location(loc["probe"])
+            if resolved is not None:
+                loc["file"] = resolved.file
+                loc["line"] = resolved.line
+                loc["col"] = resolved.col
+        bps = body.get("breakpoints")
+        if isinstance(bps, list) and info is not None:
+            for bp in bps:
+                if not isinstance(bp, dict):
+                    continue
+                probe = bp.get("probe")
+                if not isinstance(probe, int):
+                    continue
+                resolved = info.location(probe)
+                if resolved is not None:
+                    bp["file"] = resolved.file
+                    bp["line"] = resolved.line
+
+    def _status_body(self) -> JsonObj:
+        """The run state, and how stale it is (ADR-003 D9).
+
+        A core that has stopped answering is reported as NOT_RESPONDING with its staleness, and
+        never as the state it was last seen in: the last cached RUNNING or HALTED_AT_BP is not
+        the present.
+        """
+        info = self._debug_info()
+        stale = self._staleness_ms()
+        if stale > STALE_MS:
+            return self._not_responding(stale)
+        try:
+            body = self._core("status", {})
+        except (Refusal, CoreUnavailable):
+            return self._not_responding(self._staleness_ms())
+        with self.lock:
+            self._last_status = dict(body)
+        out = dict(body)
+        out["staleness_ms"] = self._staleness_ms()
+        self._enrich_locations(out, info)
+        return out
+
     def status_block(self) -> JsonObj:
         """The `debug` block of GET /api/status (ADR-003 D9): the core's run state and the
         attached sessions. The webserver's status handler adds it as `debug`."""
-        try:
-            body = self._core("status", {})
-        except (Refusal, CoreUnavailable) as exc:
-            return {"state": None, "error": str(exc)}
+        body = self._status_body()
         held = body.get("sessions")
         with self.lock:
             # Only sessions the core still holds: a stop must not read as a detach (A033).
@@ -1168,6 +1356,10 @@ class DebugGateway:
 
     def _on_core_event(self, event: str, body: JsonObj) -> None:
         if event in ("hello", "beat"):
+            if event == "beat":
+                # ADR-003 D9.2: the core's beat is the liveness signal the staleness is
+                # measured against.
+                self._last_beat = time.monotonic()
             return
         if event == "_linkLost":
             with self.lock:

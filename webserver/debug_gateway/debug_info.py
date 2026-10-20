@@ -131,6 +131,11 @@ class Pou:
     kind: str
     entry_probe: int
     type_id: Optional[int]
+    # The POU's source span, (first line, first column, last line, last column), and the file it
+    # is in. A breakpoint never moves across a POU boundary (F026), so the span is what says
+    # which statements a line may fall forward to.
+    span: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    file_id: Optional[int] = None
     # (name, typeId, section, localsSlot): a frame variable, and the slot its first leaf takes in
     # the frame's `__dbg_locals` table (None when the variable has no readable leaf).
     locals: Tuple[Tuple[str, Optional[int], str, Optional[int]], ...]
@@ -205,6 +210,7 @@ class DebugInfo:
             p_obj = _obj(p)
             if not isinstance(p_obj.get("id"), int) or not isinstance(p_obj.get("entryProbe"), int):
                 continue
+            span = p_obj.get("span")
             pou = Pou(
                 p_obj["id"], str(p_obj.get("name")), str(p_obj.get("kind")), p_obj["entryProbe"],
                 p_obj.get("typeId") if isinstance(p_obj.get("typeId"), int) else None,
@@ -215,6 +221,8 @@ class DebugInfo:
                     for v in p_obj.get("locals") or []
                 ),
                 _frame_leaves(p_obj.get("frameLeaves")),
+                tuple(int(v) for v in span) if isinstance(span, list) and len(span) == 4 else (0, 0, 0, 0),
+                p_obj.get("file") if isinstance(p_obj.get("file"), int) else None,
             )
             self.pous[pou.id] = pou
             self.pou_by_entry[pou.entry_probe] = pou
@@ -273,17 +281,30 @@ class DebugInfo:
         return fid
 
     def resolve_line(self, path: str, line: int) -> Tuple[int, int]:
-        """The first probe on the first probe-bearing line at or after `line`: (probe, line)."""
+        """The first probe on the first probe-bearing line at or after `line`: (probe, line).
+
+        The search never crosses a POU boundary (F026): a line that is not a statement falls
+        forward to the next statement of the POU it is in, and a POU with no statement after it
+        has no code to bind to.
+        """
         fid = self.file_id(path)
         lines = self.lines.get(fid, [])
-        i = bisect.bisect_left(lines, line)
-        if i == len(lines):
+        pou = self.pou_at(fid, line)
+        if pou is None:
+            raise Refusal(
+                ErrorCode.NO_CODE,
+                f"Line {line} of '{path}' is not in a POU, so it has no code to bind to.",
+                {"file": path, "line": line},
+            )
+        last = pou.span[2] if pou.span[2] >= pou.span[0] else None
+        ahead = [ln for ln in lines if ln >= line and (last is None or ln <= last)]
+        if not ahead:
             raise Refusal(
                 ErrorCode.NO_CODE,
                 f"There is no executable statement at or after line {line} of '{path}'.",
                 {"file": path, "line": line},
             )
-        actual = lines[i]
+        actual = ahead[0]
         candidates = [
             (self.p_col[p] if p < len(self.p_col) else 0, p)
             for p in range(min(len(self.p_file), len(self.p_line)))
@@ -292,6 +313,15 @@ class DebugInfo:
         if not candidates:
             raise Refusal(ErrorCode.NO_CODE, f"Line {actual} of '{path}' has no probe.")
         return min(candidates)[1], actual
+
+    def pou_at(self, fid: int, line: int) -> Optional[Pou]:
+        """The POU of `fid` whose source span holds `line`, or None."""
+        for pou in self.pous.values():
+            if pou.file_id is not None and pou.file_id != fid:
+                continue
+            if pou.span[0] <= line <= pou.span[2]:
+                return pou
+        return None
 
     def lines_between(self, path: str, first: int, last: int) -> List[int]:
         fid = self.file_id(path)
