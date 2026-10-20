@@ -9,7 +9,7 @@
   "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
   "steps": [
     {"inspect": "debugInfo", "note": "the per-file line list, read without the runtime",
-     "expect": {"lines": {"program.st": {"~any": true}}}},
+     "expect": {"linesByFile": {"program.st": {"~any": true}}}},
     {"request": "initialize", "expect": {"success": true}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": ["@CMT2", "@LC", "@DECL", "@TAIL", "@B"]},
      "expect": {"success": true, "body": {"breakpoints": [
