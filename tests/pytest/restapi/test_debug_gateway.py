@@ -209,6 +209,26 @@ def test_wire_control_oracle_passes_through_the_harness(serve, admin_token):
     assert result.verdict.status == "PASS", runner.format_trace(result)
 
 
+# --------------------------------------------------------------------------- A018 per item
+
+
+def test_a_breakpoint_that_cannot_be_placed_is_refused_on_its_own(serve, admin_token):
+    """One line with no code after it refuses that breakpoint alone: the request succeeds, the
+    other breakpoint is armed, and the refused one names its reason (A018)."""
+    server = serve()
+    c = Client(server.url, admin_token)
+    assert c.initialize()["success"] is True
+    resp = c.request("setBreakpoints", {"file": "program.st", "lines": [6, 99]})
+    assert resp["success"] is True, resp
+    bps = as_obj(resp["body"]).get("breakpoints")
+    assert isinstance(bps, list) and len(bps) == 2, resp
+    assert bps[0]["verified"] is True and bps[0]["line"] == 6, bps[0]
+    assert bps[1]["verified"] is False, bps[1]
+    assert bps[1]["reason"] == "NO_CODE", bps[1]
+    assert _is_sentence(bps[1]["message"]), bps[1]
+    c.close()
+
+
 # --------------------------------------------------------------------------- A064 correlation
 
 
@@ -333,7 +353,10 @@ def _provoke(code: str, server: WireServer, tokens: Dict[str, str]) -> JsonObj:
     if code == "INVALID_LOCATION":
         return c.request("setBreakpoints", {"file": "missing.st", "lines": [1]})
     if code == "NO_CODE":
-        return c.request("setBreakpoints", {"file": "program.st", "lines": [99]})
+        # A breakpoint that cannot be placed is refused on its own (A018), so the request
+        # that carries one still succeeds; the request that names a single target refuses
+        # the whole request, and that is `runToCursor`.
+        return c.request("runToCursor", {"file": "program.st", "line": 99})
     if code == "NOT_HALTED":
         return c.request("next")
     if code == "NOT_RUNNING":

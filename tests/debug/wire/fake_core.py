@@ -75,8 +75,10 @@ def debug_info(major: int = 1, minor: int = 0, build_id: str = BUILD_ID) -> Json
         },
         "lines": {"0": sorted({ln for ln, _ in PROBES})},
         # One program POU (entry probe 0) whose instance PROG0 has one leaf: the scan witness.
+        # `file` and `span` are part of ADR-002's document: the gateway resolves a line inside
+        # the POU that holds it, and never across a POU boundary.
         "pous": [{"id": 0, "name": "WIRE", "kind": "program", "entryProbe": 0, "typeId": 0,
-                  "locals": []}],
+                  "file": 0, "span": [1, 1, 10, 1], "locals": []}],
         "types": [
             {"id": 0, "kind": "fb", "name": "WIRE",
              "members": [{"name": "WITNESS", "typeId": 1, "section": "VAR"}]},
@@ -471,9 +473,12 @@ class FakeCore:
             frame: JsonObj = {"pou": 0, "at": self.pc, "leaf": 0}
             return {"task": TASK, "taskId": TASK_ID, "frames": [frame], "truncated": False}
         if command == "readLeaves":
-            # Leaf 0 is the witness, a DINT; the program has no other leaf.
+            # Leaf 0 is the witness, a DINT; the program has no other leaf. `pending` is the
+            # image slot a located leaf will next copy in; the real core sends it beside the
+            # values, and the gateway pairs the two lists.
             return {"values": [struct.pack("<i", self.scan).hex() if leaf == 0 else None
-                               for leaf in _list(args.get("leaves"))]}
+                               for leaf in _list(args.get("leaves"))],
+                    "pending": [None] * len(_list(args.get("leaves")))}
         if command == "setExceptionBreakpoints":
             self.exception_filters = [str(f) for f in _list(args.get("filters"))]
             return {"filters": list(self.exception_filters)}

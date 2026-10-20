@@ -2453,7 +2453,7 @@ extern "C" int plc_task_info(size_t task_idx, plc_task_info_t *out)
     out->interval_ns = t.interval_ns;
     out->priority    = t.priority;
     plc_timing_stats_t stats;
-    scan_cycle_tracker_snapshot(&t.tracker, &stats);
+    scan_cycle_tracker_snapshot(&plc_tasks[task_idx].tracker, &stats);
     out->cycles   = stats.scan_count;
     out->overruns = stats.overruns;
     /* The tracker counts in microseconds; the debugger reads milliseconds. */

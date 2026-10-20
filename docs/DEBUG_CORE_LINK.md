@@ -120,7 +120,7 @@ stop                    req {session: str} -> {}
 restart                 req {session: str, kind?: str, startHalted?: bool} -> {}
 setHaltMode             req {session: str, mode: str} -> {mode: str}
 stackTrace              req {session: str, task?: TaskRef} -> {task: str, taskId: int, frames: [Frame], truncated: bool}
-readLeaves              req {session: str, leaves: [int]} -> {values: [str|null]}
+readLeaves              req {session: str, leaves: [int]} -> {values: [str|null], pending: [str|null]}
 readFrameLocals         req {session: str, task?: TaskRef, frame: int, leaves: [{slot: int, size: int}]} -> {values: [str|null]}
 force                   req {session: str, leaf: int, value: str, owner: str, reason: str, ttlS?: num} -> {}
 unforce                 req {session: str, leaf: int} -> {}

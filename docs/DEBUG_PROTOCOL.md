@@ -496,7 +496,7 @@ and the lock off; `admin` requests need an administrator account.
 | `status` | - | - | Body: the `runState` event's body, answered at once — plus `sessions`, and flat on the body (never nested in a `fields` object): see "Shape rulings" |
 | `version` | - | - | See "Handshake" |
 | `setLock` | - | admin | `{on, reason?}`; body `{on}` |
-| `setBreakpoints` | `control` | control, probe | `{file, lines[]}` replaces the file's breakpoints. A line moves to the next line with code. Body `{breakpoints:[{id, verified, line, col, requestedLine}]}` |
+| `setBreakpoints` | `control` | control, probe | `{file, lines[]}` — the shorthand, one plain breakpoint per line — or `{file, breakpoints[]}`, the per-breakpoint form: each item is `{line, condition?, hitCount?, logMessage?, oneShot?, enabled?}` and several items may name the same line. The request replaces the file's line breakpoints. A line moves to the next line with code **in the same POU**; a line with none is unverified, and the request still succeeds. Body `{breakpoints:[{id, verified, line, col, requestedLine, enabled?, oneShot?, hitCount?, reason?, message?}]}`, one item per request item, in the request's order |
 | `breakpointLocations` | - | probe | `{file, line, endLine?}`; body `{breakpoints:[{line}]}` |
 | `clearAllBreakpoints` | `control` | control | Body `{removed}` |
 | `setExceptionBreakpoints` | `control`, `exceptionBreakpoints` | control | `{filters[]}`; body `{filters}` |
@@ -513,7 +513,7 @@ and the lock off; `admin` requests need an administrator account.
 | `setHaltMode` | `control`, `nonStop` | control | `{mode: allStop\|nonStop}`; body `{mode}` |
 | `setFunctionBreakpoints` | `control`, `functionBreakpoints` | control | planned |
 | `setInstanceBreakpoints` | `control`, `instanceBreakpoints` | control | planned |
-| `threads` | - | - | planned |
+| `threads` | - | - | Body `{threads:[{name, intervalMs, priority, state, stats:{cycles, overruns, scanMs:{current,min,max,avg}, cycleMs:{current,min,max,avg}}}]}`: the tasks, each with the configuration it runs under and the scan statistics it keeps |
 | `stackTrace` | `probes` | probe | `{task?, startFrame?, levels?}`: the halted task's frames, innermost first. Body `{stackFrames:[{id, name, pou, kind, instance, location:{file, line, col}, line, column, source}], totalFrames, truncated, task, taskId}`; `kind` is `program`, `fb`, `function` or `method`, `instance` the instance path (null for a function); `truncated` when frames from before the attach are missing (ADR-001 D3.4). A task held at its scan boundary has no frames |
 | `scopes` | `probes` | probe | `{frameId}`; body `{scopes:[{name, variablesReference, namedVariables}]}`, `name` one of `inputs`, `outputs`, `inOuts`, `members`, `temps`, `externals` |
 | `variables` | `probes` | probe | `{variablesReference}`: one level of children, body `{variables:[{name, value, data, type, variablesReference, evaluateName}]}` (`value` display text, `data` the JSON value; a composite child has a non-zero `variablesReference` and no value). Or `{path, frameId?}`: a path such as `PROG0.motor1.pid.out`, `G_SEG.a.x` or `PROG0.arr[4]` (identifiers case-insensitive; with `frameId`, relative to that frame's instance); body `{path, type, value, forced?}`, or for a composite `{path, type, variablesReference, children}` with the immediate children only. `forced` is present and true only on a variable the runtime currently holds forced. A name the program does not have is `INVALID_LOCATION`; a function's locals are `UNSUPPORTED` until STruCpp emits their layout. **`types: true`** on the by-path form adds the structure behind `type`: `dims` (`[[lo, hi], ...]`), `values` (`[[name, value], ...]`, an enum) and `elementType` (`{name, members?: [{name, type}], values?: [[name, value], ...]}`). `type` stays the display string either way. A member is an **object**, not a `[name, type]` pair: an IEC identifier is case-insensitive (61131-3 6.1.2), and a client — or the matcher — can only treat something as an identifier when it is a *named key*, which is also the form DAP's `Variable` uses. (`dims` and `values` are typed `list` and `elementType` `obj` in the grammar block below, because that grammar has no production for a list of pairs; the shapes above are the authority) |
@@ -546,7 +546,7 @@ Pushed, never polled. The controller receives every event; observers receive `st
 |---|---|
 | `stopped` | `{reason: breakpoint\|step\|pause\|entry\|exception, task, taskId, since, vt?, scan?, location?:{file, line, col}, depth?, breakpointIds?, hits?, heldAtBoundary?, exception?}`; one per stop. `task` is the task's name (an IEC identifier: compare it case-insensitively), `taskId` its index. `vt` is the task's virtual time in ms. `location` is absent for a task held at its scan boundary (`heldAtBoundary: true`); `depth` is the call depth of the stop and `hits` the breakpoint's hit count |
 | `continued` | `{allThreadsContinued: true}` on `continue` (all-stop), `{task, taskId}` on a step |
-| `runState` | `{state, tasks:[{task, taskId, state, overruns, reason?, probe?, heldAtBoundary?, since?, scan?}], attached, pid, image, by?, location?:{task, taskId, probe?}, since?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING`. `pid` is the runtime process, `image` the same `{md5, buildId, buildTime, sourceHash}` the `hello` body carries, and `tasks[].overruns` the task's scans that overran its interval. `tasks` is a list of task objects, never a map keyed by name. `reason` is present on a `SAFE_STOPPED` body and only there — it is why that safe stop happened (`heartbeat_timeout`, a fault, a user request), never a halt's reason. Two keys are specified here and **not yet built**: `staleness_ms` (A047), `lastFault` (A060, A214) — see "Shape rulings" |
+| `runState` | `{state, tasks:[{task, taskId, state, overruns, reason?, probe?, heldAtBoundary?, since?, scan?}], attached, pid, image, by?, location?:{file, line, col?, task?, taskId?, probe?}, since?, staleness_ms?, breakpoints?:[Breakpoint], armedProbes?, safeStop?}`; on every run-state change. `state` is `RUNNING`, `PAUSED`, `HALTED_AT_BP`, `STOPPED`, `ERROR`, `SAFE_STOPPED`, `EMPTY`, `INIT` or `TRANSITIONING`. `pid` is the runtime process, `image` the same `{md5, buildId, buildTime, sourceHash}` the `hello` body carries, and `tasks[].overruns` the task's scans that overran its interval. `tasks` is a list of task objects, never a map keyed by name. `reason` is present on a `SAFE_STOPPED` body and only there — it is why that safe stop happened (`heartbeat_timeout`, a fault, a user request), never a halt's reason. `location` is the source location of the stop: the file and the line, and the task it belongs to. `staleness_ms` is how old the answer is (ADR-003 D9); a core that has stopped answering reads `NOT_RESPONDING`, and its last state is never presented as the present. `breakpoints` is what the runtime holds and `armedProbes` how many of them are armed: a disabled breakpoint is listed but not armed, and a one-shot that has fired is gone. `safeStop` says why the runtime safe-stopped, who lost the session that held it, when, and where the program was. Two keys are specified here and **not yet built**: `lastFault` (A060, A214) — see "Shape rulings" |
 | `output` | `{category: logpoint\|print\|runtime\|plugin, task?, taskId?, scan?, text?, kind?, count?}`: `print` carries `task`, `taskId`, `scan` and `text`; `runtime` carries `kind` (`conditionError`, `breakpointSkippedLocked`) and `count` |
 | `control` | `{controller, observers}`: the controller's user name (or null) and the observer count; on every attach and detach |
 | `sessionEnded` | `{reason}`: `revoked` (the login was revoked or the account removed), `heartbeat_timeout` (no message for P2), `core_lost` (the core link dropped) or a reason from the core |
@@ -643,15 +643,17 @@ be read has `request_seq: null` and `command: null`.
 Error        = {code: str, message: str, details?: obj}
 Image        = {md5: str|null, buildId: str|null, buildTime: str|null, sourceHash: str|null}
 Versions     = {protocol: str, runtime: str, compiler: str|null, debugInfo: {major: int, minor: int}|null, engineAbi: int|null}
-Handshake    = {protocol: str, runtime: str, compiler: str|null, debugInfo: {major: int, minor: int}|null, engineAbi: int|null, image: Image, comparison: str, params: {P1: num, P2: num}, capabilities: obj, requests: [str], role: str, locked: bool, resumeToken: str, resumed?: bool}
+Handshake    = {protocol: str, runtime: str, compiler: str|null, debugInfo: {major: int, minor: int}|null, engineAbi: int|null, image: Image, comparison: str, params: {P1: num, P2: num}, capabilities: obj, requests: [str], role: str, locked: bool, resumeToken: str, resumed?: bool, safeStop?: SafeStop}
 Location     = {file: str, line: int, col: int|null}
 TaskState    = {task: str, taskId: int, state: str, reason?: str, probe?: int, heldAtBoundary?: bool, since?: num, scan?: int}
-RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, reason?: str, location?: {task: str, taskId: int, probe?: int}, since?: num}
-Breakpoint   = {id: int|null, verified: bool, line: int, col: int|null, requestedLine: int, message?: str}
+SafeStop     = {reason: str, user: str, time: num, probe?: int, taskId?: int, location?: Location}
+Breakpoint   = {id: int|null, verified: bool, line: int, col: int|null, requestedLine: int, enabled?: bool, oneShot?: bool, hitCount?: int, reason?: str, message?: str}
+RunState     = {state: str, tasks: [TaskState], attached: bool, by?: str, reason?: str, location?: {file?: str, line?: int, col?: int, task?: str, taskId?: int, probe?: int}, since?: num, staleness_ms?: num, breakpoints?: [Breakpoint], armedProbes?: num, safeStop?: SafeStop}
 Step         = {task: str, taskId: int}
 StackFrame   = {id: int, name: str, pou: str|null, kind: str|null, instance: str|null, location: Location|null, line: int, column: int|null, source: {path: str}|null}
 Variable     = {name: str, variablesReference: int, value: any, type: str, data?: any, evaluateName?: str, namedVariables?: int}
 Force        = {path: str, leaf: int, value: any, owner: str, reason: str, remaining: num|null, ...}
+Thread       = {name: str, intervalMs: num, priority: int, state: str, stats: {cycles: int, overruns: int, scanMs: {current: num, min: num, max: num, avg: num}, cycleMs: {current: num, min: num, max: num, avg: num}}}
 
 stopped                 evt {reason: str, task: str, taskId: int, since: num, vt?: num, scan?: int, location?: Location, depth?: int, breakpointIds?: [int], hits?: int, heldAtBoundary?: bool, exception?: obj}
 continued               evt {allThreadsContinued?: bool, task?: str, taskId?: int}
@@ -668,8 +670,9 @@ terminate               req {} -> {}
 heartbeat               req {} -> {}
 status                  req {} -> RunState
 version                 req {} -> Versions
+threads                 req {} -> {threads: [Thread]}
 setLock                 req {on: bool, reason?: str} -> {on: bool}
-setBreakpoints          req {file: str, lines: [int]} -> {breakpoints: [Breakpoint]}
+setBreakpoints          req {file: str, lines?: [int], breakpoints?: [obj]} -> {breakpoints: [Breakpoint]}
 breakpointLocations     req {file: str, line: int, endLine?: int} -> {breakpoints: [{line: int}]}
 clearAllBreakpoints     req {} -> {removed: int}
 setExceptionBreakpoints req {filters: [str]} -> {filters: [str]}
