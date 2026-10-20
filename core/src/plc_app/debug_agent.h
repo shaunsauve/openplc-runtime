@@ -39,6 +39,9 @@ extern "C" {
 #define DBG_MAX_TASKS       32
 /* ADR-007's bound on condition bytecode. */
 #define DBG_COND_MAX 512
+/* Breakpoints on one probe (one line): the per-breakpoint request lets a line carry several
+ * (a conditional one and a logpoint, say), so a probe holds a list, not a single record. */
+#define DBG_MAX_PER_PROBE 4
 
 /* Flag byte bits, as debug_probe.hpp defines them. */
 #define DBG_FLAG_ARMED 1u
@@ -141,14 +144,38 @@ bool debug_agent_attached(void);
 
 /* ---- Breakpoint table (writer side) ---- */
 
-/* Arms or replaces the breakpoint at a probe. cond may be NULL (unconditional). hit_target 0 or 1
- * stops on every hit; n stops from the n-th hit on. A replace keeps the hit count. */
-dbg_status_t debug_agent_set_breakpoint(uint32_t probe, const uint8_t *cond, size_t cond_len,
-                                        uint32_t hit_target);
+/* One breakpoint's properties, as the core holds them. A probe (a line) carries up to
+ * DBG_MAX_PER_PROBE of them; each has its own hit count and its own side slot. */
+typedef struct
+{
+    const uint8_t *cond;       /* condition bytecode, or NULL */
+    size_t         cond_len;   /* 0: unconditional */
+    uint32_t       hit_target; /* 0 or 1 stops on every hit; n stops from the n-th hit on */
+    bool           one_shot;   /* clears itself on its first hit */
+    bool           enabled;    /* false: listed, but not armed */
+} dbg_bp_spec_t;
+
+/* Arms or replaces the breakpoints at a probe. A replace keeps the hit counts of the
+ * breakpoints it keeps, matched by their position in the list. count 0 clears the probe. */
+dbg_status_t debug_agent_set_breakpoint(uint32_t probe, const dbg_bp_spec_t *specs, size_t count);
 dbg_status_t debug_agent_clear_breakpoint(uint32_t probe);
 /* Returns the number removed. */
 uint32_t debug_agent_clear_all_breakpoints(void);
 uint32_t debug_agent_breakpoint_count(void);
+
+/* What the core holds about the breakpoints at a probe, for the status body. */
+typedef struct
+{
+    uint32_t hit_target;
+    uint32_t hits;
+    bool     one_shot;
+    bool     enabled;
+} dbg_bp_info_t;
+
+/* The breakpoints at a probe, in the order they were armed. Returns how many were written. */
+size_t debug_agent_breakpoint_at(uint32_t probe, dbg_bp_info_t *out, size_t max);
+/* The breakpoints that are armed (a disabled one is listed but never stops). */
+uint32_t debug_agent_armed_count(void);
 
 /* Reuses retired records whose grace period has passed. The agent thread calls it every tick. */
 void debug_agent_reclaim(void);

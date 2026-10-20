@@ -102,6 +102,8 @@ struct Session
     int64_t     p2_ns        = 0;
 };
 /* A breakpoint the link armed: its DAP id and the file whose setBreakpoints owns it. */
+/* One breakpoint as the link holds it: the id a client sees and the file it belongs to.
+ * A probe (a line) may carry several, so the table is keyed by probe and holds a list. */
 struct Bp
 {
     int id     = 0;
@@ -110,7 +112,7 @@ struct Bp
 std::mutex                     g_mu;
 std::map<std::string, Session> g_sessions;
 int                            g_next_session = 1;
-std::map<uint32_t, Bp>         g_bps; /* by probe */
+std::map<uint32_t, std::vector<Bp>> g_bps; /* by probe */
 int                            g_next_bp = 1;
 long                           g_last_stop_task = -1; /* the task of the most recent stop */
 bool        g_pausing = false; /* a pause or all-stop wants every task halted */
@@ -377,6 +379,32 @@ cJSON *run_state_locked(void)
         cJSON_AddNumberToObject(b, "since", wall_ms_of(since));
     }
     cJSON_AddBoolToObject(b, "attached", debug_agent_attached());
+    /* The breakpoints the runtime holds, and how many of them are armed. A client reads this to
+     * know what it set and what is still live: a one-shot that has fired is gone from the list,
+     * and a disabled breakpoint is listed but not armed. */
+    cJSON *bps = cJSON_CreateArray();
+    for (const auto &kv : g_bps)
+    {
+        dbg_bp_info_t info[DBG_MAX_PER_PROBE];
+        const size_t  n = debug_agent_breakpoint_at(kv.first, info, DBG_MAX_PER_PROBE);
+        for (size_t i = 0; i < kv.second.size(); ++i)
+        {
+            cJSON *o = cJSON_CreateObject();
+            cJSON_AddNumberToObject(o, "id", kv.second[i].id);
+            cJSON_AddNumberToObject(o, "probe", kv.first);
+            cJSON_AddNumberToObject(o, "fileId", kv.second[i].fileId);
+            if (i < n)
+            {
+                cJSON_AddBoolToObject(o, "enabled", info[i].enabled);
+                cJSON_AddBoolToObject(o, "oneShot", info[i].one_shot);
+                if (info[i].hit_target) cJSON_AddNumberToObject(o, "hitCount", info[i].hit_target);
+                cJSON_AddNumberToObject(o, "hits", info[i].hits);
+            }
+            cJSON_AddItemToArray(bps, o);
+        }
+    }
+    cJSON_AddItemToObject(b, "breakpoints", bps);
+    cJSON_AddNumberToObject(b, "armedProbes", (double)debug_agent_armed_count());
     /* A117's "the runtime PID/uptime are unchanged" across twenty attaches: the process id
      * is the one fact an attach must not move, and nothing else in the body says it (E45
      * ruling 1). The gateway reads it through the core, so it survives a status poll that
@@ -545,7 +573,8 @@ void agent_pass(void)
                 /* pm ruling 7: breakpoint ids, as setBreakpoints returned them. */
                 cJSON *ids = cJSON_CreateArray();
                 auto   it  = g_bps.find(s.probe);
-                if (it != g_bps.end()) cJSON_AddItemToArray(ids, cJSON_CreateNumber(it->second.id));
+                if (it != g_bps.end())
+                    for (const Bp &b : it->second) cJSON_AddItemToArray(ids, cJSON_CreateNumber(b.id));
                 cJSON_AddItemToObject(b, "breakpointIds", ids);
                 cJSON_AddNumberToObject(b, "hits", s.hits);
             }
@@ -712,8 +741,9 @@ bool is_int(cJSON *v)
     return v && cJSON_IsNumber(v) && v->valuedouble == (double)(int64_t)v->valuedouble;
 }
 
-/* One setBreakpoints item: a probe ID, or {probe, condition?, hitCount?} (pm ruling 6). */
-dbg_status_t set_one(cJSON *item, uint32_t *probe, std::string *why)
+/* One setBreakpoints item: a probe ID, or {probe, condition?, hitCount?, oneShot?, enabled?}
+ * (pm ruling 6). */
+dbg_status_t set_one(cJSON *item, uint32_t *probe, dbg_bp_spec_t *spec, std::string *why)
 {
     cJSON *p = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "probe") : item;
     if (!is_int(p) || p->valuedouble < 0)
@@ -731,13 +761,14 @@ dbg_status_t set_one(cJSON *item, uint32_t *probe, std::string *why)
         return DBG_E_CONDITION;
     }
     cJSON *h = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "hitCount") : nullptr;
-    const dbg_status_t s = debug_agent_set_breakpoint(*probe, cond.data(), cond.size(),
-                                                      is_int(h) && h->valuedouble > 0 ? (uint32_t)h->valuedouble : 0);
-    if (s == DBG_E_LIMIT) *why = "the runtime's limit of 1024 breakpoints is reached";
-    else if (s == DBG_E_INVALID_LOCATION) *why = "no such probe in the running program";
-    else if (s == DBG_E_NO_PROBES) *why = "the running program has no probes";
-    else if (s == DBG_E_CONDITION) *why = "the condition failed verification";
-    return s;
+    cJSON *o = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "oneShot") : nullptr;
+    cJSON *e = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "enabled") : nullptr;
+    spec->cond       = cond.data();
+    spec->cond_len   = cond.size();
+    spec->hit_target = is_int(h) && h->valuedouble > 0 ? (uint32_t)h->valuedouble : 0;
+    spec->one_shot   = cJSON_IsTrue(o);
+    spec->enabled    = !cJSON_IsFalse(e);
+    return DBG_OK;
 }
 
 /* The `task` argument: a name or an index (pm ruling 1). Absent: *all. */
@@ -1293,17 +1324,45 @@ Reply handle(const char *command, cJSON *args)
         if (!is_int(file) || !cJSON_IsArray(list))
             return fail("BAD_REQUEST", "setBreakpoints needs an integer fileId and a probes list");
         const int fid = (int)file->valuedouble;
-        /* Replace the file's set: disarm what the new list no longer names (pm ruling 6). */
-        std::map<uint32_t, bool> wanted;
-        cJSON *item;
+        /* The per-breakpoint request: one item is one breakpoint, and several items may name the
+         * same probe (a conditional breakpoint and a logpoint on one line). The items are grouped
+         * by probe, keeping their order, and the probe's list is published as one record. */
+        struct Item
+        {
+            uint32_t     probe = 0;
+            dbg_bp_spec_t spec{};
+            bool         parsed = false;
+            dbg_status_t status = DBG_OK;
+            std::string  why;
+        };
+        std::vector<Item>        items;
+        std::vector<uint32_t>    order;   /* the probes, in the order they first appear */
+        cJSON                   *item = nullptr;
         cJSON_ArrayForEach(item, list)
         {
-            cJSON *p = cJSON_IsObject(item) ? cJSON_GetObjectItem(item, "probe") : item;
-            if (is_int(p) && p->valuedouble >= 0) wanted[(uint32_t)p->valuedouble] = true;
+            Item it;
+            dbg_bp_spec_t spec{};
+            std::string   why;
+            const dbg_status_t s = set_one(item, &it.probe, &spec, &why);
+            it.spec   = spec;
+            it.parsed = s == DBG_OK;
+            it.status = s;
+            it.why    = why;
+            if (it.parsed)
+            {
+                bool seen = false;
+                for (uint32_t p : order) if (p == it.probe) { seen = true; break; }
+                if (!seen) order.push_back(it.probe);
+            }
+            items.push_back(it);
         }
+        /* Replace the file's set: disarm what the new list no longer names (pm ruling 6). */
         for (auto it = g_bps.begin(); it != g_bps.end();)
         {
-            if (it->second.fileId == fid && !wanted.count(it->first))
+            bool wanted = false;
+            for (uint32_t p : order) if (p == it->first) { wanted = true; break; }
+            const bool mine = !it->second.empty() && it->second.front().fileId == fid;
+            if (mine && !wanted)
             {
                 debug_agent_clear_breakpoint(it->first);
                 it = g_bps.erase(it);
@@ -1311,31 +1370,72 @@ Reply handle(const char *command, cJSON *args)
             else
                 ++it;
         }
-        cJSON *out = cJSON_CreateArray();
-        cJSON_ArrayForEach(item, list)
+        /* Publish each probe's list. */
+        std::map<uint32_t, std::vector<Bp>> ids;
+        std::vector<int>                     item_ids(items.size(), 0);
+        for (uint32_t p : order)
         {
-            std::string        why;
-            uint32_t           probe;
-            const dbg_status_t s = set_one(item, &probe, &why);
-            cJSON             *o = cJSON_CreateObject();
-            if (s == DBG_OK)
+            dbg_bp_spec_t specs[DBG_MAX_PER_PROBE];
+            size_t        n = 0;
+            for (const Item &it : items)
+                if (it.parsed && it.probe == p && n < DBG_MAX_PER_PROBE) specs[n++] = it.spec;
+            const dbg_status_t s = debug_agent_set_breakpoint(p, specs, n);
+            if (s != DBG_OK)
             {
-                auto it = g_bps.find(probe);
-                if (it == g_bps.end()) it = g_bps.emplace(probe, Bp{g_next_bp++, fid}).first;
-                it->second.fileId = fid;
-                cJSON_AddNumberToObject(o, "id", it->second.id);
+                for (Item &it : items)
+                    if (it.parsed && it.probe == p)
+                    {
+                        it.parsed = false;
+                        it.status = s;
+                        it.why    = s == DBG_E_LIMIT ? "the runtime's limit of 1024 breakpoints is reached"
+                                  : s == DBG_E_INVALID_LOCATION ? "no such probe in the running program"
+                                  : s == DBG_E_NO_PROBES ? "the running program has no probes"
+                                  : s == DBG_E_CONDITION ? "the condition failed verification"
+                                                        : "the breakpoint was refused";
+                    }
+                continue;
+            }
+            std::vector<Bp> list;
+            auto             old = g_bps.find(p);
+            size_t           i   = 0;
+            for (size_t k = 0; k < items.size(); ++k)
+            {
+                const Item &it = items[k];
+                if (!it.parsed || it.probe != p) continue;
+                Bp b;
+                b.fileId = fid;
+                /* The id travels with the position, so a replace keeps the client's id. */
+                b.id = (old != g_bps.end() && i < old->second.size()) ? old->second[i].id : g_next_bp++;
+                list.push_back(b);
+                item_ids[k] = b.id;
+                i++;
+            }
+            ids[p] = list;
+        }
+        for (auto &kv : ids) g_bps[kv.first] = kv.second;
+        cJSON *out = cJSON_CreateArray();
+        for (size_t k = 0; k < items.size(); ++k)
+        {
+            const Item &it = items[k];
+            cJSON       *o  = cJSON_CreateObject();
+            if (it.parsed)
+            {
+                cJSON_AddNumberToObject(o, "id", item_ids[k]);
             }
             else
             {
                 cJSON_AddItemToObject(o, "id", cJSON_CreateNull());
             }
-            cJSON_AddNumberToObject(o, "probe", probe);
-            cJSON_AddBoolToObject(o, "verified", s == DBG_OK);
-            if (s != DBG_OK)
+            cJSON_AddNumberToObject(o, "probe", it.probe);
+            cJSON_AddBoolToObject(o, "verified", it.parsed);
+            cJSON_AddBoolToObject(o, "enabled", it.spec.enabled);
+            cJSON_AddBoolToObject(o, "oneShot", it.spec.one_shot);
+            if (it.spec.hit_target) cJSON_AddNumberToObject(o, "hitCount", it.spec.hit_target);
+            if (!it.parsed)
             {
                 cJSON *e = cJSON_CreateObject();
-                cJSON_AddStringToObject(e, "code", status_code(s));
-                cJSON_AddStringToObject(e, "message", why.c_str());
+                cJSON_AddStringToObject(e, "code", status_code(it.status));
+                cJSON_AddStringToObject(e, "message", it.why.c_str());
                 cJSON_AddItemToObject(o, "error", e);
             }
             cJSON_AddItemToArray(out, o);
