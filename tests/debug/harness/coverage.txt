@@ -139,6 +139,7 @@ A221 tests/debug/harness/runner.py::online-change-pair/forces-unregistered
 # Scenarios that discharge no criterion: a bisect of another scenario, whose
 # verdict is evidence about that scenario's evidence and never coverage of its own.
 #   all-scopes-types/scopes-tail
+#   loop-bodies/hit-count
 <!-- END generated -->
 
 # Criteria a scenario discharges only in part, and what it does not check (hand-written):

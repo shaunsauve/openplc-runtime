@@ -1,0 +1,21 @@
+{
+  "$schema": "../oracle.schema.json",
+  "format": "openplc-debug-oracle", "major": 1, "minor": 0,
+  "scenario": "loop-bodies/hit-count",
+  "corpus": "loop-bodies",
+  "kind": "diagnostic",
+  "criteria": [],
+  "title": "A hit count stops on the n-th hit",
+  "notes": "The bisect of loop-bodies/conditions-and-logpoint: a condition and a log message are expressions (ADR-007), and this build evaluates none, so those steps are removed and the rest of the scenario still holds. A hit count is a count of hits, not an expression, and the runtime serves it.\n\nDiagnostic of: loop-bodies/conditions-and-logpoint\nSteps removed: 6",
+  "setup": {"session": "controller", "plant": {"samplePeriodMs": 10}},
+  "steps": [
+    {"request": "initialize", "expect": {"success": true}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "breakpoints": [{"line": "@FOR_LAST", "hitCount": 4}]}, "expect": {"success": true, "body": {"breakpoints": [{"verified": true, "hitCount": 4}]}}},
+    {"request": "continue", "expect": {"success": true}},
+    {"event": "stopped", "withinMs": 1000, "expect": {"reason": "breakpoint", "location": {"file": "program.st", "line": "@FOR_LAST"}}},
+    {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
+    {"request": "continue", "expect": {"success": true}},
+    {"noEvent": "stopped", "forScans": 20},
+    {"observe": "plant", "expect": {"scanDelta": {"Main": {"~ge": 20}}}}
+  ]
+}
