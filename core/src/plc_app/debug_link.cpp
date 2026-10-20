@@ -101,9 +101,9 @@ struct Session
     int64_t     last_beat_ns = 0;
     int64_t     p2_ns        = 0;
 };
-/* A breakpoint the link armed: its DAP id and the file whose setBreakpoints owns it. */
-/* One breakpoint as the link holds it: the id a client sees and the file it belongs to.
- * A probe (a line) may carry several, so the table is keyed by probe and holds a list. */
+/* One breakpoint as the link holds it: the id a client sees, the file whose setBreakpoints
+ * owns it, and the kind it is. A probe (a line) may carry several, so the table is keyed by
+ * probe and holds a list. */
 struct Bp
 {
     int id     = 0;
@@ -270,6 +270,20 @@ void add_image(cJSON *b)
     cJSON_AddItemToObject(b, "image", img);
 }
 
+/* The safe-stop, as the body carries it: why it happened, who lost the session that held it,
+ * when, and where the program was. The core holds the probe and the gateway resolves it to a
+ * file and a line (ADR-003 D1). */
+cJSON *safe_stop_body(void)
+{
+    cJSON *ss = cJSON_CreateObject();
+    cJSON_AddStringToObject(ss, "reason", g_safe_stop.reason.c_str());
+    cJSON_AddStringToObject(ss, "user", g_safe_stop.user.c_str());
+    cJSON_AddNumberToObject(ss, "time", (double)g_safe_stop.time_ms);
+    if (g_safe_stop.probe != UINT32_MAX) cJSON_AddNumberToObject(ss, "probe", g_safe_stop.probe);
+    if (g_safe_stop.task >= 0) cJSON_AddNumberToObject(ss, "taskId", g_safe_stop.task);
+    return ss;
+}
+
 /* The `hello` body (pm ruling 2). Under g_mu. */
 cJSON *hello_locked(void)
 {
@@ -295,16 +309,7 @@ cJSON *hello_locked(void)
     add_image(b);
     /* The safe-stop, when there is one: the reason, who lost the session that held it, and
      * where the program was. The gateway resolves the probe to a file and a line. */
-    if (g_safe_stop.valid)
-    {
-        cJSON *ss = cJSON_CreateObject();
-        cJSON_AddStringToObject(ss, "reason", g_safe_stop.reason.c_str());
-        cJSON_AddStringToObject(ss, "user", g_safe_stop.user.c_str());
-        cJSON_AddNumberToObject(ss, "time", (double)g_safe_stop.time_ms);
-        if (g_safe_stop.probe != UINT32_MAX) cJSON_AddNumberToObject(ss, "probe", g_safe_stop.probe);
-        if (g_safe_stop.task >= 0) cJSON_AddNumberToObject(ss, "taskId", g_safe_stop.task);
-        cJSON_AddItemToObject(b, "safeStop", ss);
-    }
+    if (g_safe_stop.valid) cJSON_AddItemToObject(b, "safeStop", safe_stop_body());
     return b;
 }
 
@@ -409,16 +414,7 @@ cJSON *run_state_locked(void)
             }
             cJSON_AddItemToObject(b, "location", loc);
         }
-        if (g_safe_stop.valid)
-        {
-            cJSON *ss = cJSON_CreateObject();
-            cJSON_AddStringToObject(ss, "reason", g_safe_stop.reason.c_str());
-            cJSON_AddStringToObject(ss, "user", g_safe_stop.user.c_str());
-            cJSON_AddNumberToObject(ss, "time", (double)g_safe_stop.time_ms);
-            if (g_safe_stop.probe != UINT32_MAX) cJSON_AddNumberToObject(ss, "probe", g_safe_stop.probe);
-            if (g_safe_stop.task >= 0) cJSON_AddNumberToObject(ss, "taskId", g_safe_stop.task);
-            cJSON_AddItemToObject(b, "safeStop", ss);
-        }
+        if (g_safe_stop.valid) cJSON_AddItemToObject(b, "safeStop", safe_stop_body());
     }
     if (any_halt)
     {
