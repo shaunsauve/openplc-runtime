@@ -1301,9 +1301,17 @@ Reply handle(const char *command, cJSON *args)
             const long st    = plc_task_run_state(i, &since);
             cJSON     *t     = cJSON_CreateObject();
             cJSON_AddStringToObject(t, "name", info.name);
+            cJSON_AddNumberToObject(t, "taskId", (double)i);
             cJSON_AddNumberToObject(t, "intervalMs", (double)(info.interval_ns / 1000000));
             cJSON_AddNumberToObject(t, "priority", info.priority);
-            cJSON_AddStringToObject(t, "state", task_state_name(st));
+            /* The task's state in the run-state vocabulary (F040): a task held at its boundary
+             * is paused, and one parked at a breakpoint is halted at it. */
+            const TaskView &v   = g_view[i];
+            const bool      at_bp = v.halted && !v.at_boundary && v.stop.reason == DBG_STOP_BREAKPOINT;
+            const char     *state = "RUNNING";
+            if (st == PLC_TASK_RUN_HELD || st == PLC_TASK_RUN_ABANDONING) state = "PAUSED";
+            else if (st == PLC_TASK_RUN_PARKED) state = at_bp ? "HALTED_AT_BP" : "PAUSED";
+            cJSON_AddStringToObject(t, "state", state);
             cJSON *stats = cJSON_CreateObject();
             cJSON_AddNumberToObject(stats, "cycles", (double)info.cycles);
             cJSON_AddNumberToObject(stats, "overruns", (double)info.overruns);

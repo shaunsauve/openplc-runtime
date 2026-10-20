@@ -22,9 +22,10 @@ runtime answers them UNSUPPORTED and the adapter does not pretend otherwise):
   setFunctionBreakpoints  the wire does not serve it; `supportsFunctionBreakpoints` is false.
   evaluate                the wire does not serve it; `supportsEvaluateName` is false.
   setVariable             the wire does not serve it; `supportsSetVariable` is false.
-  threads                 NOT a wire request at all. DAP's thread list is answered from `status`'s
-                          `tasks[]` (id = `taskId`, name = `task`), which the wire does serve. The
-                          runtime's own `threads` request is `planned`.
+  threads                 the wire serves it now, but DAP's thread list is an id and a name and
+                          `status`'s `tasks[]` already carries both, so the wire's own request
+                          (with the interval, the priority and the scan statistics) is not what
+                          DAP asks for.
 
 CAPABILITIES ARE A PROMISE, so the block below is written as one: every `true` is a request this
 file answers, and nothing else is true. `supportsStepBack`, `supportsSetVariable`,
@@ -448,9 +449,23 @@ class Adapter:
         path = source.get("path") or source.get("name")
         if not path:
             raise DapError("setBreakpoints needs source.path (or source.name)")
-        lines = [int(bp.get("line")) for bp in (args.get("breakpoints") or [])
-                 if isinstance(bp, dict) and bp.get("line") is not None]
-        body = self._call("setBreakpoints", {"file": path, "lines": lines})
+        # The wire's per-breakpoint form: each breakpoint carries its own properties, and one
+        # the runtime does not serve is refused on its own (the answer says so, and the client
+        # sees the breakpoint as unverified). The shorthand is the same request without them.
+        items: List[Dict[str, Any]] = []
+        for bp in (args.get("breakpoints") or []):
+            if not isinstance(bp, dict) or bp.get("line") is None:
+                continue
+            item: Dict[str, Any] = {"line": int(bp["line"])}
+            if bp.get("condition"):
+                item["condition"] = str(bp["condition"])
+            if bp.get("logMessage"):
+                item["logMessage"] = str(bp["logMessage"])
+            hit = _hit_count(bp.get("hitCondition"))
+            if hit is not None:
+                item["hitCount"] = hit
+            items.append(item)
+        body = self._call("setBreakpoints", {"file": path, "breakpoints": items})
         return {"breakpoints": [_bp(bp) for bp in (body.get("breakpoints") or [])]}
 
     def _h_set_exception_breakpoints(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -767,6 +782,29 @@ SUPPORTED_REQUESTS: Tuple[str, ...] = tuple(sorted(Adapter("", None, False).hand
 # --------------------------------------------------------------------------
 # DAP shapes built from wire shapes
 # --------------------------------------------------------------------------
+
+
+def _hit_count(raw: Any) -> Optional[int]:
+    """DAP's `hitCondition` as the wire's `hitCount`.
+
+    The wire's hit count is a number: the breakpoint stops on the n-th hit. DAP writes it as
+    an expression over the hit count, and the form that says the same thing is `== n` (a bare
+    `n` is read the same way). A form the wire cannot say is refused rather than guessed at.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.startswith("=="):
+        text = text[2:].strip()
+    elif text.startswith(">=") or text.startswith("<") or text.startswith("!="):
+        return None
+    try:
+        n = int(text)
+    except ValueError:
+        return None
+    return n if n > 0 else None
 
 
 def _bp(wire: Dict[str, Any]) -> Dict[str, Any]:

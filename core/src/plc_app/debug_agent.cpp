@@ -562,7 +562,9 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
             }
             if (c == 0) continue;
             const uint32_t h = g_slots[s.slot].hits.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (s.hit_target <= 1 || h >= s.hit_target)
+            /* A hit count stops on the n-th hit (ADR-007 D5: "stop on the Nth hit"), not from
+             * the n-th on: the breakpoint fires once, on that hit. */
+            if (s.hit_target <= 1 || h == s.hit_target)
             {
                 bp_wants = true;
                 hits     = h;
