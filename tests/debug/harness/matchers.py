@@ -66,7 +66,10 @@ def _equal(expected: Json, observed: Observed) -> bool:
 # pm ruling 13): the runtime reports debug-info.json's spelling, which STruCpp upper-cases, and
 # an oracle writes the source's. Every comparison folds, not only the ones a caller remembered to
 # fold, which is why the fold lives here, beside the comparison, rather than at the call site.
-IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path"})
+# A task name is an IEC identifier too (IEC 61131-3 6.1.2, pm ruling 12): the runtime reports
+# the name as STruCpp upper-cased it, and the comparison is case-insensitive wherever it is
+# read - the event path already folded it, and the status body is read the same way.
+IDENTIFIER_KEYS = frozenset({"pou", "instance", "name", "path", "task"})
 # A `type` is an IEC identifier too, and a compound one is more than a name: `ARRAY[0..1] OF Seg`
 # and `STRING[80]` carry bounds, which are part of the type and not decoration. A fold may only
 # erase a difference the specification declares insignificant, and the specification declares one:

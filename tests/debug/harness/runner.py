@@ -821,7 +821,10 @@ class _Run:
                     "status.state",
                 )
             if "fields" in expect:
-                self._check(expect["fields"], status, "status.fields")
+                # A task name is an IEC identifier: the comparison folds the case, as the
+                # event path does (pm ruling 12).
+                self._check(expect["fields"], _fold_identifiers(expect["fields"], status),
+                            "status.fields")
         elif kind == "log":
             self._check(expect.get("fields", {}), self.endpoint.log(), "log.fields")
         elif kind == "session":

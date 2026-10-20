@@ -22,7 +22,7 @@
     {"wait": {"wallMs": 10000}},
     {"observe": "plant", "throughout": true, "expect": {
       "witness": {"Fast": {"~ref": "f"}, "Slow": {"~ref": "s"}}, "vtMs": {"Fast": {"~ref": "vf"}, "Slow": {"~ref": "vs"}}}},
-    {"request": "stackTrace", "args": {"task": "Slow"}, "note": "the slow task reports its own stop and stack", "expect": {"success": true, "body": {"frames": {"~any": true}}}},
+    {"request": "stackTrace", "args": {"task": "Slow"}, "note": "the slow task reports its own stop and stack", "expect": {"success": true, "body": {"stackFrames": {"~any": true}}}},
     {"request": "setBreakpoints", "args": {"file": "program.st", "lines": []}, "expect": {"success": true}},
     {"request": "continue", "expect": {"success": true}},
     {"wait": {"wallMs": 500}},
