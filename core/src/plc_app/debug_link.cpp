@@ -114,6 +114,21 @@ std::mutex                     g_mu;
 std::map<std::string, Session> g_sessions;
 int                            g_next_session = 1;
 std::map<uint32_t, std::vector<Bp>> g_bps; /* by probe */
+/* The run-to-cursor's own breakpoint, while it waits for its stop: the probe it is at. It is
+ * spent by the first stop, whatever caused it, so it leaves nothing behind. */
+uint32_t g_cursor_probe = UINT32_MAX;
+/* Where the PLC was when it safe-stopped, and who lost the session that held it. The core
+ * holds the probe and the gateway resolves it to a file and a line (ADR-003 D1). */
+struct SafeStop
+{
+    bool        valid   = false;
+    std::string reason;
+    std::string user;
+    uint32_t    probe   = UINT32_MAX;
+    long        task    = -1;
+    int64_t     time_ms = 0;
+};
+SafeStop g_safe_stop;
 int                            g_next_bp = 1;
 long                           g_last_stop_task = -1; /* the task of the most recent stop */
 bool        g_pausing = false; /* a pause or all-stop wants every task halted */
@@ -278,6 +293,18 @@ cJSON *hello_locked(void)
     cJSON_AddItemToObject(b, "capabilities", caps);
     cJSON_AddNumberToObject(b, "probes", probes);
     add_image(b);
+    /* The safe-stop, when there is one: the reason, who lost the session that held it, and
+     * where the program was. The gateway resolves the probe to a file and a line. */
+    if (g_safe_stop.valid)
+    {
+        cJSON *ss = cJSON_CreateObject();
+        cJSON_AddStringToObject(ss, "reason", g_safe_stop.reason.c_str());
+        cJSON_AddStringToObject(ss, "user", g_safe_stop.user.c_str());
+        cJSON_AddNumberToObject(ss, "time", (double)g_safe_stop.time_ms);
+        if (g_safe_stop.probe != UINT32_MAX) cJSON_AddNumberToObject(ss, "probe", g_safe_stop.probe);
+        if (g_safe_stop.task >= 0) cJSON_AddNumberToObject(ss, "taskId", g_safe_stop.task);
+        cJSON_AddItemToObject(b, "safeStop", ss);
+    }
     return b;
 }
 
@@ -368,6 +395,30 @@ cJSON *run_state_locked(void)
         char why[PLC_SAFE_STOP_REASON_LEN];
         output_hold_reason(why, sizeof why);
         if (why[0]) cJSON_AddStringToObject(b, "reason", why);
+        /* Where the PLC was when it safe-stopped: the probe the halted task was parked at.
+         * The gateway resolves it to a file and a line. */
+        if (g_safe_stop.valid && g_safe_stop.probe != UINT32_MAX)
+        {
+            cJSON *loc = cJSON_CreateObject();
+            cJSON_AddNumberToObject(loc, "probe", g_safe_stop.probe);
+            if (g_safe_stop.task >= 0)
+            {
+                char names[DBG_MAX_TASKS][32];
+                task_count(names);
+                add_task(loc, (size_t)g_safe_stop.task, names[g_safe_stop.task]);
+            }
+            cJSON_AddItemToObject(b, "location", loc);
+        }
+        if (g_safe_stop.valid)
+        {
+            cJSON *ss = cJSON_CreateObject();
+            cJSON_AddStringToObject(ss, "reason", g_safe_stop.reason.c_str());
+            cJSON_AddStringToObject(ss, "user", g_safe_stop.user.c_str());
+            cJSON_AddNumberToObject(ss, "time", (double)g_safe_stop.time_ms);
+            if (g_safe_stop.probe != UINT32_MAX) cJSON_AddNumberToObject(ss, "probe", g_safe_stop.probe);
+            if (g_safe_stop.task >= 0) cJSON_AddNumberToObject(ss, "taskId", g_safe_stop.task);
+            cJSON_AddItemToObject(b, "safeStop", ss);
+        }
     }
     if (any_halt)
     {
@@ -382,25 +433,25 @@ cJSON *run_state_locked(void)
     cJSON_AddBoolToObject(b, "attached", debug_agent_attached());
     /* The breakpoints the runtime holds, and how many of them are armed. A client reads this to
      * know what it set and what is still live: a one-shot that has fired is gone from the list,
-     * and a disabled breakpoint is listed but not armed. */
+     * and a disabled breakpoint is listed but not armed. The agent's table is the authority:
+     * the list is what the runtime holds, not what was asked of it. */
     cJSON *bps = cJSON_CreateArray();
     for (const auto &kv : g_bps)
     {
         dbg_bp_info_t info[DBG_MAX_PER_PROBE];
         const size_t  n = debug_agent_breakpoint_at(kv.first, info, DBG_MAX_PER_PROBE);
-        for (size_t i = 0; i < kv.second.size(); ++i)
+        for (size_t i = 0; i < n; ++i)
         {
             cJSON *o = cJSON_CreateObject();
-            cJSON_AddNumberToObject(o, "id", kv.second[i].id);
+            cJSON_AddNumberToObject(o, "id", info[i].id);
             cJSON_AddNumberToObject(o, "probe", kv.first);
-            cJSON_AddNumberToObject(o, "fileId", kv.second[i].fileId);
-            if (i < n)
-            {
-                cJSON_AddBoolToObject(o, "enabled", info[i].enabled);
-                cJSON_AddBoolToObject(o, "oneShot", info[i].one_shot);
-                if (info[i].hit_target) cJSON_AddNumberToObject(o, "hitCount", info[i].hit_target);
-                cJSON_AddNumberToObject(o, "hits", info[i].hits);
-            }
+            /* The file the breakpoint belongs to: the link's bookkeeping, by the id. */
+            for (const Bp &b : kv.second)
+                if (b.id == info[i].id) { cJSON_AddNumberToObject(o, "fileId", b.fileId); break; }
+            cJSON_AddBoolToObject(o, "enabled", info[i].enabled);
+            cJSON_AddBoolToObject(o, "oneShot", info[i].one_shot);
+            if (info[i].hit_target) cJSON_AddNumberToObject(o, "hitCount", info[i].hit_target);
+            cJSON_AddNumberToObject(o, "hits", info[i].hits);
             cJSON_AddItemToArray(bps, o);
         }
     }
@@ -564,6 +615,13 @@ void agent_pass(void)
             v.stop        = s;
             g_last_stop_task = (long)i;
             g_cycle[i]    = Cycle{}; /* a cycle step ends at any stop: P, or a breakpoint first */
+            /* The run-to-cursor's own breakpoint is spent by the first stop, whatever caused
+             * it: a cursor that reached its line, or a breakpoint on the way there. */
+            if (g_cursor_probe != UINT32_MAX)
+            {
+                debug_agent_clear_kind(g_cursor_probe, DBG_KIND_CURSOR);
+                g_cursor_probe = UINT32_MAX;
+            }
             cJSON *b      = cJSON_CreateObject();
             cJSON_AddStringToObject(b, "reason", reason_name(s.reason));
             add_task(b, i, names[i]);
@@ -571,11 +629,10 @@ void agent_pass(void)
             cJSON_AddNumberToObject(b, "depth", s.depth);
             if (s.reason == DBG_STOP_BREAKPOINT)
             {
-                /* pm ruling 7: breakpoint ids, as setBreakpoints returned them. */
+                /* pm ruling 7: breakpoint ids, as setBreakpoints returned them. The id of the
+                 * breakpoint that stopped, not of every breakpoint on the line. */
                 cJSON *ids = cJSON_CreateArray();
-                auto   it  = g_bps.find(s.probe);
-                if (it != g_bps.end())
-                    for (const Bp &b : it->second) cJSON_AddItemToArray(ids, cJSON_CreateNumber(b.id));
+                if (s.bp_id) cJSON_AddItemToArray(ids, cJSON_CreateNumber(s.bp_id));
                 cJSON_AddItemToObject(b, "breakpointIds", ids);
                 cJSON_AddNumberToObject(b, "hits", s.hits);
             }
@@ -851,11 +908,30 @@ bool lose_session_locked(const std::string &id, bool running)
         end_session_locked(id, running);
         return false;
     }
+    const std::string lost_user = it->second.user;
     g_sessions.erase(it);
     if (g_sessions.empty()) debug_agent_set_attached(false);
     clear_breakpoints_locked();
     g_pausing = false;
     debug_agent_clear_trap();
+    /* Where the PLC was when it safe-stopped: the probe the halted task was parked at. The
+     * lost session's breakpoints are cleared above, so the stop is the only thing left that
+     * says where the program was. */
+    g_safe_stop = SafeStop{};
+    g_safe_stop.valid   = true;
+    g_safe_stop.reason  = "heartbeat_timeout";
+    g_safe_stop.user    = lost_user;
+    g_safe_stop.time_ms = wall_ms_of(mono_ns());
+    for (size_t i = 0; i < DBG_MAX_TASKS; ++i)
+    {
+        const TaskView &v = g_view[i];
+        if (v.halted && !v.at_boundary)
+        {
+            g_safe_stop.probe = v.stop.probe;
+            g_safe_stop.task  = (long)i;
+            break;
+        }
+    }
     const bool requested = plc_request_safe_stop("heartbeat_timeout");
     log_warn("Debug controller lost past P2 while halted: safe-stop %s",
              requested ? "requested" : "refused (no dispatcher)");
@@ -1209,6 +1285,47 @@ Reply handle(const char *command, cJSON *args)
 
     if (args && !cJSON_IsObject(args)) return fail("BAD_REQUEST", "arguments must be an object");
     if (!std::strcmp(command, "status")) return success(run_state_locked());
+    if (!std::strcmp(command, "threads"))
+    {
+        /* A130: the tasks as threads, with the configuration and the scan statistics each
+         * task keeps. The task's own state, so a client can tell a held task from a running
+         * one without asking twice. */
+        cJSON *list = cJSON_CreateArray();
+        char   names[DBG_MAX_TASKS][32];
+        size_t n = task_count(names);
+        for (size_t i = 0; i < n; ++i)
+        {
+            plc_task_info_t info;
+            if (plc_task_info(i, &info) != 0) continue;
+            int64_t    since = 0;
+            const long st    = plc_task_run_state(i, &since);
+            cJSON     *t     = cJSON_CreateObject();
+            cJSON_AddStringToObject(t, "name", info.name);
+            cJSON_AddNumberToObject(t, "intervalMs", (double)(info.interval_ns / 1000000));
+            cJSON_AddNumberToObject(t, "priority", info.priority);
+            cJSON_AddStringToObject(t, "state", task_state_name(st));
+            cJSON *stats = cJSON_CreateObject();
+            cJSON_AddNumberToObject(stats, "cycles", (double)info.cycles);
+            cJSON_AddNumberToObject(stats, "overruns", (double)info.overruns);
+            cJSON *scan = cJSON_CreateObject();
+            cJSON_AddNumberToObject(scan, "current", (double)info.scan_ms_current);
+            cJSON_AddNumberToObject(scan, "min", (double)info.scan_ms_min);
+            cJSON_AddNumberToObject(scan, "max", (double)info.scan_ms_max);
+            cJSON_AddNumberToObject(scan, "avg", (double)info.scan_ms_avg);
+            cJSON_AddItemToObject(stats, "scanMs", scan);
+            cJSON *cycle = cJSON_CreateObject();
+            cJSON_AddNumberToObject(cycle, "current", (double)info.cycle_ms_current);
+            cJSON_AddNumberToObject(cycle, "min", (double)info.cycle_ms_min);
+            cJSON_AddNumberToObject(cycle, "max", (double)info.cycle_ms_max);
+            cJSON_AddNumberToObject(cycle, "avg", (double)info.cycle_ms_avg);
+            cJSON_AddItemToObject(stats, "cycleMs", cycle);
+            cJSON_AddItemToObject(t, "stats", stats);
+            cJSON_AddItemToArray(list, t);
+        }
+        cJSON *b = cJSON_CreateObject();
+        cJSON_AddItemToObject(b, "threads", list);
+        return success(b);
+    }
     if (!std::strcmp(command, "attach"))
     {
         cJSON *user = arg(args, "user"), *role = arg(args, "role"), *p2 = arg(args, "p2");
@@ -1234,7 +1351,8 @@ Reply handle(const char *command, cJSON *args)
     const bool known = is_command(command, {"detach", "terminate", "beatClient", "setBreakpoints",
                                             "clearAllBreakpoints", "continue", "pause", "next",
                                             "stepIn", "stepOut", "stop", "stackTrace",
-                                            "readLeaves", "cycleStep", "restart",
+                                            "readLeaves", "cycleStep", "restart", "threads",
+                                            "runToCursor",
                                             "readFrameLocals", "force", "unforce", "unforceAll",
                                             "listForces"});
     if (!known)
@@ -1406,8 +1524,27 @@ Reply handle(const char *command, cJSON *args)
         {
             dbg_bp_spec_t specs[DBG_MAX_PER_PROBE];
             size_t        n = 0;
-            for (const Item &it : items)
-                if (it.parsed && it.probe == p && n < DBG_MAX_PER_PROBE) specs[n++] = it.spec;
+            /* The id of a breakpoint travels with its position among the breakpoints of this
+             * kind, so a replace keeps the client's id. */
+            std::vector<Bp> old_same;
+            auto             old = g_bps.find(p);
+            if (old != g_bps.end())
+                for (const Bp &b : old->second)
+                    if (b.kind == kind) old_same.push_back(b);
+            size_t i = 0;
+            for (size_t k = 0; k < items.size(); ++k)
+            {
+                Item &it = items[k];
+                if (!it.parsed || it.probe != p || n >= DBG_MAX_PER_PROBE) continue;
+                Bp b;
+                b.fileId = fid;
+                b.kind   = kind;
+                b.id     = i < old_same.size() ? old_same[i].id : g_next_bp++;
+                it.spec.id = b.id;
+                specs[n++] = it.spec;
+                item_ids[k] = b.id;
+                i++;
+            }
             const dbg_status_t s = debug_agent_set_breakpoint(p, kind, specs, n);
             if (s != DBG_OK)
             {
@@ -1424,20 +1561,11 @@ Reply handle(const char *command, cJSON *args)
                     }
                 continue;
             }
-            /* The probe's list: the kinds this request does not touch keep their place, and the
-             * id of a breakpoint travels with its position among the breakpoints of this kind. */
+            /* The probe's list: the kinds this request does not touch keep their place. */
             std::vector<Bp> list;
-            std::vector<Bp> old_same;
-            auto             old = g_bps.find(p);
             if (old != g_bps.end())
-            {
                 for (const Bp &b : old->second)
-                {
-                    if (b.kind == kind) old_same.push_back(b);
-                    else list.push_back(b);
-                }
-            }
-            size_t i = 0;
+                    if (b.kind != kind) list.push_back(b);
             for (size_t k = 0; k < items.size(); ++k)
             {
                 const Item &it = items[k];
@@ -1445,11 +1573,8 @@ Reply handle(const char *command, cJSON *args)
                 Bp b;
                 b.fileId = fid;
                 b.kind   = kind;
-                /* The id travels with the position, so a replace keeps the client's id. */
-                b.id = i < old_same.size() ? old_same[i].id : g_next_bp++;
+                b.id     = it.spec.id;
                 list.push_back(b);
-                item_ids[k] = b.id;
-                i++;
             }
             ids[p] = list;
         }
@@ -1555,6 +1680,27 @@ Reply handle(const char *command, cJSON *args)
     }
     /* pm ruling 8: continue is all-stop, whatever `task` says. */
     if (!std::strcmp(command, "continue")) return resume_all_locked();
+
+    /* Run to cursor: a breakpoint of the runtime's own, at the cursor's probe, and the tasks
+     * resume. It is one shot and it leaves nothing behind: the first stop spends it. */
+    if (!std::strcmp(command, "runToCursor"))
+    {
+        cJSON *p = arg(args, "probe");
+        if (!is_int(p) || p->valuedouble < 0)
+            return fail("BAD_REQUEST", "runToCursor needs a probe");
+        const uint32_t probe = (uint32_t)p->valuedouble;
+        if (debug_agent_probe_count() == 0)
+            return fail("NO_PROBES", "the running program has no probes");
+        dbg_bp_spec_t spec{};
+        spec.kind     = DBG_KIND_CURSOR;
+        spec.enabled  = true;
+        spec.one_shot = true;
+        const dbg_status_t s = debug_agent_set_breakpoint(probe, DBG_KIND_CURSOR, &spec, 1);
+        if (s != DBG_OK)
+            return fail(status_code(s), "the run-to-cursor breakpoint was refused");
+        g_cursor_probe = probe;
+        return resume_all_locked();
+    }
 
     /* Steps: the task must be halted; only it resumes (DAP singleThread). Without a task, the
      * task of the most recent stop (pm ruling 8). */

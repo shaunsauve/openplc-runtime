@@ -155,6 +155,8 @@ COMMANDS: Mapping[str, Command] = {
         _cmd("heartbeat", Kind.SESSION, local=True),
         _cmd("status", Kind.READ, local=True),
         _cmd("version", Kind.READ, local=True),
+        # The tasks as threads: each one's name, interval, priority, state and scan statistics.
+        _cmd("threads", Kind.READ),
         _cmd("setLock", Kind.ADMIN, args={"on": Arg("bool", True), "reason": Arg("str")}, local=True),
         _cmd(
             "setBreakpoints",

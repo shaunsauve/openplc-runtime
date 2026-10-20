@@ -469,7 +469,7 @@ class DebugGateway:
     def _handshake(
         self, hello: JsonObj, caps: JsonObj, session: ClientSession, resume_token: str
     ) -> JsonObj:
-        return {
+        out: JsonObj = {
             **self._versions(hello),
             "image": _obj(hello.get("image")),
             "comparison": session.comparison,
@@ -481,6 +481,23 @@ class DebugGateway:
             "locked": self.locked,
             "resumeToken": resume_token,
         }
+        safe_stop = _obj(hello.get("safeStop"))
+        if safe_stop:
+            # The safe-stop a new client attaches to: why it happened, who lost the session
+            # that held it, and where the program was (ADR-004 D7.3).
+            out["safeStop"] = self._safe_stop(safe_stop)
+        return out
+
+    def _safe_stop(self, safe_stop: JsonObj) -> JsonObj:
+        """The safe-stop, with the probe the core holds resolved to a file and a line."""
+        out = dict(safe_stop)
+        probe = safe_stop.get("probe")
+        if isinstance(probe, int):
+            info = self._debug_info()
+            loc = info.location(probe) if info is not None else None
+            if loc is not None:
+                out["location"] = loc.as_json()
+        return out
 
     def _resume(self, sid: str, token: str, hello: JsonObj, caps: JsonObj) -> JsonObj:
         """ADR-005 D2.4: the resume token alone rebinds a session within P2, then rotates."""
@@ -1387,6 +1404,10 @@ class DebugGateway:
             loc = info.location(probe) if info is not None else None
             if loc is not None:
                 out["location"] = loc.as_json()
+        if event == "runState":
+            # The run state carries the stop's location as a probe; the names are the
+            # gateway's half (ADR-003 D1).
+            self._enrich_locations(out, self._debug_info())
         with self.lock:
             recipients = list(self.sessions.values())
         target = body.get("session")

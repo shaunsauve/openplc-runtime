@@ -37,6 +37,7 @@ struct BpSpec
 {
     uint32_t hit_target; /* 0 or 1: every hit; n: from the n-th hit on */
     uint32_t instance;   /* the instance's leaf index, or DBG_NO_INSTANCE for any */
+    int32_t  id;         /* the id the client knows this breakpoint by */
     uint16_t slot;       /* the breakpoint's side slot: its hit count and its one-shot flag */
     uint16_t cond_off;   /* offset into the record's condition buffer */
     uint16_t cond_len;   /* 0: unconditional */
@@ -334,6 +335,7 @@ dbg_status_t publish_locked(uint32_t probe, const dbg_bp_spec_t *specs, size_t c
         BpSpec &s    = r.spec[i];
         s.hit_target = specs[i].hit_target;
         s.instance   = specs[i].instance;
+        s.id         = specs[i].id;
         s.cond_off   = (uint16_t)coff;
         s.cond_len   = (uint16_t)specs[i].cond_len;
         s.one_shot   = specs[i].one_shot ? 1 : 0;
@@ -393,6 +395,7 @@ size_t old_of_kind(const BpRecord *old, uint8_t kind, bool same, dbg_bp_spec_t *
         out[n].cond_len   = s.cond_len;
         out[n].hit_target = s.hit_target;
         out[n].instance   = s.instance;
+        out[n].id         = s.id;
         out[n].kind       = s.kind;
         out[n].one_shot   = s.one_shot != 0;
         out[n].enabled    = s.enabled != 0;
@@ -532,6 +535,7 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
 
     bool     bp_wants = false;
     uint32_t hits     = 0;
+    int32_t  bp_id    = 0;
     const BpRecord *r = g_bp[id].load(std::memory_order_acquire);
     if (r)
     {
@@ -562,6 +566,7 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
             {
                 bp_wants = true;
                 hits     = h;
+                bp_id    = s.id;
                 if (s.one_shot) g_slots[s.slot].oneshot_taken.store(1, std::memory_order_relaxed);
                 break;
             }
@@ -590,6 +595,7 @@ extern "C" void strucpp_dbg_hit(uint32_t id)
                                                                                           : DBG_STOP_STEP);
     t->stop.probe    = id;
     t->stop.hits     = hits;
+    t->stop.bp_id    = bp_id;
     t->stop.depth    = tl_depth;
     t->stop.since_ns = (int64_t)now.tv_sec * 1000000000LL + now.tv_nsec;
     t->stop.head     = tl_head;
@@ -805,6 +811,7 @@ extern "C" size_t debug_agent_breakpoint_at(uint32_t probe, dbg_bp_info_t *out, 
     {
         out[i].hit_target = r.spec[i].hit_target;
         out[i].hits       = g_slots[r.spec[i].slot].hits.load(std::memory_order_relaxed);
+        out[i].id         = r.spec[i].id;
         out[i].kind       = r.spec[i].kind;
         out[i].one_shot   = r.spec[i].one_shot != 0;
         out[i].enabled    = r.spec[i].enabled != 0;

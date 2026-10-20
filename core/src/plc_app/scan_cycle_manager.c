@@ -84,6 +84,7 @@ void scan_cycle_tracker_start(scan_cycle_tracker_t *tracker)
     // Cycle time: actual elapsed since previous start
     int64_t cycle_time_us = (int64_t)(now_us - tracker->last_start_us);
     plc_timing_stats_t *s = &tracker->stats;
+    s->cycle_time_last = cycle_time_us;
     if (cycle_time_us < s->cycle_time_min) s->cycle_time_min = cycle_time_us;
     if (cycle_time_us > s->cycle_time_max) s->cycle_time_max = cycle_time_us;
     tracker->cycle_time_sum +=
@@ -115,6 +116,7 @@ void scan_cycle_tracker_end(scan_cycle_tracker_t *tracker)
     tracker->halted_us = 0;
     int64_t scan_time_us = (int64_t)(now_us - tracker->last_start_us);
     plc_timing_stats_t *s = &tracker->stats;
+    s->scan_time_last = scan_time_us;
     if (scan_time_us < s->scan_time_min) s->scan_time_min = scan_time_us;
     if (scan_time_us > s->scan_time_max) s->scan_time_max = scan_time_us;
     tracker->scan_time_sum +=

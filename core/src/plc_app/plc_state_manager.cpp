@@ -2439,6 +2439,36 @@ extern "C" size_t plc_task_names(char names[][32], size_t max)
     return n;
 }
 
+extern "C" int plc_task_info(size_t task_idx, plc_task_info_t *out)
+{
+    if (!out) return -1;
+    pthread_mutex_lock(&plc_tasks_lock);
+    if (!plc_tasks || task_idx >= plc_task_count)
+    {
+        pthread_mutex_unlock(&plc_tasks_lock);
+        return -1;
+    }
+    const PlcTaskCtx &t = plc_tasks[task_idx];
+    std::snprintf(out->name, sizeof out->name, "%s", t.name);
+    out->interval_ns = t.interval_ns;
+    out->priority    = t.priority;
+    plc_timing_stats_t stats;
+    scan_cycle_tracker_snapshot(&t.tracker, &stats);
+    out->cycles   = stats.scan_count;
+    out->overruns = stats.overruns;
+    /* The tracker counts in microseconds; the debugger reads milliseconds. */
+    out->scan_ms_current = stats.scan_time_last / 1000;
+    out->scan_ms_min     = stats.scan_time_min == INT64_MAX ? 0 : stats.scan_time_min / 1000;
+    out->scan_ms_max     = stats.scan_time_max / 1000;
+    out->scan_ms_avg     = stats.scan_time_avg / 1000;
+    out->cycle_ms_current = stats.cycle_time_last / 1000;
+    out->cycle_ms_min     = stats.cycle_time_min == INT64_MAX ? 0 : stats.cycle_time_min / 1000;
+    out->cycle_ms_max     = stats.cycle_time_max / 1000;
+    out->cycle_ms_avg     = stats.cycle_time_avg / 1000;
+    pthread_mutex_unlock(&plc_tasks_lock);
+    return 0;
+}
+
 /* ---- Boot with a hold file ---- */
 
 extern "C" bool plc_boot_from_hold_file(void)

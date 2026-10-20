@@ -372,6 +372,30 @@ int64_t plc_task_overruns(size_t task_idx);
 /** @brief Number of tasks of the running program (0 with none), and each one's name. */
 size_t plc_task_names(char names[][32], size_t max);
 
+/** One task's configuration and statistics, for the debugger's thread list (A130). */
+typedef struct
+{
+    char    name[32];
+    int64_t interval_ns;   /* the task's interval */
+    int     priority;      /* the IEC priority the configuration gave it */
+    int64_t cycles;        /* the scans the task has finished */
+    int64_t overruns;      /* the scans that overran its interval */
+    int64_t scan_ms_current;
+    int64_t scan_ms_min;
+    int64_t scan_ms_max;
+    int64_t scan_ms_avg;
+    int64_t cycle_ms_current;
+    int64_t cycle_ms_min;
+    int64_t cycle_ms_max;
+    int64_t cycle_ms_avg;
+} plc_task_info_t;
+
+/**
+ * @brief One task's facts, for the debugger's thread list.
+ * @return 0 on success, -1 when the index names no task.
+ */
+int plc_task_info(size_t task_idx, plc_task_info_t *out);
+
 /**
  * @brief Virtual time of one task, in ns since the program started (ADR-004 D4).
  *

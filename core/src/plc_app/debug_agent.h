@@ -99,6 +99,7 @@ typedef struct
     dbg_stop_reason_t reason;
     uint32_t          probe;
     uint32_t          hits;     /* the breakpoint's hit count, 0 for a trap stop */
+    int32_t           bp_id;    /* the id of the breakpoint that stopped, 0 for a trap stop */
     uint32_t          depth;    /* linked frames at the stop */
     int64_t           since_ns; /* CLOCK_MONOTONIC */
     /* The task's innermost linked frame (ADR-001 D3). Valid only while the task stays parked on
@@ -162,6 +163,7 @@ typedef struct
     size_t         cond_len;   /* 0: unconditional */
     uint32_t       hit_target; /* 0 or 1 stops on every hit; n stops from the n-th hit on */
     uint32_t       instance;   /* the instance's leaf index, or DBG_NO_INSTANCE for any */
+    int32_t        id;         /* the id the client knows this breakpoint by */
     uint8_t        kind;       /* DBG_KIND_* */
     bool           one_shot;   /* clears itself on its first hit */
     bool           enabled;    /* false: listed, but not armed */
@@ -187,6 +189,7 @@ typedef struct
 {
     uint32_t hit_target;
     uint32_t hits;
+    int32_t  id;
     uint8_t  kind;
     bool     one_shot;
     bool     enabled;

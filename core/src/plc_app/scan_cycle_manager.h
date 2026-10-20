@@ -18,10 +18,12 @@ typedef struct
     int64_t scan_time_min;
     int64_t scan_time_max;
     int64_t scan_time_avg;
+    int64_t scan_time_last; /* the most recent scan, so a client can show the current one */
 
     int64_t cycle_time_min;
     int64_t cycle_time_max;
     int64_t cycle_time_avg;
+    int64_t cycle_time_last;
 
     int64_t cycle_latency_min;
     int64_t cycle_latency_max;
